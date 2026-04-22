@@ -37,9 +37,6 @@ dev = [
     "mypy>=1.10",
 ]
 
-[project.scripts]
-auto-ext = "auto_ext.cli:app"
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["auto_ext*"]
@@ -60,3 +57,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# Let pytest import the auto_ext package straight out of the project root
+# without requiring `pip install -e .` (we deliberately avoid editable
+# installs so no absolute path from the user's workarea is written into
+# ~/.local/lib/python3.11/site-packages/).
+pythonpath = ["."]

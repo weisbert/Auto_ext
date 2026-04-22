@@ -37,12 +37,25 @@ cd Auto_ext
 bash scripts/install_offline.sh
 ```
 
-Runs `pip install --no-index --find-links ./wheels/ -e .[dev]` and a smoke test.
+Installs every bundled third-party wheel and runs a smoke test.
+**The `auto_ext` package itself is NOT pip-installed**: `run.sh` puts
+the project root on `PYTHONPATH` instead, so no absolute workarea path
+ends up in `~/.local/lib/python3.11/site-packages/` (and no stray entry
+in `pip list`).
+
+### Launch
+
+```
+./run.sh [args]                                 # chdir to ../ (workarea), set PYTHONPATH, python -m auto_ext
+# equivalently, from anywhere:
+PYTHONPATH=/abs/path/to/Auto_ext python3.11 -m auto_ext [args]
+```
 
 ## Tests
 
 ```
-pytest
+cd Auto_ext
+pytest            # pyproject.toml sets pythonpath = ["."] so no install needed
 ```
 
 Phase 1 only ships a sanity test; real test coverage lands with the core

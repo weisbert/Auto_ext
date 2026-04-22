@@ -7,8 +7,11 @@
 # Steps:
 #   1. Resolve a Python 3.11 interpreter ($PYTHON > python3.11 > python3 > python).
 #   2. Validate its version matches the MANIFEST target (cp311).
-#   3. "$PYTHON" -m pip install --no-index --find-links ./wheels/ -e .[dev].
-#   4. Smoke-import auto_ext.core.config and PyQt5.QtCore.
+#   3. "$PYTHON" -m pip install --no-index --find-links ./wheels/ wheels/*.whl
+#      -- installs every bundled third-party dependency. The auto_ext
+#      package itself is NOT pip-installed (run.sh sets PYTHONPATH so
+#      no absolute workarea path leaks into site-packages).
+#   4. Smoke-import auto_ext.core.config (via PYTHONPATH) and PyQt5.QtCore.
 #   5. On any failure, dump MANIFEST.txt + pip list + Python info for debugging.
 #
 # Env overrides:
@@ -19,7 +22,9 @@
 #                                 /software/public/python/3.11.4/bin/python).
 #
 # Flags:
-#   --no-dev    Install without the [dev] extra (production deploy).
+#   --no-dev    Currently a no-op on what gets installed -- every .whl in
+#               the bundle is installed regardless. Drop --include-dev in
+#               scripts/download_wheels.py to produce a slimmer bundle.
 #
 # The script is idempotent: rerunning is safe.
 set -euo pipefail
@@ -141,18 +146,21 @@ echo "[install_offline] pip ${pip_version} (bound to ${PYTHON})."
 
 cd "${PROJECT_ROOT}"
 
-# Two-step install to dodge pip's resolver backtracking on
-# (editable + extras + find-links + partially-satisfied-from-system-site).
-# Step 1: install every wheel in the bundle as explicit file args -- pip
-#         installs each wheel directly without consulting the resolver.
-# Step 2: editable-install auto_ext itself with --no-deps; its deps are
-#         already satisfied either by the wheels we just installed or by
-#         system site-packages (PyQt5 in particular).
+# Install every third-party wheel in the bundle as explicit file args.
+# Passing wheel paths directly skips pip's resolver backtracking entirely,
+# which is important when system site-packages already satisfies some
+# requirements (common on managed RHEL/CentOS servers).
 #
-# Consequence: --no-dev still installs the dev wheels (pytest/ruff/mypy)
-# because they're in the bundle. If you want a truly minimal production
-# install, re-run scripts/download_wheels.py WITHOUT --include-dev first
-# so the bundle itself has no dev wheels.
+# We intentionally do NOT `pip install -e .` for auto_ext itself. Editable
+# install writes the project's absolute path into
+# ~/.local/lib/python3.11/site-packages/__editable__.auto_ext-0.1.0.pth
+# and leaks it via `pip list` / `pip show auto_ext`. This project is a
+# tool launched via ./run.sh (which sets PYTHONPATH), not a library to be
+# pip-installed.
+#
+# Note: --no-dev is a no-op on what gets installed from the bundle --
+# every *.whl present in wheels/ is installed. Re-run download_wheels.py
+# WITHOUT --include-dev to produce a slimmer bundle for production hosts.
 
 shopt -s nullglob
 bundle_wheels=("${WHEELS_DIR}"/*.whl)
@@ -162,18 +170,16 @@ if [ "${#bundle_wheels[@]}" -eq 0 ]; then
     exit 1
 fi
 
-echo "[install_offline] step 1/2: installing ${#bundle_wheels[@]} bundled wheels ..."
+echo "[install_offline] installing ${#bundle_wheels[@]} bundled third-party wheels ..."
 "${PYTHON}" -m pip install --no-index --find-links "${WHEELS_DIR}" "${bundle_wheels[@]}"
 
-install_spec="."
-if [ "${WITH_DEV}" -eq 1 ]; then
-    install_spec=".[dev]"
-fi
-echo "[install_offline] step 2/2: editable install ${install_spec} (--no-deps) ..."
-"${PYTHON}" -m pip install --no-index --find-links "${WHEELS_DIR}" --no-deps -e "${install_spec}"
+# Clean up any editable install left over from earlier script versions.
+# Silent: if it was never installed, pip exits nonzero, we ignore.
+"${PYTHON}" -m pip uninstall -y auto_ext auto-ext >/dev/null 2>&1 || true
 
 echo "[install_offline] smoke test (core): importing auto_ext.core.config ..."
-"${PYTHON}" -c "from auto_ext.core import config; print('auto_ext core import OK')"
+PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON}" -c "from auto_ext.core import config; print('auto_ext core import OK')"
 
 # PyQt5 import is *not* a Phase 1 gate. The server's PyQt5 can have ABI
 # problems against its libQt5Core.so.5 (happens when PyQt5 was built for
@@ -194,4 +200,6 @@ else
 fi
 
 echo "[install_offline] success."
+echo "[install_offline] launch the tool with: ./run.sh [args]"
+echo "[install_offline] or:  PYTHONPATH=${PROJECT_ROOT} ${PYTHON} -m auto_ext [args]"
 # Let trap exit cleanly.
