@@ -141,12 +141,36 @@ echo "[install_offline] pip ${pip_version} (bound to ${PYTHON})."
 
 cd "${PROJECT_ROOT}"
 
+# Two-step install to dodge pip's resolver backtracking on
+# (editable + extras + find-links + partially-satisfied-from-system-site).
+# Step 1: install every wheel in the bundle as explicit file args -- pip
+#         installs each wheel directly without consulting the resolver.
+# Step 2: editable-install auto_ext itself with --no-deps; its deps are
+#         already satisfied either by the wheels we just installed or by
+#         system site-packages (PyQt5 in particular).
+#
+# Consequence: --no-dev still installs the dev wheels (pytest/ruff/mypy)
+# because they're in the bundle. If you want a truly minimal production
+# install, re-run scripts/download_wheels.py WITHOUT --include-dev first
+# so the bundle itself has no dev wheels.
+
+shopt -s nullglob
+bundle_wheels=("${WHEELS_DIR}"/*.whl)
+shopt -u nullglob
+if [ "${#bundle_wheels[@]}" -eq 0 ]; then
+    echo "[install_offline] FATAL: no *.whl files under ${WHEELS_DIR}" >&2
+    exit 1
+fi
+
+echo "[install_offline] step 1/2: installing ${#bundle_wheels[@]} bundled wheels ..."
+"${PYTHON}" -m pip install --no-index --find-links "${WHEELS_DIR}" "${bundle_wheels[@]}"
+
 install_spec="."
 if [ "${WITH_DEV}" -eq 1 ]; then
     install_spec=".[dev]"
 fi
-echo "[install_offline] installing ${install_spec} from ${WHEELS_DIR} ..."
-"${PYTHON}" -m pip install --no-index --find-links "${WHEELS_DIR}" -e "${install_spec}"
+echo "[install_offline] step 2/2: editable install ${install_spec} (--no-deps) ..."
+"${PYTHON}" -m pip install --no-index --find-links "${WHEELS_DIR}" --no-deps -e "${install_spec}"
 
 echo "[install_offline] smoke test: importing auto_ext.core.config + PyQt5.QtCore ..."
 "${PYTHON}" -c "from auto_ext.core import config; from PyQt5 import QtCore; print('OK', QtCore.QT_VERSION_STR)"
