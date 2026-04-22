@@ -54,12 +54,26 @@ class PlaceholderInventory:
 
 
 def _make_jinja_env() -> Environment:
-    """Build the Jinja environment used by both render and scan paths."""
+    """Build the Jinja environment used by both render and scan paths.
+
+    Delimiters are ``[[ ]]`` / ``[% %]`` / ``[# #]`` instead of Jinja's
+    defaults. Rationale: Calibre ``.qci`` files use Tcl brace literals such
+    as ``*lvsPreTriggers: {{rm -rf %d/svdb} process 1}`` which collide with
+    default ``{{ ... }}`` variable syntax and make the template unparseable.
+    XML CDATA (``]]>``) would collide with ``]]`` but none of the supplied
+    production templates use CDATA.
+    """
     return Environment(
         loader=BaseLoader(),
         undefined=StrictUndefined,
         keep_trailing_newline=True,
         autoescape=False,
+        variable_start_string="[[",
+        variable_end_string="]]",
+        block_start_string="[%",
+        block_end_string="%]",
+        comment_start_string="[#",
+        comment_end_string="#]",
     )
 
 

@@ -1,19 +1,35 @@
 #!/usr/bin/env bash
 # Mock for Calibre LVS (``calibre -gui -lvs -runset <file.qci> -batch``).
-# Echoes a banner, writes a minimal LVS summary report, exits 0.
-# With --fail, writes a failing report and exits 1.
+# Reads ``*lvsRunDir`` + ``*lvsReportFile`` from the qci and writes the
+# minimal LVS summary report there (honouring the template's declared
+# output path so Auto_ext's CalibreTool.parse_result can find it).
+# With --fail (or AUTO_EXT_MOCK_FORCE_FAIL=calibre), writes a failing
+# report and exits 1.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_common.sh
 . "${HERE}/_common.sh"
 
-out_dir="$(_mock_out_dir)"
-mkdir -p "${out_dir}"
+runset="$(_mock_flag -runset "$@" || true)"
 
-runset="$(_mock_flag --runset "$@" || true)"
-report="${out_dir}/$(basename "${runset:-run}.lvs.rep")"
+# Locate report path from the qci if present, else fall back to mock_out.
+report=""
+if [ -n "${runset}" ] && [ -f "${runset}" ]; then
+    run_dir=$(grep -E '^\*lvsRunDir:' "${runset}" | head -1 | sed -E 's/^\*lvsRunDir:[[:space:]]*//')
+    report_name=$(grep -E '^\*lvsReportFile:' "${runset}" | head -1 | sed -E 's/^\*lvsReportFile:[[:space:]]*//')
+    if [ -n "${run_dir}" ] && [ -n "${report_name}" ]; then
+        mkdir -p "${run_dir}"
+        report="${run_dir}/${report_name}"
+    fi
+fi
+if [ -z "${report}" ]; then
+    out_dir="$(_mock_out_dir)"
+    mkdir -p "${out_dir}"
+    report="${out_dir}/$(basename "${runset:-run}.lvs.rep")"
+fi
 
 echo "// MOCK calibre invoked with: $*"
+echo "// MOCK calibre: report path -> ${report}"
 
 if _mock_should_fail "$@"; then
     cat > "${report}" <<'EOF'
@@ -22,7 +38,7 @@ if _mock_should_fail "$@"; then
 #   INCORRECT
 #   DISCREPANCIES = 3
 EOF
-    echo "// MOCK calibre: wrote failing report to ${report}" >&2
+    echo "// MOCK calibre: wrote failing report" >&2
     exit 1
 fi
 
@@ -32,5 +48,5 @@ cat > "${report}" <<'EOF'
 #   CORRECT
 #   DISCREPANCIES = 0
 EOF
-echo "// MOCK calibre: wrote passing report to ${report}"
+echo "// MOCK calibre: wrote passing report"
 exit 0

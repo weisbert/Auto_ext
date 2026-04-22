@@ -1,0 +1,43 @@
+*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/CFXXX.wodio.qcilvs
+*lvsRunDir: [[output_dir]]
+*lvsLayoutPaths: [[cell]].calibre.db
+*lvsLayoutPrimary: [[cell]]
+*lvsLayoutLibrary: [[library]]
+*lvsLayoutView: [[lvs_layout_view]]
+*lvsLayoutGetFromViewer: 1
+*lvsSourcePath: [[cell]].src.net
+*lvsSourcePrimary: [[cell]]
+*lvsSourceLibrary: [[library]]
+*lvsSourceView: [[lvs_source_view]]
+*lvsSourceGetFromViewer: 1
+*lvsSpiceFile: [[cell]].sp
+*lvsDeviceFilterOptionsEnabled: 0
+*lvsLayoutDeviceFilterOptions: AG RC RE RG
+*lvsSourceDeviceFilterOptions: AG RC RE RG
+*lvsPowerNames: AHVDD AHVDDB AHVDDG AHVDDR AHVDDWELL AVDD AVDDB AVDDBG AVDDG AVDDR AVDWELL DHVDD DVDD HVDDWELL TACVDD TAVD33 TAVD33PST TAVDD TAVDDPST TVDD VD33 VDD VDD5V VDDESD VDDG VDDM VDDPST VDDSA VDWELL
+*lvsGroundNames: AGND AHVSS AHVSSB AHVSSG AHVSSR AHVSSUB AVSS AVSSB AVSSBG AVSSG AVSSR AVSSUB DHVSS DVSS GND HVSSUB TACVSS TAVSS TAVSSPST TVSS VS33 VSS VSSESD VSSG VSSM VSSPST VSSUB
+*lvsRecognizeGates: NONE
+*lvsERCDatabase: [[cell]].erc.results
+*lvsERCSummaryFile: [[cell]].erc.summary
+*lvsReportFile: [[cell]].lvs.report
+*lvsSVDBcci: 1
+*lvsReportOptions: S
+*lvsPreTriggers: {{rm -rf %d/svdb} process 1}
+*lvsPostTriggers: {{rm -rf %d/query_output} process 1} {{mkdir %d/query_output} process 1} {{calibre -query_input $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck/query_cmd -query svdb } process 1}
+*lvsAbortOnSupplyError: 0
+*cmnWarnLayoutOverwrite: 0
+*cmnWarnSourceOverwrite: 0
+*cmnShowOptions: 1
+*cmnSpecifyLicenseWaitTime: 1
+*cmnLicenseWaitTime: 10
+*cmnReleaseLicense: 1
+*cmnNumTurbo: 2
+*cmnRunMT: 1
+*cmnRunHyper: 1
+*cmnTemplate_RN: [[output_dir]]
+*cmnSlaveHosts: {use {}} {hostName {}} {cpuCount {}} {a32a64 {}} {rsh {}} {maxMem {}} {workingDir {}} {layerDir {}} {mgcLibPath {}} {launchName {}}
+*cmnLSFSlaveTbl: {use 1} {totalCpus 1} {minCpus 1} {architecture {{}}} {minMemory {{}}} {resourceOptions {{}}} {submitOptions {{}}}
+*cmnGridSlaveTbl: {use 1} {totalCpus 1} {minCpus 1} {architecture {{}}} {minMemory {{}}} {resourceOptions {{}}} {submitOptions {{}}}
+*cmnFDILayoutLibrary: [[library]]
+*cmnFDILayoutView: [[lvs_layout_view]]
+*cmnFDIDEFLayoutPath: [[cell]].def

@@ -1,0 +1,21 @@
+<?xml version="1.0" ?> <reductionParameters version="2024.1"> <options> <!-- General Options -->
+<inputView value="[[library]]/[[cell]]/[[out_file]]"/>
+<outputView value="av_ext_red"/>
+<logVerboseLevel value="trace"/>
+<cpu value="1"/>
+<viewsToReduce value="av_extracted"/>
+
+<!-- Parsing options -->
+<rModel value="analogLib/presistor/symbol"/>
+<cModel value="analogLib/pcapacitor/symbol"/>
+<lModel value="analogLib/pinductor/symbol"/>
+<kModel value="analogLib/pmind/symbol"/>
+
+<!-- Reduction settings -->
+<criterion value="standard"/>
+<frequencyLimit value="[[jivaro_frequency_limit | default(14)]]"/>
+<errorMax value="[[jivaro_error_max | default(2)]]"/>
+<reduceFloatingNets value="false"/>
+<decouplingAutoThreshold value="false"/>
+
+<!-- Selectivity settings --> </options> </reductionParameters>

@@ -1,0 +1,29 @@
+# project.yaml — PDK / project level config. Usually one per project.
+#
+# Assumes you have sourced your Cadence/PDK setup script FIRST, so these
+# env vars are already in the shell:
+#
+#     WORK_ROOT, WORK_ROOT2, VERIFY_ROOT, SETUP_ROOT, PDK_LAYER_MAP_FILE
+#
+# Auto_ext reads them from the shell — no duplication here needed. If an
+# env var is missing, add it under env_overrides below.
+#
+# Run from the workarea root (./run.sh cd's there for you):
+#     ./run.sh check-env --config-dir Auto_ext_pro/config
+#     ./run.sh run --config-dir Auto_ext_pro/config --dry-run
+
+templates:
+  si: Auto_ext_pro/templates/si/default.env.j2
+  calibre: Auto_ext_pro/templates/calibre/wiodio_noConnectByNetName.qci.j2
+  quantus: Auto_ext_pro/templates/quantus/ext.cmd.j2
+  jivaro: Auto_ext_pro/templates/jivaro/default.xml.j2
+
+# Uncomment and fill in only if ``check-env`` reports a var as "missing":
+# env_overrides:
+#   PDK_LAYER_MAP_FILE: /abs/path/to/layers.map
+#   VERIFY_ROOT: /abs/path/to/verify
+
+# Output directory pattern. Default per-cell isolation:
+#     ${WORK_ROOT}/cds/verify/QCI_PATH_<cell>
+# Change to match your old flow (all cells share one dir):
+# extraction_output_dir: "${WORK_ROOT}/cds/verify/QCI_PATH"

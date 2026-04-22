@@ -1,0 +1,30 @@
+# tasks.yaml — which cells to run. Replaces the old Run_ext.txt.
+#
+# Each list entry becomes one or more tasks:
+# - scalar fields -> one task
+# - list-valued fields (library / cell / lvs_layout_view / lvs_source_view)
+#   auto-expand to the Cartesian product.
+#
+# Run_ext.txt field -> tasks.yaml field:
+#   LibraryName     -> library
+#   CellName        -> cell
+#   lvsSourceView   -> lvs_source_view
+#   lvsLayoutView   -> lvs_layout_view  (list -> multiple tasks)
+#   GndName         -> ground_net
+#   OutFileName     -> out_file
+#   ifJivaro Yes/No -> jivaro.enabled
+#   frequencyLimit  -> jivaro.frequency_limit
+#   errorMax        -> jivaro.error_max
+#
+# Start with ONE task, get it green end-to-end, then add more.
+
+- library: TODO_LIBRARY_NAME
+  cell: TODO_CELL_NAME
+  lvs_layout_view: layout            # or [layout, layout_test] for both
+  lvs_source_view: schematic
+  ground_net: vss
+  out_file: av_ext
+  jivaro:
+    enabled: false                   # flip to true once si/calibre/qrc are green
+    frequency_limit: 14
+    error_max: 2

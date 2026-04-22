@@ -51,15 +51,32 @@ class ProjectConfig(BaseModel):
     """Schema for ``project.yaml``. ``source_path`` and ``raw`` are filled
     in by :func:`load_project` after validation and are excluded from
     serialization so they do not round-trip back into YAML.
+
+    All path-root fields are optional: after sourcing your Cadence/PDK
+    setup, the values live in shell env vars (``$WORK_ROOT`` etc.) and
+    Auto_ext reads them directly via ``extraction_output_dir`` /
+    ``intermediate_dir`` / ``layer_map``. Setting the fields explicitly
+    is only useful for the GUI env panel (Phase 5) and for ``migrate``
+    to round-trip (Phase 4).
     """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    work_root: Path
-    verify_root: Path
-    setup_root: Path
-    employee_id: str
-    layer_map: Path
+    #: Display-only; if None, GUI panels will show ``$WORK_ROOT`` from shell.
+    work_root: Path | None = None
+    #: Display-only; if None, GUI panels will show ``$VERIFY_ROOT`` from shell.
+    verify_root: Path | None = None
+    #: Display-only; if None, GUI panels will show ``$SETUP_ROOT`` from shell.
+    setup_root: Path | None = None
+
+    #: Substituted into template paths like ``/tmpdata/RFIC/rfic_share/<id>/...``.
+    #: If None, resolved at render time via ``$USER`` / ``$USERNAME`` / fallback.
+    employee_id: str | None = None
+
+    #: Default refers to the env var set by the PDK setup; override only if
+    #: you need a specific file different from ``$PDK_LAYER_MAP_FILE``.
+    layer_map: Path = Path("${PDK_LAYER_MAP_FILE}")
+
     env_overrides: dict[str, str] = Field(default_factory=dict)
     extraction_output_dir: str = "${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"
     intermediate_dir: str = "${WORK_ROOT2}"

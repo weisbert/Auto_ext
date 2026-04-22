@@ -1,0 +1,20 @@
+# Demo project.yaml — runnable on any machine without sourcing a PDK setup.
+# env_overrides here fakes the env vars the real flow expects from the
+# shell. Production config/project.yaml is much shorter (see config/).
+#
+# Run from Auto_ext/ root:
+#     cd C:\code\Auto_ext\Auto_ext
+#     python -m auto_ext run --config-dir examples/demo --dry-run
+
+env_overrides:
+  WORK_ROOT: /tmp/demo
+  WORK_ROOT2: /tmp/demo
+  VERIFY_ROOT: /tmp/demo/verify
+  SETUP_ROOT: /tmp/demo/setup
+  PDK_LAYER_MAP_FILE: /tmp/demo/pdk/layers.map
+
+templates:
+  si: templates/si/default.env.j2
+  calibre: templates/calibre/wiodio_noConnectByNetName.qci.j2
+  quantus: templates/quantus/ext.cmd.j2
+  jivaro: templates/jivaro/default.xml.j2

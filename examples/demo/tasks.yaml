@@ -1,0 +1,12 @@
+# Demo task. Run from examples/demo/ so the ../../templates/ paths in
+# project.yaml resolve. Use --dry-run to render without a real Cadence install.
+- library: DEMO_LIB
+  cell: inv
+  lvs_layout_view: [layout, layout_test]
+  lvs_source_view: schematic
+  ground_net: vss
+  out_file: av_ext
+  jivaro:
+    enabled: true
+    frequency_limit: 14
+    error_max: 2

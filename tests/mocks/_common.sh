@@ -15,6 +15,14 @@ _mock_should_fail() {
     for arg in "$@"; do
         [ "$arg" = "--fail" ] && return 0
     done
+    # Integration tests trigger a specific mock's failure via an env var so the
+    # runner (which does not know about --fail) can exercise the failure path.
+    # AUTO_EXT_MOCK_FORCE_FAIL is a comma-separated list of mock basenames.
+    local name
+    name=$(basename "$0")
+    case ",${AUTO_EXT_MOCK_FORCE_FAIL:-}," in
+        *",${name},"*) return 0 ;;
+    esac
     return 1
 }
 

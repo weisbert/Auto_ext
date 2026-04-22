@@ -60,11 +60,18 @@ def test_load_project_missing_file(tmp_path: Path) -> None:
         load_project(tmp_path / "does_not_exist.yaml")
 
 
-def test_load_project_missing_required_field(tmp_path: Path) -> None:
-    p = tmp_path / "incomplete.yaml"
-    p.write_text("work_root: /x\n", encoding="utf-8")
-    with pytest.raises(ConfigError):
-        load_project(p)
+def test_load_project_empty_yaml_uses_all_defaults(tmp_path: Path) -> None:
+    # After making path-roots + employee_id optional, a project.yaml with
+    # only the section header is a valid minimal config — env vars from
+    # the sourced PDK setup carry the real values.
+    p = tmp_path / "minimal.yaml"
+    p.write_text("{}\n", encoding="utf-8")
+    project = load_project(p)
+    assert project.work_root is None
+    assert project.verify_root is None
+    assert project.setup_root is None
+    assert project.employee_id is None
+    assert str(project.layer_map) == "${PDK_LAYER_MAP_FILE}"
 
 
 def test_load_project_wrong_top_level_type(tmp_path: Path) -> None:

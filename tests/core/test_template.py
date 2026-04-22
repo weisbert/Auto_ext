@@ -86,7 +86,7 @@ def test_render_double_dollar_escape_not_unresolved(tmp_path: Path) -> None:
 
 def test_render_jinja_syntax_error(tmp_path: Path) -> None:
     tpl = tmp_path / "bad.j2"
-    tpl.write_text("{% if %}unterminated", encoding="utf-8")
+    tpl.write_text("[% if %]unterminated", encoding="utf-8")
 
     with pytest.raises(TemplateError, match="Jinja syntax error"):
         render_template(tpl, context={}, env={})
@@ -98,7 +98,7 @@ def test_render_env_runs_before_jinja(tmp_path: Path) -> None:
     tpl = tmp_path / "t.j2"
     tpl.write_text("value = $FOO\n", encoding="utf-8")
 
-    result = render_template(tpl, context={"ignored": "X"}, env={"FOO": "{{ ignored }}"})
+    result = render_template(tpl, context={"ignored": "X"}, env={"FOO": "[[ ignored ]]"})
     assert "value = X" in result
 
 
@@ -144,7 +144,7 @@ def test_scan_broken_jinja_warns_but_returns(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     tpl = tmp_path / "bad.j2"
-    tpl.write_text("$FOO {% if %}broken", encoding="utf-8")
+    tpl.write_text("$FOO [% if %]broken", encoding="utf-8")
 
     caplog.set_level(logging.WARNING, logger="auto_ext.core.template")
     inv = scan_placeholders(tpl)
