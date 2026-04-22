@@ -1,0 +1,6 @@
+# Cartesian expansion: 2 libraries x 2 cells x 2 layout views = 8 tasks.
+# Test also verifies the fixed expansion order: library -> cell -> layout -> source.
+- library: [lib_a, lib_b]
+  cell: [c1, c2]
+  lvs_layout_view: [layout, layout_test]
+  lvs_source_view: schematic

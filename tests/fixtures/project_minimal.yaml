@@ -1,0 +1,6 @@
+# Minimal valid project.yaml used by tests/core/test_config.py
+work_root: /data/work
+verify_root: /data/verify
+setup_root: /data/setup
+employee_id: alice
+layer_map: /pdk/layers.map

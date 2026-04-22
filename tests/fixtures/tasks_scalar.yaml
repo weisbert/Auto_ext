@@ -1,0 +1,5 @@
+# One task, all scalar fields, expansion produces exactly 1 TaskConfig.
+- library: TOP_LIB
+  cell: inv
+  lvs_layout_view: layout
+  lvs_source_view: schematic

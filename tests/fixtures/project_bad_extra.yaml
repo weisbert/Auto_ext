@@ -1,0 +1,7 @@
+# project.yaml with an unknown top-level field; must fail validation.
+work_root: /data/work
+verify_root: /data/verify
+setup_root: /data/setup
+employee_id: alice
+layer_map: /pdk/layers.map
+bogus_field: "this field is not in the schema"

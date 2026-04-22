@@ -1,0 +1,4 @@
+# Empty list for a list-expandable field must fail with ConfigError.
+- library: []
+  cell: inv
+  lvs_layout_view: layout
