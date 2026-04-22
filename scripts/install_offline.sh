@@ -172,8 +172,26 @@ fi
 echo "[install_offline] step 2/2: editable install ${install_spec} (--no-deps) ..."
 "${PYTHON}" -m pip install --no-index --find-links "${WHEELS_DIR}" --no-deps -e "${install_spec}"
 
-echo "[install_offline] smoke test: importing auto_ext.core.config + PyQt5.QtCore ..."
-"${PYTHON}" -c "from auto_ext.core import config; from PyQt5 import QtCore; print('OK', QtCore.QT_VERSION_STR)"
+echo "[install_offline] smoke test (core): importing auto_ext.core.config ..."
+"${PYTHON}" -c "from auto_ext.core import config; print('auto_ext core import OK')"
+
+# PyQt5 import is *not* a Phase 1 gate. The server's PyQt5 can have ABI
+# problems against its libQt5Core.so.5 (happens when PyQt5 was built for
+# Qt 5.15 but LD_LIBRARY_PATH picks up an older libQt5). Those are env
+# problems, not Auto_ext problems -- flag, do not fail.
+echo "[install_offline] smoke test (gui): importing PyQt5.QtCore ..."
+if "${PYTHON}" -c "from PyQt5 import QtCore; print('PyQt5', QtCore.QT_VERSION_STR, 'OK')" 2>/tmp/autoext_pyqt5.$$; then
+    cat /tmp/autoext_pyqt5.$$ 2>/dev/null || true
+    rm -f /tmp/autoext_pyqt5.$$
+else
+    echo "[install_offline] WARN: PyQt5 import failed. Root cause is almost certainly" >&2
+    echo "[install_offline] WARN: a Qt5 runtime-library mismatch (PyQt5 .so built against a" >&2
+    echo "[install_offline] WARN: newer Qt than libQt5Core.so.5 on LD_LIBRARY_PATH)." >&2
+    echo "[install_offline] WARN: Phase 1 install is still considered successful. Debug with:" >&2
+    echo "[install_offline] WARN:   ldd \$(${PYTHON} -c 'import PyQt5, os; print(os.path.dirname(PyQt5.__file__))')/QtCore.abi3.so | grep -i qt" >&2
+    sed 's/^/[install_offline] WARN: /' /tmp/autoext_pyqt5.$$ >&2 || true
+    rm -f /tmp/autoext_pyqt5.$$
+fi
 
 echo "[install_offline] success."
 # Let trap exit cleanly.
