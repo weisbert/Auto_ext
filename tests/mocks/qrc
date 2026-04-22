@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Mock for Quantus parasitic extraction (``qrc -cmd <file>``).
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_common.sh
+. "${HERE}/_common.sh"
+
+out_dir="$(_mock_out_dir)"
+mkdir -p "${out_dir}"
+artifact="${out_dir}/mock.qrc.spef"
+
+echo "// MOCK qrc invoked with: $*"
+
+if _mock_should_fail "$@"; then
+    echo "// MOCK qrc: simulated failure" >&2
+    exit 2
+fi
+
+cat > "${artifact}" <<'EOF'
+// MOCK SPEF output placeholder
+*SPEF "IEEE 1481-1998"
+*DESIGN "mock"
+EOF
+echo "// MOCK qrc: wrote ${artifact}"
+exit 0

@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto_ext"
+version = "0.1.0"
+description = "PyQt5 GUI + plugin-based automation for the Cadence post-layout extraction flow (si/strmout/calibre/qrc/jivaro)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [
+    { name = "Auto_ext maintainers" },
+]
+
+# Runtime dependencies.
+# NOTE: PyQt5 is intentionally excluded. It is pre-installed on the target
+# Linux server (5.15.9) and is never uploaded via the offline wheel bundle.
+# Every other dependency must have a cp311 manylinux2014_x86_64 wheel
+# because the target server runs glibc 2.17.
+dependencies = [
+    "PyQt5>=5.15",
+    "Jinja2>=3.1",
+    "ruamel.yaml>=0.18",
+    "pydantic>=2.5",
+    "typer>=0.12",
+    "rich>=13",
+    "qtawesome>=1.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-qt>=4",
+    "pytest-mock>=3",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+auto-ext = "auto_ext.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["auto_ext*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]  # long lines acceptable in templates/docstrings
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

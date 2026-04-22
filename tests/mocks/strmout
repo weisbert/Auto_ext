@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Mock for Cadence GDS export (``strmout``).
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_common.sh
+. "${HERE}/_common.sh"
+
+out_dir="$(_mock_out_dir)"
+mkdir -p "${out_dir}"
+gds="${out_dir}/mock.gds"
+
+echo "// MOCK strmout invoked with: $*"
+
+if _mock_should_fail "$@"; then
+    echo "// MOCK strmout: simulated failure" >&2
+    exit 5
+fi
+
+# Write a tiny binary-looking placeholder so callers that stat the file see a non-empty GDS.
+printf 'MOCKGDS\x00' > "${gds}"
+echo "// MOCK strmout: wrote ${gds}"
+exit 0

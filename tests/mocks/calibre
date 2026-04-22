@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Mock for Calibre LVS (``calibre -gui -lvs -runset <file.qci> -batch``).
+# Echoes a banner, writes a minimal LVS summary report, exits 0.
+# With --fail, writes a failing report and exits 1.
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_common.sh
+. "${HERE}/_common.sh"
+
+out_dir="$(_mock_out_dir)"
+mkdir -p "${out_dir}"
+
+runset="$(_mock_flag --runset "$@" || true)"
+report="${out_dir}/$(basename "${runset:-run}.lvs.rep")"
+
+echo "// MOCK calibre invoked with: $*"
+
+if _mock_should_fail "$@"; then
+    cat > "${report}" <<'EOF'
+# MOCK Calibre LVS Report (failing)
+# Summary section:
+#   INCORRECT
+#   DISCREPANCIES = 3
+EOF
+    echo "// MOCK calibre: wrote failing report to ${report}" >&2
+    exit 1
+fi
+
+cat > "${report}" <<'EOF'
+# MOCK Calibre LVS Report
+# Summary section:
+#   CORRECT
+#   DISCREPANCIES = 0
+EOF
+echo "// MOCK calibre: wrote passing report to ${report}"
+exit 0

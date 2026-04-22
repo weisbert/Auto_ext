@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Mock for Cadence schematic netlister (``si -batch -command netlist``).
+# Reads si.env from cwd and would emit a netlist; the mock just creates one.
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=_common.sh
+. "${HERE}/_common.sh"
+
+out_dir="$(_mock_out_dir)"
+mkdir -p "${out_dir}"
+netlist="${out_dir}/mock.si.netlist"
+
+echo "// MOCK si invoked with: $*"
+echo "// MOCK si: cwd=$(pwd); si.env present? $([ -f si.env ] && echo yes || echo no)"
+
+if _mock_should_fail "$@"; then
+    echo "// MOCK si: simulated failure" >&2
+    exit 4
+fi
+
+cat > "${netlist}" <<'EOF'
+// MOCK netlist
+.subckt mock_top
+.ends
+EOF
+echo "// MOCK si: wrote ${netlist}"
+exit 0

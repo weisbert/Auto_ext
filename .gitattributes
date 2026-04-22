@@ -1,0 +1,15 @@
+# Force LF on everything textual so scripts do not break when cloned on Linux.
+# The mock EDA binaries and shell scripts in particular refuse to parse with \r\n.
+* text=auto eol=lf
+
+# Explicitly force LF for files Linux will execute.
+*.sh          text eol=lf
+*.py          text eol=lf
+run.sh        text eol=lf
+scripts/*     text eol=lf
+tests/mocks/* text eol=lf
+
+# Binary-ish things (none right now, but future-proofed).
+*.whl    binary
+*.gds    binary
+*.png    binary
