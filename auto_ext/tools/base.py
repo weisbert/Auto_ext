@@ -112,16 +112,27 @@ class Tool(ABC):
         context: dict[str, Any],
         env: dict[str, str],
         out_path: Path,
+        *,
+        knobs: dict[str, Any] | None = None,
     ) -> Path:
         """Render ``template_path`` with ``context`` + ``env`` to ``out_path``.
 
-        Default uses :func:`auto_ext.core.template.render_template` (env
-        substitution before Jinja, strict-env mode). Tools override only
-        if they need non-standard rendering.
+        When ``knobs`` is ``None``, load the sidecar manifest and fall
+        back to its declared defaults — convenient for callers that
+        don't plumb per-task knob overrides (e.g. template unit tests).
+        Pass an explicit ``{}`` to opt out of default-filling; callers
+        that have already resolved knobs (the runner) pass the resolved
+        dict directly.
         """
         from auto_ext.core.template import render_template as _render
 
-        rendered = _render(template_path, context=context, env=env)
+        if knobs is None:
+            from auto_ext.core.manifest import load_manifest, resolve_knob_values
+
+            manifest = load_manifest(template_path)
+            knobs = resolve_knob_values(manifest, {}, {}, {})
+
+        rendered = _render(template_path, context=context, env=env, knobs=knobs)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(rendered, encoding="utf-8")
         return out_path

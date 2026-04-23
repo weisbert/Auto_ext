@@ -12,6 +12,7 @@ order so ``task_id`` assignment is reproducible.
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections import Counter
 from io import StringIO
@@ -82,6 +83,11 @@ class ProjectConfig(BaseModel):
     intermediate_dir: str = "${WORK_ROOT2}"
     templates: TemplatePaths = Field(default_factory=TemplatePaths)
 
+    #: Project-wide knob overrides keyed by stage name, e.g.
+    #: ``{"quantus": {"exclude_floating_nets_limit": 100}}``. Values are
+    #: validated against the template manifest at render time, not here.
+    knobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
     source_path: Path | None = Field(default=None, exclude=True)
     raw: Any = Field(default=None, exclude=True)
 
@@ -103,6 +109,9 @@ class TaskSpec(BaseModel):
     out_file: str | None = None
     jivaro: JivaroConfig = Field(default_factory=JivaroConfig)
     continue_on_lvs_fail: bool = False
+    #: Per-task knob overrides. Same shape as :attr:`ProjectConfig.knobs`.
+    #: Precedence is applied at render time (task > project > manifest).
+    knobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class TaskConfig(BaseModel):
@@ -120,6 +129,7 @@ class TaskConfig(BaseModel):
     out_file: str | None
     jivaro: JivaroConfig
     continue_on_lvs_fail: bool
+    knobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     spec_index: int
     expansion_index: int
 
@@ -279,6 +289,7 @@ def _expand_spec(
                             out_file=spec.out_file,
                             jivaro=spec.jivaro,
                             continue_on_lvs_fail=spec.continue_on_lvs_fail,
+                            knobs=copy.deepcopy(spec.knobs),
                             spec_index=spec_index,
                             expansion_index=expansion_index,
                         )

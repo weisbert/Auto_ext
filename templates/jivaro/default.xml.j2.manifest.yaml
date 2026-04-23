@@ -1,0 +1,3 @@
+template: default.xml.j2
+description: Jivaro parasitic reduction config.
+knobs: {}

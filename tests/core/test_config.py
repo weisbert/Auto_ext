@@ -261,3 +261,97 @@ def test_template_paths_rejects_unknown_key() -> None:
 def test_jivaro_config_rejects_unknown_key() -> None:
     with pytest.raises(ValidationError):
         JivaroConfig(enabled=True, bogus=1)  # type: ignore[call-arg]
+
+
+# ---- knobs field ----------------------------------------------------------
+
+
+def test_project_config_accepts_knobs(tmp_path: Path) -> None:
+    p = tmp_path / "project.yaml"
+    p.write_text(
+        "knobs:\n  quantus:\n    temperature: 60.0\n    limit: 100\n",
+        encoding="utf-8",
+    )
+    project = load_project(p)
+    assert project.knobs == {"quantus": {"temperature": 60.0, "limit": 100}}
+
+
+def test_project_config_knobs_default_empty(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    assert project.knobs == {}
+
+
+def test_task_spec_accepts_knobs(tmp_path: Path) -> None:
+    p = tmp_path / "tasks.yaml"
+    p.write_text(
+        "- library: L\n"
+        "  cell: c\n"
+        "  lvs_layout_view: layout\n"
+        "  knobs:\n"
+        "    calibre:\n"
+        "      foo: true\n"
+        "    quantus:\n"
+        "      temperature: 70.0\n",
+        encoding="utf-8",
+    )
+    tasks = load_tasks(p)
+    assert len(tasks) == 1
+    assert tasks[0].knobs == {
+        "calibre": {"foo": True},
+        "quantus": {"temperature": 70.0},
+    }
+
+
+def test_task_spec_knobs_default_empty(fixtures_dir: Path) -> None:
+    tasks = load_tasks(fixtures_dir / "tasks_scalar.yaml")
+    assert tasks[0].knobs == {}
+
+
+def test_task_spec_rejects_knob_singular_typo(tmp_path: Path) -> None:
+    p = tmp_path / "t.yaml"
+    p.write_text(
+        "- library: L\n"
+        "  cell: c\n"
+        "  lvs_layout_view: layout\n"
+        "  knob:\n"
+        "    quantus:\n"
+        "      temperature: 60.0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError):
+        load_tasks(p)
+
+
+def test_task_knobs_preserved_across_expansion(tmp_path: Path) -> None:
+    p = tmp_path / "t.yaml"
+    p.write_text(
+        "- library: L\n"
+        "  cell: [c1, c2]\n"
+        "  lvs_layout_view: [layout, layout_test]\n"
+        "  knobs:\n"
+        "    quantus:\n"
+        "      temperature: 60.0\n",
+        encoding="utf-8",
+    )
+    tasks = load_tasks(p)
+    # 2 cells x 2 layouts = 4 tasks, each carries the same knobs.
+    assert len(tasks) == 4
+    for t in tasks:
+        assert t.knobs == {"quantus": {"temperature": 60.0}}
+
+
+def test_task_knobs_deep_copied_per_expansion(tmp_path: Path) -> None:
+    # Mutating knobs on one expanded task must not leak to siblings.
+    p = tmp_path / "t.yaml"
+    p.write_text(
+        "- library: L\n"
+        "  cell: [c1, c2]\n"
+        "  lvs_layout_view: layout\n"
+        "  knobs:\n"
+        "    quantus:\n"
+        "      temperature: 60.0\n",
+        encoding="utf-8",
+    )
+    tasks = load_tasks(p)
+    assert tasks[0].knobs is not tasks[1].knobs
+    assert tasks[0].knobs["quantus"] is not tasks[1].knobs["quantus"]

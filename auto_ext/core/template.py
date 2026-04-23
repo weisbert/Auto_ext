@@ -83,11 +83,15 @@ def render_template(
     env: dict[str, str],
     *,
     strict_env: bool = True,
+    knobs: dict[str, Any] | None = None,
 ) -> str:
     """Render a ``.j2`` template with env-vars pre-substituted.
 
     Order: read file -> :func:`substitute_env` -> optional strict scan for
-    leftover env refs -> Jinja render with ``context``.
+    leftover env refs -> Jinja render with ``context`` merged with
+    ``knobs``. Knob names share the flat Jinja namespace with identity
+    variables; a collision raises :class:`TemplateError` (the manifest
+    loader rejects this earlier — this is belt-and-suspenders).
 
     Raises :class:`TemplateError` for missing files, Jinja syntax errors,
     :class:`StrictUndefined` violations, and (under ``strict_env=True``)
@@ -112,10 +116,20 @@ def render_template(
 
     substituted = substitute_env(source, env)
 
+    merged_context = dict(context)
+    if knobs:
+        collisions = sorted(set(knobs) & set(merged_context))
+        if collisions:
+            raise TemplateError(
+                f"knob name(s) collide with identity variables in "
+                f"{template_path}: {collisions}"
+            )
+        merged_context.update(knobs)
+
     jenv = _make_jinja_env()
     try:
         template = jenv.from_string(substituted)
-        return template.render(**context)
+        return template.render(**merged_context)
     except UndefinedError as exc:
         raise TemplateError(f"undefined Jinja variable in {template_path}: {exc}") from exc
     except TemplateSyntaxError as exc:

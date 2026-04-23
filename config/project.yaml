@@ -27,3 +27,12 @@ templates:
 #     ${WORK_ROOT}/cds/verify/QCI_PATH_<cell>
 # Change to match your old flow (all cells share one dir):
 # extraction_output_dir: "${WORK_ROOT}/cds/verify/QCI_PATH"
+
+# Project-wide knob overrides. Each template's *.manifest.yaml declares
+# the knobs it accepts + defaults; entries here override those defaults
+# for every task in this project. Individual tasks can override again
+# via tasks.yaml[...].knobs; a single run can override with --knob.
+# knobs:
+#   quantus:
+#     temperature: 25.0
+#     exclude_floating_nets_limit: 10000

@@ -76,6 +76,13 @@ def run(
         "--workarea",
         help="EDA cwd (where si.env lands). Defaults to --auto-ext-root parent.",
     ),
+    knob: Optional[list[str]] = typer.Option(
+        None,
+        "--knob",
+        help="Override a knob for this run. Format: <stage>.<name>=<value>. "
+        "Repeatable. Quote values containing spaces, e.g. "
+        '--knob "quantus.temperature=60".',
+    ),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
 ) -> None:
     """Run extraction tasks through the configured EDA tools (serial)."""
@@ -110,6 +117,12 @@ def run(
     if continue_on_lvs_fail:
         tasks = [t.model_copy(update={"continue_on_lvs_fail": True}) for t in tasks]
 
+    try:
+        cli_knobs = _parse_cli_knobs(knob or [], STAGE_ORDER)
+    except AutoExtError as exc:
+        typer.secho(f"config error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
     root = (auto_ext_root or config_dir.parent).resolve()
     wa = (workarea or root.parent).resolve()
 
@@ -122,6 +135,7 @@ def run(
             workarea=wa,
             verbose=verbose,
             dry_run=dry_run,
+            cli_knobs=cli_knobs,
         )
     except AutoExtError as exc:
         typer.secho(f"run aborted: {exc}", fg=typer.colors.RED, err=True)
@@ -192,6 +206,36 @@ def check_env(
         console.print(f"[red]missing vars: {resolution.missing}[/]")
         raise typer.Exit(code=1)
     raise typer.Exit(code=0)
+
+
+def _parse_cli_knobs(
+    entries: list[str], valid_stages: tuple[str, ...]
+) -> dict[str, dict[str, str]]:
+    """Parse repeated ``--knob stage.name=value`` into a nested string dict.
+
+    Values stay strings here; :func:`auto_ext.core.manifest.resolve_knob_values`
+    does the per-knob type coercion at render time.
+    """
+    from auto_ext.core.errors import ConfigError
+
+    out: dict[str, dict[str, str]] = {}
+    for entry in entries:
+        if "=" not in entry:
+            raise ConfigError(f"--knob {entry!r}: missing '=' (expected stage.name=value)")
+        lhs, value = entry.split("=", 1)
+        if "." not in lhs:
+            raise ConfigError(
+                f"--knob {entry!r}: missing '.' in {lhs!r} (expected stage.name=value)"
+            )
+        stage, name = lhs.split(".", 1)
+        if stage not in valid_stages:
+            raise ConfigError(
+                f"--knob {entry!r}: unknown stage {stage!r}; valid: {list(valid_stages)}"
+            )
+        if not name:
+            raise ConfigError(f"--knob {entry!r}: empty knob name")
+        out.setdefault(stage, {})[name] = value
+    return out
 
 
 def _print_summary(summary) -> None:

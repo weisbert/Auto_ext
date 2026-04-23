@@ -41,7 +41,7 @@ python3.11 -c "import jinja2, ruamel.yaml, pydantic, typer, rich; print('deps ok
 python3.11 -m pytest tests/ -v
 ```
 
-预期：**150 全绿**（Windows 上 skip 的 6 个 symlink 测试在 Linux 上会跑起来）。
+预期：**202 全绿**（Windows 上 skip 的 6 个 symlink 测试在 Linux 上会跑起来）。
 
 如果这 150 不全绿，**停下来**先修再往下走 —— 后面出问题排查不清楚是 real-env 的锅还是 Phase 3 代码的锅。
 
@@ -189,6 +189,20 @@ LVS 过了之后：
 ```
 
 默认所有 5 个 stage（si → strmout → calibre → quantus → jivaro）。Jivaro 因为 task 里 `jivaro.enabled: false` 会被 silent skip。等整链通了再把 jivaro 开开。
+
+### 5.7 单次跑调 knob（可选）
+
+模板里的部分数字常量（温度、耦合电容阈值、浮动网上限等）在 sidecar `<template>.j2.manifest.yaml` 里声明为 knob。默认值不动，想临时试一个参数就用 `--knob`：
+
+```bash
+./run.sh run --config-dir Auto_ext_pro/config \
+  --knob quantus.temperature=60 \
+  --knob quantus.exclude_floating_nets_limit=10000
+```
+
+格式：`<stage>.<knob_name>=<value>`，可重复。精度 / 范围错误（`--knob quantus.temperature=abc` 或超出 manifest 声明的 `range`）会在 render 之前以 exit code 2 拒绝，不会污染 EDA 运行。
+
+想长期固定某个 knob 值：写到 `project.yaml`（全项目） 或 `tasks.yaml`（单 task） 的 `knobs:` 块里。优先级从低到高：`manifest default` < `project.yaml.knobs` < `tasks.yaml[...].knobs` < `--knob CLI`。
 
 ---
 

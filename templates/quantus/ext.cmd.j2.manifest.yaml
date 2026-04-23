@@ -1,0 +1,22 @@
+template: ext.cmd.j2
+description: Quantus OPTION COMMAND FILE for extracted-view RC extraction.
+knobs:
+  exclude_floating_nets_limit:
+    type: int
+    default: 5000
+    range: [100, 100000]
+    description: Upper bound on floating nets dropped by filter_cap.
+  coupling_cap_threshold_absolute:
+    type: float
+    default: 0.01
+    unit: F
+    description: Minimum coupling capacitance to keep (absolute, Farads).
+  coupling_cap_threshold_relative:
+    type: float
+    default: 0.001
+    description: Minimum coupling capacitance to keep (ratio).
+  temperature:
+    type: float
+    default: 55.0
+    unit: "C"
+    description: Process technology simulation temperature.

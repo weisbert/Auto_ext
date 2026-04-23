@@ -153,3 +153,51 @@ def test_scan_broken_jinja_warns_but_returns(
     assert "FOO" in inv.env_vars
     assert inv.jinja_variables == set()
     assert any("jinja parse failed" in m.lower() for m in caplog.messages)
+
+
+# ---- render_template knobs ----------------------------------------------
+
+
+def test_render_with_knobs_substitutes(tmp_path: Path) -> None:
+    tpl = tmp_path / "k.j2"
+    tpl.write_text("limit = [[limit]]\ntemp = [[temperature]]\n", encoding="utf-8")
+
+    result = render_template(
+        tpl,
+        context={},
+        env={},
+        knobs={"limit": 5000, "temperature": 55.0},
+    )
+    assert "limit = 5000" in result
+    assert "temp = 55.0" in result
+
+
+def test_render_knobs_default_none_still_works(tmp_path: Path) -> None:
+    # Templates that reference no knobs and callers that pass no knobs
+    # must render identically to the pre-knob behaviour.
+    tpl = tmp_path / "k.j2"
+    tpl.write_text("cell = [[cell]]\n", encoding="utf-8")
+
+    result = render_template(tpl, context={"cell": "inv"}, env={})
+    assert "cell = inv" in result
+
+
+def test_render_knob_name_collision_with_context_raises(tmp_path: Path) -> None:
+    tpl = tmp_path / "k.j2"
+    tpl.write_text("cell = [[cell]]\n", encoding="utf-8")
+
+    with pytest.raises(TemplateError, match="collide with identity"):
+        render_template(
+            tpl,
+            context={"cell": "inv"},
+            env={},
+            knobs={"cell": "override"},
+        )
+
+
+def test_render_missing_knob_raises_undefined(tmp_path: Path) -> None:
+    tpl = tmp_path / "k.j2"
+    tpl.write_text("limit = [[limit]]\n", encoding="utf-8")
+
+    with pytest.raises(TemplateError, match="undefined Jinja variable"):
+        render_template(tpl, context={}, env={}, knobs={})

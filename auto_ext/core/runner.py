@@ -31,6 +31,7 @@ from typing import Any
 from auto_ext.core.config import ProjectConfig, TaskConfig
 from auto_ext.core.env import discover_required_vars, resolve_env, substitute_env
 from auto_ext.core.errors import AutoExtError, ConfigError
+from auto_ext.core.manifest import load_manifest, resolve_knob_values
 from auto_ext.core.workdir import serial_workdir
 from auto_ext.tools.base import Tool, ToolResult
 from auto_ext.tools.calibre import CalibreTool
@@ -104,6 +105,7 @@ def run_tasks(
     workarea: Path,
     verbose: bool = False,
     dry_run: bool = False,
+    cli_knobs: dict[str, dict[str, Any]] | None = None,
 ) -> RunSummary:
     """Execute the stage × task matrix serially.
 
@@ -116,6 +118,10 @@ def run_tasks(
       (override → shell → missing); any missing raises
       :class:`auto_ext.core.errors.EnvResolutionError` before any
       subprocess starts.
+
+    ``cli_knobs`` is the ``{stage: {name: str}}`` dict parsed from
+    ``--knob`` options; values are still strings here and are coerced at
+    render time per :class:`auto_ext.core.manifest.KnobSpec`.
     """
     _validate_stages(stages)
     _validate_tasks(tasks, stages)
@@ -127,6 +133,8 @@ def run_tasks(
     subprocess_env: dict[str, str] = {**os.environ, **project.env_overrides}
 
     tool_instances: dict[str, Tool] = {name: cls() for name, cls in _TOOL_REGISTRY.items()}
+
+    cli_knobs = cli_knobs or {}
 
     summary = RunSummary()
     for task in tasks:
@@ -140,6 +148,7 @@ def run_tasks(
                 resolved_env=resolved_env,
                 subprocess_env=subprocess_env,
                 tools=tool_instances,
+                cli_knobs=cli_knobs,
                 verbose=verbose,
                 dry_run=dry_run,
             )
@@ -167,6 +176,7 @@ def _run_single_task(
     resolved_env: dict[str, str],
     subprocess_env: dict[str, str],
     tools: dict[str, Tool],
+    cli_knobs: dict[str, dict[str, Any]],
     verbose: bool,
     dry_run: bool,
 ) -> TaskResult:
@@ -205,6 +215,7 @@ def _run_single_task(
             context=context,
             resolved_env=resolved_env,
             subprocess_env=subprocess_env,
+            cli_knobs=cli_knobs,
             dry_run=dry_run,
         )
         task_result.stages.append(sr)
@@ -236,6 +247,7 @@ def _run_single_stage(
     context: dict[str, Any],
     resolved_env: dict[str, str],
     subprocess_env: dict[str, str],
+    cli_knobs: dict[str, dict[str, Any]],
     dry_run: bool,
 ) -> StageResult:
     log_path = log_dir / f"{stage}.log"
@@ -253,11 +265,19 @@ def _run_single_stage(
                 ),
             )
         try:
+            manifest = load_manifest(template_path)
+            stage_knobs = resolve_knob_values(
+                manifest,
+                project_knobs=project.knobs.get(stage, {}),
+                task_knobs=task.knobs.get(stage, {}),
+                cli_knobs=cli_knobs.get(stage, {}),
+            )
             rendered_path = tool.render_template(
                 template_path=template_path,
                 context=context,
                 env=resolved_env,
                 out_path=rendered_dir / template_path.stem,
+                knobs=stage_knobs,
             )
         except AutoExtError as exc:
             return StageResult(stage=stage, status="failed", error=f"render failed: {exc}")

@@ -20,10 +20,10 @@ extraction_setup \
 filter_cap \
               -exclude_self_cap true \
               -exclude_floating_nets true \
-              -exclude_floating_nets_limit 5000
+              -exclude_floating_nets_limit [[exclude_floating_nets_limit]]
 filter_coupling_cap \
-              -coupling_cap_threshold_absolute 0.01 \
-              -coupling_cap_threshold_relative 0.001
+              -coupling_cap_threshold_absolute [[coupling_cap_threshold_absolute]] \
+              -coupling_cap_threshold_relative [[coupling_cap_threshold_relative]]
 filter_res \
               -merge_parallel_res true \
               -min_res 0.001 \
@@ -61,4 +61,4 @@ process_technology \
               -technology_library_file "$env(SETUP_ROOT)/assura_tech.lib" \
               -technology_name "<HNxxxx>" \
               -temperature \
-              55.0
+              [[temperature]]
