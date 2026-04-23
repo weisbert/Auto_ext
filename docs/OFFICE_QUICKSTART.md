@@ -98,7 +98,62 @@ templates:
 | `LVSTemp/QrcTemp/JivaroTemp/sienv` | 在 `project.yaml` 的 `templates:` 块里（全局，不是 per-task）|
 | `layerMap` | `project.yaml` 的 `layer_map`（全局，默认走 `${PDK_LAYER_MAP_FILE}`）|
 
-Phase 4 的 `migrate` 子命令会把这一步自动化，但还没做。
+Phase 4c 的 `migrate` 子命令会把这一步自动化，但还没做。
+
+### 4.4 从原始 EDA 导出新建模板
+
+仓库里已经带了 5 个模板可直接用。但换 PDK / 工艺 / 项目时，可能要从你导出的原始 Cadence 文件重新生成一份。`./run.sh import` 把原始导出转成带 `[[...]]` 占位符的 `.j2` + 空 manifest，你再决定哪些字面量提升成 knob。
+
+#### 第一次导入
+
+```bash
+./run.sh import \
+  --tool calibre \
+  --input ~/my_raw.qci \
+  --output Auto_ext_pro/templates/calibre/my_tpl.qci.j2
+```
+
+`--tool` 必填，四选一：`calibre` / `si` / `quantus` / `jivaro`。identity 字段（cell / library / 两个 view / ground_net / out_file）按 per-tool key 表自动推断；推断不准时用 `--cell` / `--library` / `--lvs-layout-view` / `--lvs-source-view` 强制覆盖。
+
+导入产出三个文件（相对 `--output`）：
+
+- `my_tpl.qci.j2` — identity 已替换成 `[[cell]]` / `[[library]]` 等占位符，其他字面量原样保留
+- `my_tpl.qci.j2.manifest.yaml` — 空 `knobs: {}` 起步
+- `my_tpl.qci.j2.review.md` — 人读的 review 报告，列出 identity / 候选 knob 数量 / 残留硬编码（`CFXXX` / `HN001` / `Ver_Plus_*` / `/data/RFIC3/...`）
+
+review 报告**看完就可以删**。硬编码段列出来的就是你可能要手动替换或下一阶段 `init-project` 会帮你提升成 `project.yaml` 字段的东西。
+
+#### 看候选 knob
+
+```bash
+./run.sh knob suggest Auto_ext_pro/templates/calibre/my_tpl.qci.j2
+```
+
+输出一张 Rich 表：原始 key、字面值、推断类型、建议 snake_case 名、行号。`type` 列带 `*` 的是 bool 启发式命中（key 含 `Enable`/`Disable`/`Run`/`Use`/`Abort`/`Connect`/`Show`/`Warn`/`Release`/`Specify`/`Hyper` 且值是 0/1）—— 不确定就 `--all` 看全部。
+
+#### 提升成 knob
+
+```bash
+./run.sh knob promote Auto_ext_pro/templates/calibre/my_tpl.qci.j2 \
+  cmnNumTurbo cmnLicenseWaitTime
+```
+
+多个 key 一次传。会把 `.j2` 里对应行的字面量换成 `[[cmn_num_turbo]]` / `[[cmn_license_wait_time]]`，并在 manifest 里加上对应 knob 条目（带 `source: {tool: calibre, key: cmnNumTurbo}` 便于二次导入）。
+
+覆盖 heuristic：
+- `--type int/float/str/bool` 强制类型（比如把 bool 启发式回退成 int）
+- `--name custom` 重命名 knob（只允许同时提升一个 key 时用）
+
+#### 二次导入（smart merge）
+
+再跑一次 `./run.sh import --tool … --input … --output …`（同样的 `--output`）会**保留**你已经提升过的 knob：
+
+- identity 位从新 raw 重新替换
+- 每个带 `source:` 的 manifest knob 会在新 raw 里找到对应 key，替换新 body，并用新 raw 的值刷新 `default`（变了会在 console 打印 `default updated old → new`）
+- manifest 里你手动改过的 `description` / `range` / `unit` 原样保留
+- 没有 `source:` 的 knob（你手写的，不是 importer 造的）完全不动，只提示一行
+
+每次写入前都会把原 `.j2` / `.manifest.yaml` / `.review.md` 备份到 `.bak` 文件。想完全重置（丢掉已提升的 knob）加 `--fresh`。
 
 ---
 
@@ -312,7 +367,8 @@ Calibre 失败时，`./run.sh run` 的 summary 里会显示 banner + discrepanci
 - **No parallel**：Phase 3 是 serial。跑 10 个 task × 每个 30 min = 5 小时。Phase 3.5 会 wire parallel（`core/workdir.py` 的 `prepare_parallel_workdir` 已就绪，runner 还没调）。
 - **No GUI**：Phase 5。而且要先解掉 PyQt5 ABI blocker（见下）。
 - **No template editor**：Phase 6，最复杂。
-- **No migrate**：Phase 4。Run_ext.txt 现在手翻。
+- **No migrate**：Phase 4c。Run_ext.txt 现在手翻。
+- **No init-project orchestrator**：Phase 4b2。单个模板用 `import` 够用；一次搞定 4 个模板 + 自动填 `project.yaml` 的 `init-project` 还没做。
 
 ### PyQt5 ABI blocker 诊断
 

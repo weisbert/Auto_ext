@@ -9,6 +9,7 @@ import pytest
 from auto_ext.core.errors import ConfigError
 from auto_ext.core.manifest import (
     KnobSpec,
+    SourceRef,
     TemplateManifest,
     load_manifest,
     manifest_path_for,
@@ -226,6 +227,89 @@ def test_knob_spec_bool_not_accepted_as_int() -> None:
 def test_knob_spec_range_low_gt_high_rejected() -> None:
     with pytest.raises(ValueError):
         KnobSpec(type="int", default=5, range=(10, 1))
+
+
+# ---- SourceRef -------------------------------------------------------------
+
+
+def test_source_ref_roundtrips_on_knob(tmp_path: Path) -> None:
+    tpl = _write_pair(
+        tmp_path,
+        "example.cmd.j2",
+        """\
+template: example.cmd.j2
+knobs:
+  num_turbo:
+    type: int
+    default: 2
+    source:
+      tool: calibre
+      key: cmnNumTurbo
+""",
+    )
+    m = load_manifest(tpl)
+    assert m is not None
+    src = m.knobs["num_turbo"].source
+    assert isinstance(src, SourceRef)
+    assert src.tool == "calibre"
+    assert src.key == "cmnNumTurbo"
+
+
+def test_source_ref_absent_by_default(tmp_path: Path) -> None:
+    # Phase 4a manifests had no source field; they must still load cleanly.
+    tpl = _write_pair(
+        tmp_path,
+        "example.cmd.j2",
+        """\
+template: example.cmd.j2
+knobs:
+  limit:
+    type: int
+    default: 5
+""",
+    )
+    m = load_manifest(tpl)
+    assert m is not None
+    assert m.knobs["limit"].source is None
+
+
+def test_source_ref_extra_field_rejected(tmp_path: Path) -> None:
+    tpl = _write_pair(
+        tmp_path,
+        "example.cmd.j2",
+        """\
+template: example.cmd.j2
+knobs:
+  limit:
+    type: int
+    default: 5
+    source:
+      tool: calibre
+      key: cmnX
+      bogus: 1
+""",
+    )
+    with pytest.raises(ConfigError):
+        load_manifest(tpl)
+
+
+def test_source_ref_unknown_tool_rejected(tmp_path: Path) -> None:
+    tpl = _write_pair(
+        tmp_path,
+        "example.cmd.j2",
+        """\
+template: example.cmd.j2
+knobs:
+  limit:
+    type: int
+    default: 5
+    source:
+      tool: bogus
+      key: cmnX
+""",
+    )
+    with pytest.raises(ConfigError):
+        load_manifest(tpl)
 
 
 # ---- resolve_knob_values ---------------------------------------------------

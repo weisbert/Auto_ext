@@ -230,6 +230,356 @@ def test_run_knob_beats_manifest_default(
     assert rendered_roots[0].read_text(encoding="utf-8").strip() == "value=60.0"
 
 
+# ---- `import` subcommand + smart merge -----------------------------------
+
+
+@pytest.fixture
+def calibre_raw_fixture() -> Path:
+    return (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "raw"
+        / "calibre_sample.qci"
+    )
+
+
+def test_import_happy_path(calibre_raw_fixture: Path, tmp_path: Path) -> None:
+    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
+
+    result = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    body = output.read_text(encoding="utf-8")
+    assert "[[cell]]" in body
+    assert "[[library]]" in body
+    # Identity literal fully removed.
+    assert "INV1" not in body
+
+    manifest_path = output.with_name(output.name + ".manifest.yaml")
+    assert manifest_path.is_file()
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    assert "template: imported.qci.j2" in manifest_text
+    assert "knobs:" in manifest_text
+
+    review = output.with_name(output.name + ".review.md")
+    assert review.is_file()
+    review_text = review.read_text(encoding="utf-8")
+    assert "tool:" in review_text and "calibre" in review_text
+
+
+def test_import_missing_tool_exits_2(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "import",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(tmp_path / "out.j2"),
+        ],
+    )
+    assert result.exit_code == 2
+
+
+def test_import_unknown_tool_exits_2(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "bogus",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(tmp_path / "out.j2"),
+        ],
+    )
+    assert result.exit_code == 2
+
+
+def test_import_fresh_backs_up_existing(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
+    output.parent.mkdir(parents=True)
+    output.write_text("OLD-CONTENT\n", encoding="utf-8")
+    manifest_path = output.with_name(output.name + ".manifest.yaml")
+    manifest_path.write_text(
+        "template: imported.qci.j2\nknobs: {}\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+            "--fresh",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    bak_template = output.with_name(output.name + ".bak")
+    bak_manifest = manifest_path.with_name(manifest_path.name + ".bak")
+    assert bak_template.read_text(encoding="utf-8") == "OLD-CONTENT\n"
+    assert bak_manifest.is_file()
+
+    # New content overwrote.
+    assert "[[cell]]" in output.read_text(encoding="utf-8")
+
+
+def test_reimport_preserves_user_knob_substitutes_new_body(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
+
+    # First import.
+    first = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+        ],
+    )
+    assert first.exit_code == 0, first.stdout
+
+    # Promote cmnNumTurbo so the manifest learns a source reference.
+    promote = runner.invoke(
+        app,
+        ["knob", "promote", str(output), "cmnNumTurbo"],
+    )
+    assert promote.exit_code == 0, promote.stdout
+
+    # Edit the manifest's description to simulate a user tweak that must
+    # round-trip through the merge.
+    manifest_path = output.with_name(output.name + ".manifest.yaml")
+    text = manifest_path.read_text(encoding="utf-8")
+    text = text.replace(
+        "cmn_num_turbo:",
+        "cmn_num_turbo:\n    description: Tuned for overnight runs",
+    )
+    manifest_path.write_text(text, encoding="utf-8")
+
+    # Re-import with a raw whose cmnNumTurbo default has moved.
+    modified_raw = tmp_path / "modified.qci"
+    modified_raw.write_text(
+        calibre_raw_fixture.read_text(encoding="utf-8").replace(
+            "*cmnNumTurbo: 2", "*cmnNumTurbo: 8"
+        ),
+        encoding="utf-8",
+    )
+    reimport = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(modified_raw),
+            "--output", str(output),
+        ],
+    )
+    assert reimport.exit_code == 0, reimport.stdout
+
+    body = output.read_text(encoding="utf-8")
+    assert "*cmnNumTurbo: [[cmn_num_turbo]]" in body
+
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    # Default refreshed from new raw.
+    assert "default: 8" in manifest_text
+    # User's description edit round-trips.
+    assert "Tuned for overnight runs" in manifest_text
+    # Smart-merge log mentions the bump.
+    assert "default updated" in reimport.stdout
+
+
+def test_reimport_leaves_user_defined_knob_alone(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
+    first = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+        ],
+    )
+    assert first.exit_code == 0, first.stdout
+
+    # Add a user-defined knob manually (no source).
+    manifest_path = output.with_name(output.name + ".manifest.yaml")
+    manifest_path.write_text(
+        "template: imported.qci.j2\n"
+        "knobs:\n"
+        "  hand_rolled:\n"
+        "    type: int\n"
+        "    default: 99\n",
+        encoding="utf-8",
+    )
+
+    reimport = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+        ],
+    )
+    assert reimport.exit_code == 0, reimport.stdout
+
+    body = output.read_text(encoding="utf-8")
+    assert "[[hand_rolled]]" not in body
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    assert "hand_rolled" in manifest_text
+    assert "default: 99" in manifest_text
+    assert "user-defined" in reimport.stdout
+
+
+# ---- `knob suggest` / `knob promote` -------------------------------------
+
+
+def test_knob_suggest_lists_candidates(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
+    imp = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+        ],
+    )
+    assert imp.exit_code == 0
+
+    result = runner.invoke(app, ["knob", "suggest", str(output)])
+    assert result.exit_code == 0, result.stdout
+    assert "cmnNumTurbo" in result.stdout
+    assert "cmn_num_turbo" in result.stdout
+
+
+def test_knob_promote_rewrites_template_and_manifest(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
+    imp = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+        ],
+    )
+    assert imp.exit_code == 0
+
+    result = runner.invoke(
+        app,
+        ["knob", "promote", str(output), "cmnNumTurbo"],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    body = output.read_text(encoding="utf-8")
+    assert "*cmnNumTurbo: [[cmn_num_turbo]]" in body
+
+    manifest_path = output.with_name(output.name + ".manifest.yaml")
+    text = manifest_path.read_text(encoding="utf-8")
+    assert "cmn_num_turbo:" in text
+    assert "tool: calibre" in text
+    assert "key: cmnNumTurbo" in text
+    assert "default: 2" in text
+
+
+def test_knob_promote_type_and_name_overrides(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
+    imp = runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+        ],
+    )
+    assert imp.exit_code == 0
+
+    result = runner.invoke(
+        app,
+        [
+            "knob", "promote", str(output),
+            "cmnRunHyper",
+            "--type", "int",
+            "--name", "hyper_enabled",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    manifest_text = output.with_name(
+        output.name + ".manifest.yaml"
+    ).read_text(encoding="utf-8")
+    assert "hyper_enabled:" in manifest_text
+    assert "type: int" in manifest_text
+    # Not bool: override forced int even though the heuristic said bool.
+    assert "default: 1" in manifest_text
+
+
+def test_knob_promote_name_with_multiple_keys_rejected(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
+    runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+        ],
+    )
+    result = runner.invoke(
+        app,
+        [
+            "knob", "promote", str(output),
+            "cmnNumTurbo", "cmnLicenseWaitTime",
+            "--name", "combined",
+        ],
+    )
+    assert result.exit_code == 2
+
+
+def test_knob_promote_unknown_key_rejected(
+    calibre_raw_fixture: Path, tmp_path: Path
+) -> None:
+    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
+    runner.invoke(
+        app,
+        [
+            "import",
+            "--tool", "calibre",
+            "--input", str(calibre_raw_fixture),
+            "--output", str(output),
+        ],
+    )
+    result = runner.invoke(
+        app,
+        ["knob", "promote", str(output), "doesNotExist"],
+    )
+    assert result.exit_code == 2
+
+
 def test_run_knob_layering_project_task_cli(
     project_tools_config: Path,
     workarea: Path,

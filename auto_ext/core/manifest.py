@@ -53,11 +53,29 @@ _IDENTITY_KEYS: frozenset[str] = frozenset(
 # ---- schema ----------------------------------------------------------------
 
 
+class SourceRef(BaseModel):
+    """Pointer back to the raw EDA-file key a knob was promoted from.
+
+    Set by the importer (Phase 4b1) when a literal is promoted via
+    ``knob promote``; read on re-import to locate the same literal in a
+    refreshed raw export so user-added knobs survive a second import.
+    ``None`` on any knob authored by hand — those are user-defined and
+    not importer-managed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool: Literal["calibre", "si", "quantus", "jivaro"]
+    key: str
+
+
 class KnobSpec(BaseModel):
     """One knob declaration inside a :class:`TemplateManifest`.
 
     ``range`` is inclusive on both ends and applies only to numeric types.
     ``unit`` is display-only (kept for future GUI use).
+    ``source`` links a knob back to the importer's raw-file key so smart
+    re-import can re-substitute it; left ``None`` for hand-authored knobs.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -67,6 +85,7 @@ class KnobSpec(BaseModel):
     description: str | None = None
     range: tuple[Any, Any] | None = None
     unit: str | None = None
+    source: SourceRef | None = None
 
     @model_validator(mode="after")
     def _validate(self) -> "KnobSpec":

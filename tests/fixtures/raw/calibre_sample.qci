@@ -1,0 +1,40 @@
+*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/CFXXX.wodio.qcilvs
+*lvsRunDir: /work/cds/verify/QCI_PATH_INV1
+*lvsLayoutPaths: INV1.calibre.db
+*lvsLayoutPrimary: INV1
+*lvsLayoutLibrary: INV_LIB
+*lvsLayoutView: layout
+*lvsLayoutGetFromViewer: 1
+*lvsSourcePath: INV1.src.net
+*lvsSourcePrimary: INV1
+*lvsSourceLibrary: INV_LIB
+*lvsSourceView: schematic
+*lvsSourceGetFromViewer: 1
+*lvsSpiceFile: INV1.sp
+*lvsDeviceFilterOptionsEnabled: 0
+*lvsLayoutDeviceFilterOptions: AG RC RE RG
+*lvsSourceDeviceFilterOptions: AG RC RE RG
+*lvsPowerNames: AHVDD AVDD VDD
+*lvsGroundNames: AGND AVSS VSS
+*lvsRecognizeGates: NONE
+*lvsERCDatabase: INV1.erc.results
+*lvsERCSummaryFile: INV1.erc.summary
+*lvsReportFile: INV1.lvs.report
+*lvsSVDBcci: 1
+*lvsReportOptions: S
+*lvsPreTriggers: {{rm -rf %d/svdb} process 1}
+*lvsPostTriggers: {{rm -rf %d/query_output} process 1} {{mkdir %d/query_output} process 1}
+*lvsAbortOnSupplyError: 0
+*cmnWarnLayoutOverwrite: 0
+*cmnWarnSourceOverwrite: 0
+*cmnShowOptions: 1
+*cmnSpecifyLicenseWaitTime: 1
+*cmnLicenseWaitTime: 10
+*cmnReleaseLicense: 1
+*cmnNumTurbo: 2
+*cmnRunMT: 1
+*cmnRunHyper: 1
+*cmnTemplate_RN: /work/cds/verify/QCI_PATH_INV1
+*cmnFDILayoutLibrary: INV_LIB
+*cmnFDILayoutView: layout
+*cmnFDIDEFLayoutPath: INV1.def
