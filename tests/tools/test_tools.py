@@ -48,6 +48,51 @@ def test_si_argv_ignores_input_path(tmp_path: Path) -> None:
     assert argv == ["si", "-batch", "-command", "netlist", "-cdslib", "./cds.lib"]
 
 
+# ---- SiTool .running preflight ------------------------------------------
+
+
+def _stub_si_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Replace base.run_subprocess with a no-op recorder. Returns the call log."""
+    import auto_ext.tools.base as base
+
+    calls: list[dict] = []
+
+    def fake(argv, cwd, env, log_path):
+        calls.append({"argv": list(argv), "cwd": cwd, "log_path": log_path})
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("stubbed\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(base, "run_subprocess", fake)
+    return calls
+
+
+def test_si_run_unlinks_running_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lock = tmp_path / ".running"
+    lock.write_text("pid 12345\n", encoding="utf-8")
+    calls = _stub_si_subprocess(monkeypatch)
+
+    result = SiTool().run(
+        argv=["si", "-batch"], cwd=tmp_path, env={}, log_path=tmp_path / "logs" / "si.log"
+    )
+
+    assert not lock.exists()
+    assert result.success is True
+    assert len(calls) == 1 and calls[0]["cwd"] == tmp_path
+
+
+def test_si_run_noop_when_lock_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_si_subprocess(monkeypatch)
+
+    result = SiTool().run(
+        argv=["si", "-batch"], cwd=tmp_path, env={}, log_path=tmp_path / "logs" / "si.log"
+    )
+
+    assert result.success is True
+    assert not (tmp_path / ".running").exists()
+    assert len(calls) == 1
+
+
 def test_calibre_argv_includes_runset(tmp_path: Path) -> None:
     runset = tmp_path / "run.qci"
     argv = CalibreTool().build_argv(runset, {})
