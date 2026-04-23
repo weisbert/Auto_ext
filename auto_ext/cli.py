@@ -167,6 +167,429 @@ def migrate() -> None:
     raise typer.Exit(code=2)
 
 
+# ---- init-project (Phase 4b2) ---------------------------------------------
+
+
+#: Filename for each tool's imported template (user may rename after init).
+_INIT_TEMPLATE_NAMES: dict[str, str] = {
+    "calibre": "imported.qci.j2",
+    "si": "imported.env.j2",
+    "quantus": "imported.cmd.j2",
+    "jivaro": "imported.xml.j2",
+}
+
+
+@app.command("init-project")
+def init_project(
+    raw_calibre: Path = typer.Option(
+        ...,
+        "--raw-calibre",
+        help="Raw Calibre .qci export.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    raw_quantus: Path = typer.Option(
+        ...,
+        "--raw-quantus",
+        help="Raw Quantus .cmd export.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    raw_si: Path = typer.Option(
+        ...,
+        "--raw-si",
+        help="Raw si.env export.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    raw_jivaro: Optional[Path] = typer.Option(
+        None,
+        "--raw-jivaro",
+        help=(
+            "Raw Jivaro XML export. Optional: if omitted, no jivaro template "
+            "is written and tasks.yaml defaults jivaro.enabled=false."
+        ),
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    output_config_dir: Path = typer.Option(
+        Path("./Auto_ext_pro/config"),
+        "--output-config-dir",
+        help="Destination for project.yaml + tasks.yaml.",
+        resolve_path=True,
+    ),
+    output_templates_dir: Path = typer.Option(
+        Path("./Auto_ext_pro/templates"),
+        "--output-templates-dir",
+        help=(
+            "Destination root for imported templates. Per-tool subdirs are "
+            "created: calibre/, si/, quantus/, jivaro/."
+        ),
+        resolve_path=True,
+    ),
+    cell: Optional[str] = typer.Option(
+        None,
+        "--cell",
+        help="Identity override applied to every per-tool import.",
+    ),
+    library: Optional[str] = typer.Option(
+        None,
+        "--library",
+        help="Identity override applied to every per-tool import.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Overwrite any existing file. Each overwritten file is first "
+            "backed up to .bak."
+        ),
+    ),
+) -> None:
+    """Orchestrate 4 per-tool imports into a complete project skeleton.
+
+    Runs the Phase 4b1 :func:`import_template` on each raw file, cross-
+    validates identities across tools, aggregates PDK constants via
+    :func:`aggregate_pdk_tokens`, rewrites each template body to reference
+    the aggregated constants via Jinja placeholders, and writes the four
+    templates + sidecar manifests, a populated ``project.yaml``, and a
+    one-task ``tasks.yaml`` skeleton.
+    """
+    from auto_ext.core.errors import AutoExtError, ConfigError
+    from auto_ext.core.importer import (
+        Identity,
+        ImportError as CoreImportError,
+        ImportResult,
+        aggregate_pdk_tokens,
+        apply_project_constants,
+        import_template,
+    )
+    from auto_ext.core.manifest import TemplateManifest
+
+    overrides: Optional[Identity] = None
+    if cell is not None or library is not None:
+        overrides = Identity(cell=cell, library=library)
+
+    raw_paths: dict[str, Path] = {
+        "calibre": raw_calibre,
+        "si": raw_si,
+        "quantus": raw_quantus,
+    }
+    if raw_jivaro is not None:
+        raw_paths["jivaro"] = raw_jivaro
+
+    results: dict[str, ImportResult] = {}
+    for tool, path in raw_paths.items():
+        try:
+            raw_text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            typer.secho(
+                f"cannot read {tool} raw {path}: {exc}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        try:
+            results[tool] = import_template(
+                tool, raw_text, identity_overrides=overrides
+            )
+        except CoreImportError as exc:
+            typer.secho(
+                f"import failed for {tool} ({path}): {exc}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+    # Cross-validate identities; raises ConfigError on mismatch.
+    try:
+        merged_identity = _cross_validate_init_identities(results)
+    except ConfigError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    constants = aggregate_pdk_tokens(results)
+
+    # Pre-check: refuse to overwrite unless --force.
+    config_yaml = output_config_dir / "project.yaml"
+    tasks_yaml = output_config_dir / "tasks.yaml"
+    targets: list[Path] = [config_yaml, tasks_yaml]
+    for tool in results:
+        subdir = output_templates_dir / tool
+        name = _INIT_TEMPLATE_NAMES[tool]
+        targets.append(subdir / name)
+        targets.append(subdir / (name + ".manifest.yaml"))
+    existing = [p for p in targets if p.exists()]
+    if existing and not force:
+        typer.secho(
+            "refusing to overwrite existing file(s); pass --force to back up "
+            "and replace:",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        for p in existing:
+            typer.secho(f"  {p}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    # Write templates + manifests.
+    output_config_dir.mkdir(parents=True, exist_ok=True)
+    output_templates_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    for tool, result in results.items():
+        rewritten = apply_project_constants(tool, result.template_body, constants)
+        subdir = output_templates_dir / tool
+        subdir.mkdir(parents=True, exist_ok=True)
+
+        tpl_name = _INIT_TEMPLATE_NAMES[tool]
+        tpl_path = subdir / tpl_name
+        manifest_path = subdir / (tpl_name + ".manifest.yaml")
+
+        _backup_if_exists(tpl_path)
+        _backup_if_exists(manifest_path)
+        tpl_path.write_text(rewritten, encoding="utf-8")
+
+        manifest = TemplateManifest(template=tpl_name, knobs={})
+        manifest_path.write_text(_dump_manifest(manifest), encoding="utf-8")
+        written.extend([tpl_path, manifest_path])
+
+    # project.yaml with detected constants + template pointers.
+    _backup_if_exists(config_yaml)
+    config_yaml.write_text(
+        _build_project_yaml(
+            constants=constants,
+            templates={
+                tool: output_templates_dir / tool / _INIT_TEMPLATE_NAMES[tool]
+                for tool in results
+            },
+        ),
+        encoding="utf-8",
+    )
+    written.append(config_yaml)
+
+    # tasks.yaml skeleton using the cross-validated identity.
+    _backup_if_exists(tasks_yaml)
+    tasks_yaml.write_text(
+        _build_tasks_yaml(
+            identity=merged_identity,
+            jivaro_imported="jivaro" in results,
+        ),
+        encoding="utf-8",
+    )
+    written.append(tasks_yaml)
+
+    _print_init_project_summary(
+        constants=constants,
+        results=results,
+        written=written,
+        output_config_dir=output_config_dir,
+    )
+
+
+def _cross_validate_init_identities(
+    results: dict[str, "ImportResult"],  # noqa: F821 — type avail at runtime
+):
+    """Ensure identity fields agree across tools that carry them.
+
+    Returns a merged :class:`Identity` with one value per field (or
+    ``None`` if absent). Raises :class:`ConfigError` if any field shows
+    disagreement — the user must either reconcile the raw files or pass
+    ``--cell/--library`` overrides.
+    """
+    from auto_ext.core.errors import ConfigError
+    from auto_ext.core.importer import Identity
+
+    merged: dict[str, Optional[str]] = {}
+    conflicts: list[str] = []
+    for field_name in (
+        "cell",
+        "library",
+        "lvs_layout_view",
+        "lvs_source_view",
+        "out_file",
+        "ground_net",
+    ):
+        per_value_tools: dict[str, list[str]] = {}
+        for tool, res in results.items():
+            v = getattr(res.identity, field_name)
+            if v is None:
+                continue
+            per_value_tools.setdefault(v, []).append(tool)
+        if not per_value_tools:
+            merged[field_name] = None
+        elif len(per_value_tools) == 1:
+            merged[field_name] = next(iter(per_value_tools))
+        else:
+            detail = ", ".join(
+                f"{v!r}={tools}" for v, tools in sorted(per_value_tools.items())
+            )
+            conflicts.append(f"{field_name}: {detail}")
+
+    if conflicts:
+        raise ConfigError(
+            "identity mismatch across raw files — reconcile or pass --cell/"
+            "--library overrides:\n  " + "\n  ".join(conflicts)
+        )
+    return Identity(**merged)
+
+
+def _build_project_yaml(
+    *,
+    constants,  # ProjectConstants
+    templates: dict[str, Path],
+) -> str:
+    """Serialize a ``project.yaml`` filled with aggregated PDK constants.
+
+    Template paths are written as-is (absolute, since ``init-project``
+    resolves them). Fields whose value is ``None`` are omitted so the YAML
+    stays tidy — runtime picks their defaults via the pydantic schema.
+    """
+    from io import StringIO
+    from ruamel.yaml import YAML
+
+    data: dict = {}
+    if constants.tech_name:
+        data["tech_name"] = constants.tech_name
+    if constants.pdk_subdir:
+        data["pdk_subdir"] = constants.pdk_subdir
+    if constants.project_subdir:
+        data["project_subdir"] = constants.project_subdir
+    if constants.lvs_runset_version or constants.qrc_runset_version:
+        rv: dict[str, str] = {}
+        if constants.lvs_runset_version:
+            rv["lvs"] = constants.lvs_runset_version
+        if constants.qrc_runset_version:
+            rv["qrc"] = constants.qrc_runset_version
+        data["runset_versions"] = rv
+
+    data["templates"] = {
+        tool: path.as_posix() for tool, path in templates.items()
+    }
+
+    yaml = YAML(typ="rt")
+    yaml.default_flow_style = False
+    buf = StringIO()
+    yaml.dump(data, buf)
+    header = (
+        "# Generated by auto-ext init-project. Review before first run.\n"
+        "# Identity-level fields (work_root / verify_root / setup_root /\n"
+        "# employee_id / layer_map) are resolved from shell env by default —\n"
+        "# set them here only if you need to override.\n"
+    )
+    return header + buf.getvalue()
+
+
+def _build_tasks_yaml(
+    *,
+    identity,  # Identity
+    jivaro_imported: bool,
+) -> str:
+    """Emit a one-entry ``tasks.yaml`` using the detected identity values.
+
+    The user is expected to edit the cells / layout views to match their
+    actual extraction batch. Comments point out what to change.
+    """
+    lines: list[str] = [
+        "# Generated by auto-ext init-project. Edit the cells below to match",
+        "# the extraction batch; list-valued fields (library/cell/",
+        "# lvs_layout_view/lvs_source_view) auto-expand to per-cell tasks.",
+        "",
+    ]
+    lines.append(f"- library: {_yaml_scalar(identity.library) or 'TODO_LIBRARY'}")
+    lines.append(f"  cell: {_yaml_scalar(identity.cell) or 'TODO_CELL'}")
+    lines.append(
+        f"  lvs_layout_view: "
+        f"{_yaml_scalar(identity.lvs_layout_view) or 'layout'}"
+    )
+    lines.append(
+        f"  lvs_source_view: "
+        f"{_yaml_scalar(identity.lvs_source_view) or 'schematic'}"
+    )
+    if identity.ground_net is not None:
+        lines.append(f"  ground_net: {_yaml_scalar(identity.ground_net)}")
+    if identity.out_file is not None:
+        lines.append(f"  out_file: {_yaml_scalar(identity.out_file)}")
+    if jivaro_imported:
+        lines.append("  jivaro:")
+        lines.append("    enabled: true")
+    else:
+        lines.append("  jivaro:")
+        lines.append("    enabled: false")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _yaml_scalar(value: Optional[str]) -> Optional[str]:
+    """Return ``value`` as a YAML scalar token. Returns ``None`` unchanged
+    so callers can fall through to a default.
+    """
+    if value is None:
+        return None
+    # Quote if the string has YAML-special characters; most identity
+    # values are plain identifiers and don't need quoting.
+    if any(c in value for c in ":#{}[]&*!|>'\"%@`,\n\r\t "):
+        escaped = value.replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def _print_init_project_summary(
+    *,
+    constants,
+    results: dict,
+    written: list[Path],
+    output_config_dir: Path,
+) -> None:
+    """Print a human-readable summary of what init-project detected/wrote."""
+
+    typer.echo("")
+    typer.echo("[init-project] Detected project constants:")
+    _print_kv("  tech_name          ", constants.tech_name)
+    _print_kv("  pdk_subdir         ", constants.pdk_subdir)
+    _print_kv("  project_subdir     ", constants.project_subdir)
+    _print_kv("  lvs_runset_version ", constants.lvs_runset_version)
+    _print_kv("  qrc_runset_version ", constants.qrc_runset_version)
+
+    if constants.unclassified:
+        typer.echo("")
+        typer.secho(
+            "[init-project] Unclassified hardcoded values (review manually):",
+            fg=typer.colors.YELLOW,
+        )
+        for u in constants.unclassified:
+            typer.echo(
+                f"  {u.tool:<8} line {u.token.line:>3}: "
+                f"{u.token.value!r} (category: {u.token.category})"
+            )
+
+    typer.echo("")
+    typer.echo("[init-project] Wrote:")
+    for p in written:
+        typer.echo(f"  {p}")
+
+    typer.echo("")
+    typer.echo(
+        f"Next: review {output_config_dir}/tasks.yaml (edit cells/libs),\n"
+        f"then run: auto-ext check-env --config-dir {output_config_dir}\n"
+        f"          auto-ext run --dry-run --config-dir {output_config_dir}"
+    )
+
+
+def _print_kv(label: str, value: Optional[str]) -> None:
+    if value is None:
+        typer.echo(f"{label}= (not detected)")
+    else:
+        typer.echo(f"{label}= {value}")
+
+
 _VALID_IMPORT_TOOLS = ("calibre", "si", "quantus", "jivaro")
 
 

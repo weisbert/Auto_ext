@@ -140,6 +140,86 @@ def test_dry_run_renders_but_skips_subprocesses(
     assert (rendered_dir / "wiodio_noConnectByNetName.qci").is_file()
 
 
+def test_build_context_surfaces_pdk_fields(project_config) -> None:
+    """_build_context exposes tech_name / pdk_subdir / project_subdir /
+    lvs_runset_version / qrc_runset_version from ProjectConfig so
+    templates can reference [[tech_name]] etc. (Phase 4b2).
+    """
+    from auto_ext.core.config import (
+        JivaroConfig,
+        RunsetVersions,
+        TaskConfig,
+        TemplatePaths,
+    )
+    from auto_ext.core.runner import _build_context
+
+    project_config.tech_name = "HN001"
+    project_config.pdk_subdir = "CFXXX"
+    project_config.project_subdir = "projB"
+    project_config.runset_versions = RunsetVersions(
+        lvs="Ver_Plus_1.0l_0.9", qrc="Ver_Plus_1.0a"
+    )
+    task = TaskConfig(
+        task_id="L__c__layout__schematic",
+        library="L",
+        cell="c",
+        lvs_source_view="schematic",
+        lvs_layout_view="layout",
+        templates=TemplatePaths(),
+        ground_net="vss",
+        out_file=None,
+        jivaro=JivaroConfig(),
+        continue_on_lvs_fail=False,
+        spec_index=0,
+        expansion_index=0,
+    )
+
+    ctx = _build_context(
+        project_config,
+        task,
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w", "PDK_LAYER_MAP_FILE": "/w/layers.map"},
+    )
+    assert ctx["tech_name"] == "HN001"
+    assert ctx["pdk_subdir"] == "CFXXX"
+    assert ctx["project_subdir"] == "projB"
+    assert ctx["lvs_runset_version"] == "Ver_Plus_1.0l_0.9"
+    assert ctx["qrc_runset_version"] == "Ver_Plus_1.0a"
+
+
+def test_build_context_pdk_fields_default_to_none(project_config) -> None:
+    """When the project does not set PDK fields, they surface as None in the
+    render context. A template referencing [[tech_name]] with strict_undef
+    would then raise a TemplateError — expected behaviour for projects that
+    have not yet run init-project.
+    """
+    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
+    from auto_ext.core.runner import _build_context
+
+    task = TaskConfig(
+        task_id="L__c__layout__schematic",
+        library="L",
+        cell="c",
+        lvs_source_view="schematic",
+        lvs_layout_view="layout",
+        templates=TemplatePaths(),
+        ground_net="vss",
+        out_file=None,
+        jivaro=JivaroConfig(),
+        continue_on_lvs_fail=False,
+        spec_index=0,
+        expansion_index=0,
+    )
+    ctx = _build_context(
+        project_config,
+        task,
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w", "PDK_LAYER_MAP_FILE": "/w/layers.map"},
+    )
+    assert ctx["tech_name"] is None
+    assert ctx["pdk_subdir"] is None
+    assert ctx["lvs_runset_version"] is None
+    assert ctx["qrc_runset_version"] is None
+
+
 def test_jivaro_without_out_file_rejected(
     project_tools_config: Path,
     workarea: Path,

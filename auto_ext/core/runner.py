@@ -347,6 +347,11 @@ def _build_context(
         "employee_id": employee_id,
         "jivaro_frequency_limit": task.jivaro.frequency_limit,
         "jivaro_error_max": task.jivaro.error_max,
+        "tech_name": project.tech_name,
+        "pdk_subdir": project.pdk_subdir,
+        "project_subdir": project.project_subdir,
+        "lvs_runset_version": project.runset_versions.lvs,
+        "qrc_runset_version": project.runset_versions.qrc,
     }
 
 

@@ -1,0 +1,40 @@
+*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Minus_2.1a_0.3/CFBETA/CFBETA.wodio.qcilvs
+*lvsRunDir: /work/cds/verify/QCI_PATH_AMP2
+*lvsLayoutPaths: AMP2.calibre.db
+*lvsLayoutPrimary: AMP2
+*lvsLayoutLibrary: AMP_LIB
+*lvsLayoutView: layout
+*lvsLayoutGetFromViewer: 1
+*lvsSourcePath: AMP2.src.net
+*lvsSourcePrimary: AMP2
+*lvsSourceLibrary: AMP_LIB
+*lvsSourceView: schematic
+*lvsSourceGetFromViewer: 1
+*lvsSpiceFile: AMP2.sp
+*lvsDeviceFilterOptionsEnabled: 0
+*lvsLayoutDeviceFilterOptions: AG RC RE RG
+*lvsSourceDeviceFilterOptions: AG RC RE RG
+*lvsPowerNames: AHVDD AVDD VDD
+*lvsGroundNames: AGND AVSS VSS
+*lvsRecognizeGates: NONE
+*lvsERCDatabase: AMP2.erc.results
+*lvsERCSummaryFile: AMP2.erc.summary
+*lvsReportFile: AMP2.lvs.report
+*lvsSVDBcci: 1
+*lvsReportOptions: S
+*lvsPreTriggers: {{rm -rf %d/svdb} process 1}
+*lvsPostTriggers: {{rm -rf %d/query_output} process 1} {{mkdir %d/query_output} process 1}
+*lvsAbortOnSupplyError: 0
+*cmnWarnLayoutOverwrite: 0
+*cmnWarnSourceOverwrite: 0
+*cmnShowOptions: 1
+*cmnSpecifyLicenseWaitTime: 1
+*cmnLicenseWaitTime: 10
+*cmnReleaseLicense: 1
+*cmnNumTurbo: 2
+*cmnRunMT: 1
+*cmnRunHyper: 1
+*cmnTemplate_RN: /work/cds/verify/QCI_PATH_AMP2
+*cmnFDILayoutLibrary: AMP_LIB
+*cmnFDILayoutView: layout
+*cmnFDIDEFLayoutPath: AMP2.def

@@ -41,70 +41,87 @@ python3.11 -c "import jinja2, ruamel.yaml, pydantic, typer, rich; print('deps ok
 python3.11 -m pytest tests/ -v
 ```
 
-预期：**202 全绿**（Windows 上 skip 的 6 个 symlink 测试在 Linux 上会跑起来）。
+预期：**Phase 4b2 后应有 284 全绿**（Windows 上 278 绿 + 6 个 symlink 测试 skip；Linux 上 284 全绿，symlink 测试在 Linux 能跑起来）。
 
-如果这 150 不全绿，**停下来**先修再往下走 —— 后面出问题排查不清楚是 real-env 的锅还是 Phase 3 代码的锅。
+全绿数量随 phase 增长 —— 如果当前数量偏离太多**停下来**先查再往下走，后面出问题排查不清楚是 real-env 的锅还是代码的锅。
 
 ---
 
 ## 4. 写你的项目配置
 
-### 4.1 project.yaml
+### 4.1 一键 bootstrap：`init-project`
 
-`config/project.yaml` 已经在 repo 里，**默认状态基本不用改**：
+新项目 / 新 PDK / 新 tech，推荐**一条命令**从原始 Cadence 导出生成整套 config + templates：
 
-```yaml
-templates:
-  si: Auto_ext_pro/templates/si/default.env.j2
-  calibre: Auto_ext_pro/templates/calibre/wiodio_noConnectByNetName.qci.j2
-  quantus: Auto_ext_pro/templates/quantus/ext.cmd.j2
-  jivaro: Auto_ext_pro/templates/jivaro/default.xml.j2
+```bash
+./run.sh init-project \
+  --raw-calibre ~/exports/my.qci \
+  --raw-si      ~/exports/si.env \
+  --raw-quantus ~/exports/ext.cmd \
+  --raw-jivaro  ~/exports/reduction.xml
 ```
 
-`work_root` / `verify_root` / `setup_root` / `employee_id` 全部是 Optional —— shell env 里有就用 shell 的，`employee_id` 不设就自动取 `$USER`。`layer_map` 默认是 `${PDK_LAYER_MAP_FILE}`，也从 shell 取。
+做的事：
 
-### 4.2 tasks.yaml（= 新版 Run_ext.txt）
+1. 4 个原始文件跑 import，抽出 identity（cell / library / views / ground_net / out_file）
+2. 跨工具校验 identity 必须一致（cell 在 calibre/si/quantus/jivaro 必须都指同一个，否则报 `identity mismatch` 拒绝写出）
+3. 把 4 个文件里的硬编码值聚合成 project 级常量：`tech_name`（`HN001`）/ `pdk_subdir`（`CFXXX`）/ `project_subdir`（`projB`）/ `runset_versions.lvs`（`Ver_Plus_1.0l_0.9`）/ `runset_versions.qrc`（`Ver_Plus_1.0a`）
+4. 把每份模板 body 里的这些值都换成 `[[tech_name]]` / `[[pdk_subdir]]` / 等占位符
+5. 写出：
+   - `Auto_ext_pro/config/project.yaml` — 填好 PDK 常量 + 4 个 template 指针
+   - `Auto_ext_pro/config/tasks.yaml` — 一条基于检测 identity 的 skeleton 任务
+   - `Auto_ext_pro/templates/{calibre,si,quantus,jivaro}/imported.*.j2` + 空 `knobs: {}` manifest
 
-编辑 `config/tasks.yaml`，把 `TODO_LIBRARY_NAME` / `TODO_CELL_NAME` 换成你真实 design 的一个 library + 一个 cell。**先一个 task**，不要贪多：
+默认输出路径就是 `./Auto_ext_pro/config` + `./Auto_ext_pro/templates`。要写别处用 `--output-config-dir` / `--output-templates-dir`。
+
+Jivaro 可选：不跑 reduction 的项目省掉 `--raw-jivaro`，init-project 就不生成 jivaro 模板，tasks.yaml 里 `jivaro.enabled: false`。
+
+重跑时需要加 `--force`（已存在文件自动备份到 `.bak` 再覆盖）。
+
+运行完 console 会列一张 `Detected project constants` 表 + 必要时列 `Unclassified hardcoded values`（跨工具冲突或无法归类的硬编码，**手工 review**）。看完后直接跳 §5 做 check-env + dry-run。
+
+### 4.2 调整 tasks.yaml
+
+init-project 写的 `tasks.yaml` 只有**一条 task**，用的是 raw 文件里检测到的 cell / library。真跑 batch 时编辑它：
 
 ```yaml
-- library: WB_PLL_DCO              # 你 design 的 library
-  cell: LO_5GRX_LO_back_v3         # 你要跑的 cell
-  lvs_layout_view: layout
+- library: WB_PLL_DCO                          # 你 design 的 library
+  cell: [LO_5GRX_LO_back_v3, another_cell]     # 列表 → 自动展开
+  lvs_layout_view: [layout, layout_test]
   lvs_source_view: schematic
   ground_net: vss
   out_file: av_ext
   jivaro:
-    enabled: false                 # 先 false！先验证 si/calibre/qrc 通
-    frequency_limit: 14
-    error_max: 2
+    enabled: false                             # 先 false 验证 si/calibre/qrc 通
 ```
 
-### 4.3 Run_ext.txt → tasks.yaml 字段映射
+展开语法见 §7。
 
-手工翻，对照表：
+### 4.3 project.yaml 各字段说明
 
-| Run_ext.txt | tasks.yaml |
-|-------------|-----------|
-| `LibraryName` | `library` |
-| `CellName` | `cell` |
-| `lvsSourceView` | `lvs_source_view` |
-| `lvsLayoutView` | `lvs_layout_view`（多个值写成 `[layout, layout_test]`，自动展开）|
-| `GndName` | `ground_net` |
-| `OutFileName` | `out_file` |
-| `ifJivaro Yes/No` | `jivaro.enabled: true/false` |
-| `frequencyLimit` | `jivaro.frequency_limit` |
-| `errorMax` | `jivaro.error_max` |
-| `LVSTemp/QrcTemp/JivaroTemp/sienv` | 在 `project.yaml` 的 `templates:` 块里（全局，不是 per-task）|
-| `layerMap` | `project.yaml` 的 `layer_map`（全局，默认走 `${PDK_LAYER_MAP_FILE}`）|
+init-project 写出的 project.yaml 长这样（节选）：
 
-Phase 4c 的 `migrate` 子命令会把这一步自动化，但还没做。
+```yaml
+tech_name: HN001
+pdk_subdir: CFXXX
+project_subdir: projB
+runset_versions:
+  lvs: Ver_Plus_1.0l_0.9
+  qrc: Ver_Plus_1.0a
+templates:
+  calibre: Auto_ext_pro/templates/calibre/imported.qci.j2
+  si: Auto_ext_pro/templates/si/imported.env.j2
+  quantus: Auto_ext_pro/templates/quantus/imported.cmd.j2
+  jivaro: Auto_ext_pro/templates/jivaro/imported.xml.j2
+```
 
-### 4.4 从原始 EDA 导出新建模板
+`work_root` / `verify_root` / `setup_root` / `employee_id` 全部**不写**就行 —— shell env 里有就用 shell 的，`employee_id` 不设就自动取 `$USER`。`layer_map` 默认是 `${PDK_LAYER_MAP_FILE}`，也从 shell 取。
 
-仓库里已经带了 5 个模板可直接用。但换 PDK / 工艺 / 项目时，可能要从你导出的原始 Cadence 文件重新生成一份。`./run.sh import` 把原始导出转成带 `[[...]]` 占位符的 `.j2` + 空 manifest，你再决定哪些字面量提升成 knob。
+换 PDK / 换 tech？直接编辑上面那几个字段的值，模板完全不用动。这就是 init-project 的意义。
 
-#### 第一次导入
+### 4.4 单个模板的 ad-hoc import（不跑整个 init-project 时）
+
+只想补一个模板（比如尝试新的 Calibre 选项集）：用单文件的 `./run.sh import`：
 
 ```bash
 ./run.sh import \
@@ -117,28 +134,23 @@ Phase 4c 的 `migrate` 子命令会把这一步自动化，但还没做。
 
 导入产出三个文件（相对 `--output`）：
 
-- `my_tpl.qci.j2` — identity 已替换成 `[[cell]]` / `[[library]]` 等占位符，其他字面量原样保留
+- `my_tpl.qci.j2` — identity 已替换成 `[[cell]]` / `[[library]]` 等占位符
 - `my_tpl.qci.j2.manifest.yaml` — 空 `knobs: {}` 起步
-- `my_tpl.qci.j2.review.md` — 人读的 review 报告，列出 identity / 候选 knob 数量 / 残留硬编码（`CFXXX` / `HN001` / `Ver_Plus_*` / `/data/RFIC3/...`）
+- `my_tpl.qci.j2.review.md` — 人读的 review 报告，列出 identity / 候选 knob 数量 / 残留硬编码
 
-review 报告**看完就可以删**。硬编码段列出来的就是你可能要手动替换或下一阶段 `init-project` 会帮你提升成 `project.yaml` 字段的东西。
+**注意**：单文件 import **不会**跑跨文件的 PDK 聚合（那是 init-project 的活）；硬编码 `CFXXX` / `HN001` / `Ver_Plus_*` 会原样留在 body 里。如果目标 `project.yaml` 已经有 `tech_name` / `pdk_subdir` 等字段，手动在 body 里替换成 `[[tech_name]]` 等即可。
 
-#### 看候选 knob
+#### 候选 knob + 提升
 
 ```bash
 ./run.sh knob suggest Auto_ext_pro/templates/calibre/my_tpl.qci.j2
-```
-
-输出一张 Rich 表：原始 key、字面值、推断类型、建议 snake_case 名、行号。`type` 列带 `*` 的是 bool 启发式命中（key 含 `Enable`/`Disable`/`Run`/`Use`/`Abort`/`Connect`/`Show`/`Warn`/`Release`/`Specify`/`Hyper` 且值是 0/1）—— 不确定就 `--all` 看全部。
-
-#### 提升成 knob
-
-```bash
 ./run.sh knob promote Auto_ext_pro/templates/calibre/my_tpl.qci.j2 \
   cmnNumTurbo cmnLicenseWaitTime
 ```
 
-多个 key 一次传。会把 `.j2` 里对应行的字面量换成 `[[cmn_num_turbo]]` / `[[cmn_license_wait_time]]`，并在 manifest 里加上对应 knob 条目（带 `source: {tool: calibre, key: cmnNumTurbo}` 便于二次导入）。
+suggest 输出一张 Rich 表：原始 key、字面值、推断类型、建议 snake_case 名、行号。`type` 列带 `*` 的是 bool 启发式命中（key 含 `Enable`/`Disable`/`Run`/`Use`/`Abort`/`Connect`/`Show`/`Warn`/`Release`/`Specify`/`Hyper` 且值是 0/1）—— 不确定就 `--all` 看全部。
+
+promote 会把 `.j2` 里对应行的字面量换成 `[[cmn_num_turbo]]` / `[[cmn_license_wait_time]]`，manifest 里加上对应 knob 条目（带 `source: {tool: calibre, key: cmnNumTurbo}` 便于二次导入）。
 
 覆盖 heuristic：
 - `--type int/float/str/bool` 强制类型（比如把 bool 启发式回退成 int）
@@ -154,6 +166,26 @@ review 报告**看完就可以删**。硬编码段列出来的就是你可能要
 - 没有 `source:` 的 knob（你手写的，不是 importer 造的）完全不动，只提示一行
 
 每次写入前都会把原 `.j2` / `.manifest.yaml` / `.review.md` 备份到 `.bak` 文件。想完全重置（丢掉已提升的 knob）加 `--fresh`。
+
+### 4.5 Run_ext.txt → tasks.yaml 字段映射（老项目迁移）
+
+有存量 `Run_ext.txt` 配置要迁过来时参考：
+
+| Run_ext.txt | tasks.yaml |
+|-------------|-----------|
+| `LibraryName` | `library` |
+| `CellName` | `cell` |
+| `lvsSourceView` | `lvs_source_view` |
+| `lvsLayoutView` | `lvs_layout_view`（多个值写成 `[layout, layout_test]`，自动展开）|
+| `GndName` | `ground_net` |
+| `OutFileName` | `out_file` |
+| `ifJivaro Yes/No` | `jivaro.enabled: true/false` |
+| `frequencyLimit` | `jivaro.frequency_limit` |
+| `errorMax` | `jivaro.error_max` |
+| `LVSTemp/QrcTemp/JivaroTemp/sienv` | 在 `project.yaml` 的 `templates:` 块里（全局）|
+| `layerMap` | `project.yaml` 的 `layer_map`（全局，默认走 `${PDK_LAYER_MAP_FILE}`）|
+
+Phase 4c 的 `migrate` 子命令会把这步自动化，还没做。
 
 ---
 
@@ -263,15 +295,23 @@ LVS 过了之后：
 
 ## 6. 模板里可能需要改的硬编码
 
-本仓库 `templates/` 下的 `.j2` 是从你 **之前粘贴的** anonymized 模板衍生来的，**保留了 5 处项目特定的字面量**。如果 dry-run 出来的路径对，这些字面量就是对的不用动；否则 `grep -rn` 改一下：
+### 6.1 init-project 生成的模板
 
-| 字面量 | 文件 | 含义 |
-|--------|------|------|
-| `CFXXX` | `templates/calibre/*.qci.j2`, `templates/quantus/*.cmd.j2` | PDK 工艺子目录 |
-| `Ver_Plus_1.0l_0.9` / `Ver_Plus_1.0a` | 同上 + `templates/si/default.env.j2` | Runset 版本号 |
-| `<HNxxxx>` / `HNXXXX` | `templates/quantus/ext.cmd.j2`, `templates/quantus/dspf.cmd.j2` | `tech_name` |
-| `Hi1A22V100_C1Xplus` | `templates/quantus/dspf.cmd.j2` | 项目名（在 `-file_name` 路径里）|
-| `/data/RFIC3/XXX/pptunicad/...empty.cdl` | `templates/si/default.env.j2` | Calibre source 附加 cdl 路径 |
+通过 `init-project` 写出的 `Auto_ext_pro/templates/<tool>/imported.*.j2` 已经把下面这几类值全部抽象成了 `[[...]]` 占位符，**不用再手改**：
+
+| 原始字面量（示例） | 抽象成 | 存储在 |
+|-------------------|-------|-------|
+| `HN001` | `[[tech_name]]` | `project.yaml.tech_name` |
+| `CFXXX` | `[[pdk_subdir]]` | `project.yaml.pdk_subdir` |
+| `Ver_Plus_1.0l_0.9` / `Ver_Plus_1.0a` | `[[lvs_runset_version]]` / `[[qrc_runset_version]]` | `project.yaml.runset_versions.{lvs,qrc}` |
+| `projB`（`/data/RFIC3/projB/...` 里的） | `[[project_subdir]]` | `project.yaml.project_subdir` |
+| `/tmpdata/RFIC/rfic_share/alice/` + `/data/RFIC3/.../alice/` | `[[employee_id]]` | shell `$USER` 或 `project.yaml.employee_id` |
+
+换 PDK / tech / 项目 / 用户 = 编辑 `project.yaml` 的对应字段，模板完全不碰。
+
+### 6.2 仓库自带的老模板
+
+仓库 `templates/` 下还有历史遗留的 5 个 Phase 3 模板（`wiodio_noConnectByNetName.qci.j2` 等）—— **那些模板**还有手动硬编码（`CFXXX` / `HNXXXX` / `Ver_Plus_*` / `Hi1A22V100_C1Xplus`）要 `grep -rn` 改，或者**更推荐直接用 `init-project` 从你最新的 raw 重新生成一套 imported.* 模板**，然后把 `project.yaml.templates` 指向新的。
 
 ---
 
@@ -367,8 +407,7 @@ Calibre 失败时，`./run.sh run` 的 summary 里会显示 banner + discrepanci
 - **No parallel**：Phase 3 是 serial。跑 10 个 task × 每个 30 min = 5 小时。Phase 3.5 会 wire parallel（`core/workdir.py` 的 `prepare_parallel_workdir` 已就绪，runner 还没调）。
 - **No GUI**：Phase 5。而且要先解掉 PyQt5 ABI blocker（见下）。
 - **No template editor**：Phase 6，最复杂。
-- **No migrate**：Phase 4c。Run_ext.txt 现在手翻。
-- **No init-project orchestrator**：Phase 4b2。单个模板用 `import` 够用；一次搞定 4 个模板 + 自动填 `project.yaml` 的 `init-project` 还没做。
+- **No migrate**：Phase 4c。Run_ext.txt 现在手翻（§4.5 对照表）。
 
 ### PyQt5 ABI blocker 诊断
 

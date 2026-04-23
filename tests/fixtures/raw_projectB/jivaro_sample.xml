@@ -1,0 +1,21 @@
+<?xml version="1.0" ?> <reductionParameters version="2024.1"> <options> <!-- General Options -->
+<inputView value="AMP_LIB/AMP2/av_ext"/>
+<outputView value="av_ext_red"/>
+<logVerboseLevel value="trace"/>
+<cpu value="1"/>
+<viewsToReduce value="av_extracted"/>
+
+<!-- Parsing options -->
+<rModel value="analogLib/presistor/symbol"/>
+<cModel value="analogLib/pcapacitor/symbol"/>
+<lModel value="analogLib/pinductor/symbol"/>
+<kModel value="analogLib/pmind/symbol"/>
+
+<!-- Reduction settings -->
+<criterion value="standard"/>
+<frequencyLimit value="14"/>
+<errorMax value="2"/>
+<reduceFloatingNets value="false"/>
+<decouplingAutoThreshold value="false"/>
+
+<!-- Selectivity settings --> </options> </reductionParameters>

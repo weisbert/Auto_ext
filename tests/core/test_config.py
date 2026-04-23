@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from auto_ext.core.config import (
     JivaroConfig,
     ProjectConfig,
+    RunsetVersions,
     TaskConfig,
     TemplatePaths,
     dump_project_yaml,
@@ -355,3 +356,49 @@ def test_task_knobs_deep_copied_per_expansion(tmp_path: Path) -> None:
     tasks = load_tasks(p)
     assert tasks[0].knobs is not tasks[1].knobs
     assert tasks[0].knobs["quantus"] is not tasks[1].knobs["quantus"]
+
+
+# ---- PDK-level constants (Phase 4b2) --------------------------------------
+
+
+def test_project_config_pdk_fields_default_none(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    assert project.tech_name is None
+    assert project.pdk_subdir is None
+    assert project.project_subdir is None
+    assert project.runset_versions.lvs is None
+    assert project.runset_versions.qrc is None
+
+
+def test_project_config_accepts_pdk_fields(tmp_path: Path) -> None:
+    p = tmp_path / "project.yaml"
+    p.write_text(
+        "tech_name: HN001\n"
+        "pdk_subdir: CFXXX\n"
+        "project_subdir: projB\n"
+        "runset_versions:\n"
+        "  lvs: Ver_Plus_1.0l_0.9\n"
+        "  qrc: Ver_Plus_1.0a\n",
+        encoding="utf-8",
+    )
+    project = load_project(p)
+    assert project.tech_name == "HN001"
+    assert project.pdk_subdir == "CFXXX"
+    assert project.project_subdir == "projB"
+    assert project.runset_versions.lvs == "Ver_Plus_1.0l_0.9"
+    assert project.runset_versions.qrc == "Ver_Plus_1.0a"
+
+
+def test_runset_versions_rejects_unknown_key() -> None:
+    with pytest.raises(ValidationError):
+        RunsetVersions(lvs="x", bogus="y")  # type: ignore[call-arg]
+
+
+def test_project_config_runset_versions_partial(tmp_path: Path) -> None:
+    # A project that only imports calibre (no quantus) should be able to
+    # set only ``lvs`` and leave ``qrc`` as None.
+    p = tmp_path / "project.yaml"
+    p.write_text("runset_versions:\n  lvs: only-lvs\n", encoding="utf-8")
+    project = load_project(p)
+    assert project.runset_versions.lvs == "only-lvs"
+    assert project.runset_versions.qrc is None

@@ -181,8 +181,12 @@ def test_si_template_body_substitutions(si_raw: str) -> None:
     assert 'simRunDir = "[[output_dir]]"' in body
     # Quoted non-identity strings pass through unchanged.
     assert 'simSimulator = "auCdl"' in body
-    # The PDK-path line is left as-is (Step 7 flags it; 4b1 doesn't mutate).
-    assert "/data/RFIC3/projB/alice/setup/verification" in body
+    # The employee segment of ``/data/RFIC3/<project>/<employee>/`` is
+    # substituted via the shared employee_id pre-pass; the project segment
+    # stays raw so the PdkToken detector can still surface it as
+    # ``project_subdir`` for init-project to promote.
+    assert "/data/RFIC3/projB/[[employee_id]]/setup/verification" in body
+    assert "/data/RFIC3/projB/alice/" not in body
 
 
 def test_si_cross_validation_mismatch() -> None:
@@ -547,6 +551,257 @@ def test_merge_warns_when_source_key_missing_in_new_raw() -> None:
     assert any(
         "not found" in m and "vanished" in m for m in outcome.messages
     )
+
+
+# ---- Phase 4b2: aggregate_pdk_tokens ---------------------------------------
+
+
+def _all_four_results(raw_dir: Path):
+    """Import all 4 fixture raws and return the per-tool ImportResult dict."""
+    from auto_ext.core.importer import import_template
+
+    return {
+        "calibre": import_template(
+            "calibre", (raw_dir / "calibre_sample.qci").read_text(encoding="utf-8")
+        ),
+        "si": import_template(
+            "si", (raw_dir / "si_sample.env").read_text(encoding="utf-8")
+        ),
+        "quantus": import_template(
+            "quantus", (raw_dir / "quantus_sample.cmd").read_text(encoding="utf-8")
+        ),
+        "jivaro": import_template(
+            "jivaro", (raw_dir / "jivaro_sample.xml").read_text(encoding="utf-8")
+        ),
+    }
+
+
+def test_aggregate_tech_name_from_quantus(raw_dir: Path) -> None:
+    from auto_ext.core.importer import aggregate_pdk_tokens
+
+    constants = aggregate_pdk_tokens(_all_four_results(raw_dir))
+    assert constants.tech_name == "HN001"
+
+
+def test_aggregate_pdk_subdir_requires_multi_tool_agreement(raw_dir: Path) -> None:
+    # CFXXX appears in calibre + si + quantus → promote.
+    from auto_ext.core.importer import aggregate_pdk_tokens
+
+    constants = aggregate_pdk_tokens(_all_four_results(raw_dir))
+    assert constants.pdk_subdir == "CFXXX"
+
+
+def test_aggregate_runset_version_split_by_tool_group(raw_dir: Path) -> None:
+    from auto_ext.core.importer import aggregate_pdk_tokens
+
+    constants = aggregate_pdk_tokens(_all_four_results(raw_dir))
+    # calibre + si carry the LVS runset; they agree on Ver_Plus_1.0l_0.9.
+    assert constants.lvs_runset_version == "Ver_Plus_1.0l_0.9"
+    # quantus carries the QRC runset (single tool, single-source OK).
+    assert constants.qrc_runset_version == "Ver_Plus_1.0a"
+
+
+def test_aggregate_project_subdir_single_tool_promotes(raw_dir: Path) -> None:
+    # projB only appears in si's /data/RFIC3/<project>/ path; the relaxed
+    # project_subdir rule promotes any value that all tools carrying the
+    # category agree on (single-source OK).
+    from auto_ext.core.importer import aggregate_pdk_tokens
+
+    constants = aggregate_pdk_tokens(_all_four_results(raw_dir))
+    assert constants.project_subdir == "projB"
+    # No unclassified entries for projB (it was promoted).
+    assert not any(u.token.value == "projB" for u in constants.unclassified)
+
+
+def test_aggregate_project_subdir_conflict_unclassifies() -> None:
+    # si says projA, some other tool (calibre) says projB — cross-tool
+    # conflict triggers the unclassify-all fallback.
+    from auto_ext.core.importer import (
+        Identity,
+        ImportResult,
+        PdkToken,
+        aggregate_pdk_tokens,
+    )
+
+    si = ImportResult(
+        tool="si",
+        identity=Identity(),
+        template_body="",
+        pdk_tokens=[PdkToken(value="projA", category="project_subdir", line=1)],
+    )
+    calibre = ImportResult(
+        tool="calibre",
+        identity=Identity(),
+        template_body="",
+        pdk_tokens=[PdkToken(value="projB", category="project_subdir", line=1)],
+    )
+    constants = aggregate_pdk_tokens({"si": si, "calibre": calibre})
+    assert constants.project_subdir is None
+    conflicted = {u.token.value for u in constants.unclassified}
+    assert conflicted == {"projA", "projB"}
+
+
+def test_aggregate_single_tool_pdk_subdir_is_unclassified() -> None:
+    # Only calibre has CFZZZ; without a second tool agreeing, it stays
+    # unclassified per the strict ≥2-tool rule.
+    from auto_ext.core.importer import (
+        ImportResult,
+        Identity,
+        PdkToken,
+        aggregate_pdk_tokens,
+    )
+
+    calibre = ImportResult(
+        tool="calibre",
+        identity=Identity(),
+        template_body="",
+        pdk_tokens=[PdkToken(value="CFZZZ", category="pdk_subdir", line=1)],
+    )
+    constants = aggregate_pdk_tokens({"calibre": calibre})
+    assert constants.pdk_subdir is None
+    assert any(u.token.value == "CFZZZ" for u in constants.unclassified)
+
+
+def test_aggregate_runset_conflict_unclassifies_all() -> None:
+    # calibre + si disagree on LVS version → both tokens unclassify, none
+    # gets promoted. User must resolve.
+    from auto_ext.core.importer import (
+        Identity,
+        ImportResult,
+        PdkToken,
+        aggregate_pdk_tokens,
+    )
+
+    calibre = ImportResult(
+        tool="calibre",
+        identity=Identity(),
+        template_body="",
+        pdk_tokens=[PdkToken(value="Ver_Plus_1.0a", category="runset_version", line=1)],
+    )
+    si = ImportResult(
+        tool="si",
+        identity=Identity(),
+        template_body="",
+        pdk_tokens=[PdkToken(value="Ver_Plus_2.0b", category="runset_version", line=1)],
+    )
+    constants = aggregate_pdk_tokens({"calibre": calibre, "si": si})
+    assert constants.lvs_runset_version is None
+    conflicted = {u.token.value for u in constants.unclassified}
+    assert conflicted == {"Ver_Plus_1.0a", "Ver_Plus_2.0b"}
+
+
+def test_aggregate_abs_path_always_unclassified() -> None:
+    # abs_path tokens are never auto-promoted — user must decide.
+    from auto_ext.core.importer import (
+        Identity,
+        ImportResult,
+        PdkToken,
+        aggregate_pdk_tokens,
+    )
+
+    quantus = ImportResult(
+        tool="quantus",
+        identity=Identity(),
+        template_body="",
+        pdk_tokens=[
+            PdkToken(
+                value="/tmpdata/RFIC/rfic_share/bob/",
+                category="abs_path",
+                line=7,
+            )
+        ],
+    )
+    constants = aggregate_pdk_tokens({"quantus": quantus})
+    values = {u.token.value for u in constants.unclassified}
+    assert "/tmpdata/RFIC/rfic_share/bob/" in values
+
+
+def test_aggregate_tech_name_non_quantus_source_unclassified() -> None:
+    # HN... on calibre (unusual) is suspicious — do not promote, surface
+    # in unclassified for user review.
+    from auto_ext.core.importer import (
+        Identity,
+        ImportResult,
+        PdkToken,
+        aggregate_pdk_tokens,
+    )
+
+    calibre = ImportResult(
+        tool="calibre",
+        identity=Identity(),
+        template_body="",
+        pdk_tokens=[PdkToken(value="HN999", category="tech_name", line=1)],
+    )
+    constants = aggregate_pdk_tokens({"calibre": calibre})
+    assert constants.tech_name is None
+    assert any(u.token.value == "HN999" for u in constants.unclassified)
+
+
+# ---- Phase 4b2: apply_project_constants (body rewrite) --------------------
+
+
+def test_apply_constants_substitutes_all_fields_in_calibre() -> None:
+    from auto_ext.core.importer import ProjectConstants, apply_project_constants
+
+    body = (
+        "*lvsRulesFile: /r/LVS/Ver_Plus_1.0l_0.9/CFXXX/x.qcilvs\n"
+        "*cmnTemplate_RN: [[output_dir]]\n"
+    )
+    constants = ProjectConstants(
+        tech_name="HN001",
+        pdk_subdir="CFXXX",
+        lvs_runset_version="Ver_Plus_1.0l_0.9",
+        qrc_runset_version="Ver_Plus_1.0a",
+    )
+    out = apply_project_constants("calibre", body, constants)
+    assert "[[pdk_subdir]]" in out
+    assert "[[lvs_runset_version]]" in out
+    # Raw values no longer present (replaced).
+    assert "CFXXX" not in out
+    assert "Ver_Plus_1.0l_0.9" not in out
+    # Quantus-only runset untouched in a calibre body.
+    assert "Ver_Plus_1.0a" not in out
+    # tech_name absent in calibre body → no change.
+    # Identity placeholder untouched.
+    assert "[[output_dir]]" in out
+
+
+def test_apply_constants_quantus_uses_qrc_runset() -> None:
+    from auto_ext.core.importer import ProjectConstants, apply_project_constants
+
+    body = '-technology_name "HN001"\n-parasitic_blocking "/r/QRC/Ver_Plus_1.0a/CFXXX/x"\n'
+    constants = ProjectConstants(
+        tech_name="HN001",
+        pdk_subdir="CFXXX",
+        lvs_runset_version="Ver_Plus_1.0l_0.9",
+        qrc_runset_version="Ver_Plus_1.0a",
+    )
+    out = apply_project_constants("quantus", body, constants)
+    assert '-technology_name "[[tech_name]]"' in out
+    assert "[[qrc_runset_version]]" in out
+    assert "[[pdk_subdir]]" in out
+    # lvs version never appears in quantus body; unchanged either way.
+    assert "[[lvs_runset_version]]" not in out
+
+
+def test_apply_constants_no_substring_overshoot() -> None:
+    # pdk_subdir=projB must not match inside a hypothetical projBar identifier.
+    from auto_ext.core.importer import ProjectConstants, apply_project_constants
+
+    body = "path /data/RFIC3/projB/x\nother /data/RFIC3/projBar/y\n"
+    constants = ProjectConstants(project_subdir="projB")
+    out = apply_project_constants("si", body, constants)
+    assert "/data/RFIC3/[[project_subdir]]/x" in out
+    # projBar untouched because B is followed by [A-Za-z0-9].
+    assert "/data/RFIC3/projBar/y" in out
+
+
+def test_apply_constants_none_fields_are_no_op() -> None:
+    from auto_ext.core.importer import ProjectConstants, apply_project_constants
+
+    body = "some random content\n"
+    out = apply_project_constants("calibre", body, ProjectConstants())
+    assert out == body
 
 
 def test_merge_cross_tool_source_is_skipped() -> None:

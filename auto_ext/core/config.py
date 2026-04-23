@@ -48,6 +48,19 @@ class TemplatePaths(BaseModel):
     si: Path | None = None
 
 
+class RunsetVersions(BaseModel):
+    """Runset versions split by stage. Phase 4b2 populates these via
+    ``aggregate_pdk_tokens``: calibre/si raws carry the ``lvs`` string,
+    quantus carries ``qrc``. Both are optional — projects that only run
+    a subset of stages can leave the unused side ``None``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    lvs: str | None = None
+    qrc: str | None = None
+
+
 class ProjectConfig(BaseModel):
     """Schema for ``project.yaml``. ``source_path`` and ``raw`` are filled
     in by :func:`load_project` after validation and are excluded from
@@ -73,6 +86,25 @@ class ProjectConfig(BaseModel):
     #: Substituted into template paths like ``/tmpdata/RFIC/rfic_share/<id>/...``.
     #: If None, resolved at render time via ``$USER`` / ``$USERNAME`` / fallback.
     employee_id: str | None = None
+
+    #: Cadence tech library name (e.g. ``HN001``) surfaced in Quantus
+    #: ``-technology_name``. Populated by ``init-project`` from
+    #: ``aggregate_pdk_tokens``; leave ``None`` for projects that do not
+    #: reference a tech name in any template.
+    tech_name: str | None = None
+
+    #: PDK subdirectory name (e.g. ``CFXXX``) that appears under
+    #: ``$VERIFY_ROOT/runset/...`` in calibre/quantus/si templates.
+    pdk_subdir: str | None = None
+
+    #: Project subdirectory name (e.g. ``projB``) that appears under
+    #: ``/data/RFIC3/<project>/`` in absolute raw paths. Optional.
+    project_subdir: str | None = None
+
+    #: Per-stage runset versions. ``init-project`` fills ``lvs`` from
+    #: calibre/si rawfiles and ``qrc`` from quantus. Either side may be
+    #: ``None`` when the corresponding stage is not imported.
+    runset_versions: RunsetVersions = Field(default_factory=RunsetVersions)
 
     #: Default refers to the env var set by the PDK setup; override only if
     #: you need a specific file different from ``$PDK_LAYER_MAP_FILE``.

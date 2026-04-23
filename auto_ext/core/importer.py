@@ -328,8 +328,9 @@ _CALIBRE_RULES: dict[str, list[_Rule]] = {
 
 
 def _import_calibre(raw: str, overrides: Identity | None) -> ImportResult:
+    preprocessed = _preprocess_employee_id(raw)
     identity, body, _aux = _apply_rules(
-        "calibre", raw, _CALIBRE_LINE_RE, _CALIBRE_RULES, overrides
+        "calibre", preprocessed, _CALIBRE_LINE_RE, _CALIBRE_RULES, overrides
     )
     return ImportResult(tool="calibre", identity=identity, template_body=body)
 
@@ -355,8 +356,9 @@ _SI_RULES: dict[str, list[_Rule]] = {
 
 
 def _import_si(raw: str, overrides: Identity | None) -> ImportResult:
+    preprocessed = _preprocess_employee_id(raw)
     identity, body, _aux = _apply_rules(
-        "si", raw, _SI_LINE_RE, _SI_RULES, overrides
+        "si", preprocessed, _SI_LINE_RE, _SI_RULES, overrides
     )
     return ImportResult(tool="si", identity=identity, template_body=body)
 
@@ -400,19 +402,31 @@ _QUANTUS_RULES: dict[str, list[_Rule]] = {
 }
 
 
-# Pre-pass: ``/tmpdata/RFIC/rfic_share/<id>/`` → ``.../[[employee_id]]/``.
-# Applied to the raw source *before* rule matching so identity rules see
-# a stable tmpdata prefix and so every embedded occurrence (regardless of
-# which ``-option`` line wraps it) gets substituted uniformly.
-_EMPLOYEE_ID_RE = re.compile(r"(/tmpdata/RFIC/rfic_share/)([^/\s\"']+)(/)")
+# Pre-pass: substitute employee_id in the two known path shapes that
+# carry it. Applied to the raw source *before* rule matching so identity
+# rules see stable prefixes.
+#
+# - ``/tmpdata/RFIC/rfic_share/<id>/`` → ``.../[[employee_id]]/`` (quantus)
+# - ``/data/RFIC3/<project>/<employee>/`` → ``.../<project>/[[employee_id]]/``
+#   (si's ``incFILE``). The project segment stays raw so the PdkToken
+#   detector can still surface it as ``project_subdir``.
+#
+# Both regexes require a trailing ``/`` so "bar" in ``/data/RFIC3/foo/bar}``
+# (no trailing slash) is not mis-substituted.
+_EMPLOYEE_ID_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(/tmpdata/RFIC/rfic_share/)([^/\s\"']+)(/)"),
+    re.compile(r"(/data/RFIC3/[^/\s\"']+/)([^/\s\"']+)(/)"),
+)
 
 
-def _substitute_employee_id(text: str) -> str:
-    return _EMPLOYEE_ID_RE.sub(r"\1[[employee_id]]\3", text)
+def _preprocess_employee_id(text: str) -> str:
+    for pattern in _EMPLOYEE_ID_PATTERNS:
+        text = pattern.sub(r"\1[[employee_id]]\3", text)
+    return text
 
 
 def _import_quantus(raw: str, overrides: Identity | None) -> ImportResult:
-    preprocessed = _substitute_employee_id(raw)
+    preprocessed = _preprocess_employee_id(raw)
     identity, body, _aux = _apply_rules(
         "quantus", preprocessed, _QUANTUS_LINE_RE, _QUANTUS_RULES, overrides
     )
@@ -457,8 +471,9 @@ _JIVARO_RULES: dict[str, list[_Rule]] = {
 
 
 def _import_jivaro(raw: str, overrides: Identity | None) -> ImportResult:
+    preprocessed = _preprocess_employee_id(raw)
     identity, body, _aux = _apply_rules(
-        "jivaro", raw, _JIVARO_LINE_RE, _JIVARO_RULES, overrides
+        "jivaro", preprocessed, _JIVARO_LINE_RE, _JIVARO_RULES, overrides
     )
     return ImportResult(tool="jivaro", identity=identity, template_body=body)
 
@@ -775,3 +790,248 @@ def merge_reimport(
 
     merged_manifest = existing_manifest.model_copy(update={"knobs": merged_knobs})
     return MergeOutcome(body=body, manifest=merged_manifest, messages=messages)
+
+
+# ---- cross-file PDK aggregation (Phase 4b2) --------------------------------
+
+
+@dataclass(frozen=True)
+class UnclassifiedToken:
+    """A :class:`PdkToken` that :func:`aggregate_pdk_tokens` did not
+    promote. Carries the originating tool so the review report can cite
+    which raw file the token came from.
+    """
+
+    tool: TOOL
+    token: PdkToken
+
+
+@dataclass(frozen=True)
+class ProjectConstants:
+    """Cross-file PDK constants inferred from a set of :class:`ImportResult`.
+
+    Populated by :func:`aggregate_pdk_tokens`. Maps one-to-one onto the
+    Phase 4b2 ``ProjectConfig`` fields (``tech_name``, ``pdk_subdir``,
+    ``project_subdir``, ``runset_versions.lvs``, ``runset_versions.qrc``).
+    ``unclassified`` surfaces hardcoded values that couldn't be confidently
+    promoted — rendered as-is in the review report for user review.
+    """
+
+    tech_name: str | None = None
+    pdk_subdir: str | None = None
+    project_subdir: str | None = None
+    lvs_runset_version: str | None = None
+    qrc_runset_version: str | None = None
+    unclassified: tuple[UnclassifiedToken, ...] = ()
+
+
+def aggregate_pdk_tokens(
+    results: dict[TOOL, ImportResult],
+) -> ProjectConstants:
+    """Cross-reference :class:`PdkToken`\\ s from every tool's import.
+
+    Promotion policy (from the Phase 4b2 plan, Q6/Q8):
+
+    - ``tech_name``: take the first ``HN...`` token from quantus. Non-quantus
+      ``tech_name`` tokens go to ``unclassified`` (suspicious — calibre/si/jivaro
+      don't carry ``-technology_name``).
+    - ``pdk_subdir``: a value must appear in ≥ 2 tools to promote. Below
+      threshold → all occurrences of that category land in ``unclassified``.
+      Rationale: pdk_subdir is cross-referenced across every runset path;
+      a single-file hit is more likely a partial raw export than a real
+      project constant.
+    - ``project_subdir``: single-tool OK (realistically only si's
+      ``/data/RFIC3/<project>/`` path carries it). Cross-tool conflict →
+      unclassify all so the user picks a winner.
+    - ``runset_versions.lvs``: collected from calibre + si (both carry LVS
+      runset strings). If the tool group has exactly one distinct value →
+      promote; conflict → unclassify all.
+    - ``runset_versions.qrc``: same rule, applied to the quantus group.
+    - ``abs_path`` and ``unknown`` categories are always unclassified —
+      they're for surfacing absolute paths the user must review, never
+      auto-substituted.
+    """
+
+    unclassified: list[UnclassifiedToken] = []
+
+    # ---- tech_name --------------------------------------------------------
+    tech_name: str | None = None
+    for tool, result in results.items():
+        for tok in result.pdk_tokens:
+            if tok.category != "tech_name":
+                continue
+            if tool == "quantus":
+                if tech_name is None:
+                    tech_name = tok.value
+                elif tok.value != tech_name:
+                    unclassified.append(UnclassifiedToken(tool=tool, token=tok))
+                # Else: duplicate of the promoted value — silently absorb.
+            else:
+                unclassified.append(UnclassifiedToken(tool=tool, token=tok))
+
+    # ---- pdk_subdir (strict ≥ 2-tool agreement) ---------------------------
+    pdk_subdir = _promote_multi_tool(results, "pdk_subdir", unclassified)
+
+    # ---- project_subdir (relaxed: single-tool OK, conflicts unclassify) ---
+    project_subdir = _promote_any_agreeing(
+        results, "project_subdir", unclassified
+    )
+
+    # ---- runset_versions (tool-group scoped) ------------------------------
+    lvs_runset = _promote_runset(results, ("calibre", "si"), unclassified)
+    qrc_runset = _promote_runset(results, ("quantus",), unclassified)
+
+    # ---- abs_path / unknown always unclassified ---------------------------
+    for tool, result in results.items():
+        for tok in result.pdk_tokens:
+            if tok.category in ("abs_path", "unknown"):
+                unclassified.append(UnclassifiedToken(tool=tool, token=tok))
+
+    # Deterministic report order: by tool, then line, then value.
+    unclassified.sort(key=lambda u: (u.tool, u.token.line, u.token.value))
+
+    return ProjectConstants(
+        tech_name=tech_name,
+        pdk_subdir=pdk_subdir,
+        project_subdir=project_subdir,
+        lvs_runset_version=lvs_runset,
+        qrc_runset_version=qrc_runset,
+        unclassified=tuple(unclassified),
+    )
+
+
+def _promote_multi_tool(
+    results: dict[TOOL, ImportResult],
+    category: str,
+    unclassified: list[UnclassifiedToken],
+) -> str | None:
+    """Promote a single ``category`` value iff it appears in ≥ 2 tools.
+
+    Every other token of that category (losing value, or all tokens when
+    nothing meets the threshold) is appended to ``unclassified``.
+    """
+    value_to_tools: dict[str, set[TOOL]] = {}
+    hits: list[tuple[TOOL, PdkToken]] = []
+    for tool, result in results.items():
+        for tok in result.pdk_tokens:
+            if tok.category != category:
+                continue
+            value_to_tools.setdefault(tok.value, set()).add(tool)
+            hits.append((tool, tok))
+
+    winner: str | None = None
+    best_count = 1
+    for value, tools in value_to_tools.items():
+        if len(tools) >= 2 and len(tools) > best_count:
+            winner = value
+            best_count = len(tools)
+
+    for tool, tok in hits:
+        if tok.value == winner:
+            continue
+        unclassified.append(UnclassifiedToken(tool=tool, token=tok))
+
+    return winner
+
+
+def _promote_any_agreeing(
+    results: dict[TOOL, ImportResult],
+    category: str,
+    unclassified: list[UnclassifiedToken],
+) -> str | None:
+    """Promote ``category`` if every tool carrying it agrees on one value.
+
+    Single-tool sources are OK — unlike :func:`_promote_multi_tool` this
+    does not require cross-file corroboration. Cross-tool disagreement is
+    the only failure mode; every conflicting token goes to ``unclassified``.
+    """
+    values: set[str] = set()
+    hits: list[tuple[TOOL, PdkToken]] = []
+    for tool, result in results.items():
+        for tok in result.pdk_tokens:
+            if tok.category != category:
+                continue
+            values.add(tok.value)
+            hits.append((tool, tok))
+
+    if len(values) == 1:
+        return next(iter(values))
+
+    for tool, tok in hits:
+        unclassified.append(UnclassifiedToken(tool=tool, token=tok))
+    return None
+
+
+def _promote_runset(
+    results: dict[TOOL, ImportResult],
+    tool_group: tuple[TOOL, ...],
+    unclassified: list[UnclassifiedToken],
+) -> str | None:
+    """Promote a runset_version for ``tool_group`` (calibre/si → lvs;
+    quantus → qrc).
+
+    Policy: the group must agree on exactly one distinct value. Zero →
+    nothing to promote. Conflict → everyone unclassifies (human-review
+    signal; the runset strings are too critical to guess).
+    """
+    hits: list[tuple[TOOL, PdkToken]] = []
+    values: set[str] = set()
+    for tool in tool_group:
+        if tool not in results:
+            continue
+        for tok in results[tool].pdk_tokens:
+            if tok.category != "runset_version":
+                continue
+            hits.append((tool, tok))
+            values.add(tok.value)
+
+    if len(values) == 1:
+        return next(iter(values))
+
+    for tool, tok in hits:
+        unclassified.append(UnclassifiedToken(tool=tool, token=tok))
+    return None
+
+
+# ---- body rewrite (apply ProjectConstants to a template body) -------------
+
+
+def apply_project_constants(
+    tool: TOOL, body: str, constants: ProjectConstants
+) -> str:
+    """Substitute promoted PDK constants in ``body`` with Jinja placeholders.
+
+    Each raw value is replaced in-place at every non-identifier-bounded
+    occurrence: the lookaround guards ``(?<![A-Za-z0-9_])`` / ``(?![A-Za-z0-9_])``
+    prevent short matches from eating parts of longer identifiers (e.g.
+    ``HN001`` inside ``HN0010`` stays intact; ``projB`` inside ``projBar`` stays
+    intact). Substitutions are applied in order of descending value length
+    so a short value does not pre-empt a longer one that includes it.
+
+    Runset versions are per-tool: calibre/si bodies receive ``[[lvs_runset_version]]``,
+    quantus bodies receive ``[[qrc_runset_version]]``, jivaro bodies receive
+    neither (jivaro XML never references runset strings).
+    """
+    substitutions: list[tuple[str, str]] = []
+    if constants.tech_name:
+        substitutions.append((constants.tech_name, "[[tech_name]]"))
+    if constants.pdk_subdir:
+        substitutions.append((constants.pdk_subdir, "[[pdk_subdir]]"))
+    if constants.project_subdir:
+        substitutions.append((constants.project_subdir, "[[project_subdir]]"))
+    if tool in ("calibre", "si") and constants.lvs_runset_version:
+        substitutions.append(
+            (constants.lvs_runset_version, "[[lvs_runset_version]]")
+        )
+    elif tool == "quantus" and constants.qrc_runset_version:
+        substitutions.append(
+            (constants.qrc_runset_version, "[[qrc_runset_version]]")
+        )
+
+    substitutions.sort(key=lambda p: -len(p[0]))
+    for raw, placeholder in substitutions:
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9_])" + re.escape(raw) + r"(?![A-Za-z0-9_])"
+        )
+        body = pattern.sub(placeholder, body)
+    return body
