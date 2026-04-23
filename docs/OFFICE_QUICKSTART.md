@@ -41,7 +41,7 @@ python3.11 -c "import jinja2, ruamel.yaml, pydantic, typer, rich; print('deps ok
 python3.11 -m pytest tests/ -v
 ```
 
-预期：**Phase 4b2 后应有 284 全绿**（Windows 上 278 绿 + 6 个 symlink 测试 skip；Linux 上 284 全绿，symlink 测试在 Linux 能跑起来）。
+预期：**Phase 4b3 后应有 295 全绿**（Windows 上 289 绿 + 6 个 symlink 测试 skip；Linux 上 295 全绿，symlink 测试在 Linux 能跑起来）。
 
 全绿数量随 phase 增长 —— 如果当前数量偏离太多**停下来**先查再往下走，后面出问题排查不清楚是 real-env 的锅还是代码的锅。
 
@@ -311,7 +311,11 @@ LVS 过了之后：
 
 ### 6.2 仓库自带的老模板
 
-仓库 `templates/` 下还有历史遗留的 5 个 Phase 3 模板（`wiodio_noConnectByNetName.qci.j2` 等）—— **那些模板**还有手动硬编码（`CFXXX` / `HNXXXX` / `Ver_Plus_*` / `Hi1A22V100_C1Xplus`）要 `grep -rn` 改，或者**更推荐直接用 `init-project` 从你最新的 raw 重新生成一套 imported.* 模板**，然后把 `project.yaml.templates` 指向新的。
+仓库 `templates/` 下历史遗留的 5 个 Phase 3 模板（`wiodio_noConnectByNetName.qci.j2` / `ext.cmd.j2` / `dspf.cmd.j2` / `default.env.j2` 等）**已经**把 PDK 硬编码全部抽象成了 `[[tech_name]]` / `[[pdk_subdir]]` / `[[lvs_runset_version]]` / `[[qrc_runset_version]]` 占位符（Phase 4b3 起），所以直接用这些模板、让 `project.yaml` 填那几个字段就能跑。
+
+`tech_name` 还支持**自动推导**：`project.yaml` 里不设 `tech_name` 时，runner 会依次从 `$PDK_TECH_FILE` / `$PDK_LAYER_MAP_FILE` / `$PDK_DISPLAY_FILE` 的父目录名推出来（第一个有值的 env var 生效）。默认候选列表也可以通过 `project.yaml.tech_name_env_vars` 覆盖。推不出来时 `check-env` 会给黄色警告。
+
+如果想换一套完全没见过的 raw 做起点，还是推荐 `init-project` 从头生成。
 
 ---
 

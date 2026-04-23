@@ -29,7 +29,12 @@ from pathlib import Path
 from typing import Any
 
 from auto_ext.core.config import ProjectConfig, TaskConfig
-from auto_ext.core.env import discover_required_vars, resolve_env, substitute_env
+from auto_ext.core.env import (
+    derive_parent_dir_from_env_candidates,
+    discover_required_vars,
+    resolve_env,
+    substitute_env,
+)
 from auto_ext.core.errors import AutoExtError, ConfigError
 from auto_ext.core.manifest import load_manifest, resolve_knob_values
 from auto_ext.core.workdir import serial_workdir
@@ -333,6 +338,10 @@ def _build_context(
         or "unknown"
     )
 
+    tech_name = project.tech_name or derive_parent_dir_from_env_candidates(
+        project.tech_name_env_vars, resolved_env
+    )
+
     return {
         "library": task.library,
         "cell": task.cell,
@@ -347,7 +356,7 @@ def _build_context(
         "employee_id": employee_id,
         "jivaro_frequency_limit": task.jivaro.frequency_limit,
         "jivaro_error_max": task.jivaro.error_max,
-        "tech_name": project.tech_name,
+        "tech_name": tech_name,
         "pdk_subdir": project.pdk_subdir,
         "project_subdir": project.project_subdir,
         "lvs_runset_version": project.runset_versions.lvs,
@@ -372,7 +381,10 @@ def _discover_env_vars(project: ProjectConfig, tasks: list[TaskConfig]) -> set[s
                 sources.append(Path(tp).read_text(encoding="utf-8"))
             except OSError as exc:
                 raise ConfigError(f"cannot read template {tp}: {exc}") from exc
-    return discover_required_vars(sources)
+    required = discover_required_vars(sources)
+    if project.tech_name is None:
+        required.update(project.tech_name_env_vars)
+    return required
 
 
 def _validate_stages(stages: list[str]) -> None:

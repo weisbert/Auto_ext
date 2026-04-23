@@ -187,10 +187,11 @@ def test_build_context_surfaces_pdk_fields(project_config) -> None:
 
 
 def test_build_context_pdk_fields_default_to_none(project_config) -> None:
-    """When the project does not set PDK fields, they surface as None in the
-    render context. A template referencing [[tech_name]] with strict_undef
-    would then raise a TemplateError — expected behaviour for projects that
-    have not yet run init-project.
+    """When the project does not set PDK fields AND autoderive candidate env
+    vars are absent, they surface as None in the render context. A template
+    referencing [[tech_name]] with strict_undef would then raise — expected
+    behaviour for projects that have not yet run init-project and have no
+    PDK env set.
     """
     from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
     from auto_ext.core.runner import _build_context
@@ -212,12 +213,151 @@ def test_build_context_pdk_fields_default_to_none(project_config) -> None:
     ctx = _build_context(
         project_config,
         task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w", "PDK_LAYER_MAP_FILE": "/w/layers.map"},
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
     )
     assert ctx["tech_name"] is None
     assert ctx["pdk_subdir"] is None
     assert ctx["lvs_runset_version"] is None
     assert ctx["qrc_runset_version"] is None
+
+
+def test_build_context_tech_name_autoderived_from_pdk_tech_file(project_config) -> None:
+    """When tech_name is unset, runner derives it from PDK_TECH_FILE's
+    parent dir (first candidate in tech_name_env_vars).
+    """
+    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
+    from auto_ext.core.runner import _build_context
+
+    task = TaskConfig(
+        task_id="L__c__layout__schematic",
+        library="L",
+        cell="c",
+        lvs_source_view="schematic",
+        lvs_layout_view="layout",
+        templates=TemplatePaths(),
+        ground_net="vss",
+        out_file=None,
+        jivaro=JivaroConfig(),
+        continue_on_lvs_fail=False,
+        spec_index=0,
+        expansion_index=0,
+    )
+    ctx = _build_context(
+        project_config,
+        task,
+        resolved_env={
+            "WORK_ROOT": "/w",
+            "WORK_ROOT2": "/w",
+            "PDK_TECH_FILE": "/pdk/HN042/techfile.tf",
+        },
+    )
+    assert ctx["tech_name"] == "HN042"
+
+
+def test_build_context_tech_name_autoderive_falls_through_to_layer_map(project_config) -> None:
+    """When PDK_TECH_FILE is not set but PDK_LAYER_MAP_FILE is, derive from
+    the second candidate. Confirms candidate-list walk.
+    """
+    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
+    from auto_ext.core.runner import _build_context
+
+    task = TaskConfig(
+        task_id="L__c__layout__schematic",
+        library="L",
+        cell="c",
+        lvs_source_view="schematic",
+        lvs_layout_view="layout",
+        templates=TemplatePaths(),
+        ground_net="vss",
+        out_file=None,
+        jivaro=JivaroConfig(),
+        continue_on_lvs_fail=False,
+        spec_index=0,
+        expansion_index=0,
+    )
+    ctx = _build_context(
+        project_config,
+        task,
+        resolved_env={
+            "WORK_ROOT": "/w",
+            "WORK_ROOT2": "/w",
+            "PDK_LAYER_MAP_FILE": "/pdk/HN001/layers.map",
+        },
+    )
+    assert ctx["tech_name"] == "HN001"
+
+
+def test_build_context_tech_name_explicit_overrides_autoderive(project_config) -> None:
+    """Explicit project.tech_name always wins over env-var derivation."""
+    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
+    from auto_ext.core.runner import _build_context
+
+    project_config.tech_name = "HN999"
+    task = TaskConfig(
+        task_id="L__c__layout__schematic",
+        library="L",
+        cell="c",
+        lvs_source_view="schematic",
+        lvs_layout_view="layout",
+        templates=TemplatePaths(),
+        ground_net="vss",
+        out_file=None,
+        jivaro=JivaroConfig(),
+        continue_on_lvs_fail=False,
+        spec_index=0,
+        expansion_index=0,
+    )
+    ctx = _build_context(
+        project_config,
+        task,
+        resolved_env={
+            "WORK_ROOT": "/w",
+            "WORK_ROOT2": "/w",
+            "PDK_TECH_FILE": "/pdk/HN042/techfile.tf",
+        },
+    )
+    assert ctx["tech_name"] == "HN999"
+
+
+def test_discover_env_vars_adds_tech_name_candidates_when_unset(
+    project_tools_config: Path,
+) -> None:
+    """When tech_name is None, _discover_env_vars unions tech_name_env_vars
+    so they get a row in check-env output and are available for autoderive.
+    Uses a custom candidate list that does not overlap with the default
+    ``layer_map`` refs so the assertion is purely about the autoderive path.
+    """
+    from auto_ext.core.runner import _discover_env_vars
+
+    (project_tools_config / "project.yaml").write_text(
+        "templates: {}\n"
+        "tech_name_env_vars: [MY_PDK_TECH, MY_PDK_LAYERS]\n",
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    required = _discover_env_vars(project, tasks)
+    assert "MY_PDK_TECH" in required
+    assert "MY_PDK_LAYERS" in required
+
+
+def test_discover_env_vars_omits_tech_name_candidates_when_set(
+    project_tools_config: Path,
+) -> None:
+    """When tech_name is explicit, candidate env vars are not added to the
+    discovered set. Uses a custom candidate list to avoid overlap with
+    ``layer_map``'s default env refs."""
+    from auto_ext.core.runner import _discover_env_vars
+
+    (project_tools_config / "project.yaml").write_text(
+        "tech_name: HN001\n"
+        "templates: {}\n"
+        "tech_name_env_vars: [MY_PDK_TECH, MY_PDK_LAYERS]\n",
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    required = _discover_env_vars(project, tasks)
+    assert "MY_PDK_TECH" not in required
+    assert "MY_PDK_LAYERS" not in required
 
 
 def test_jivaro_without_out_file_rejected(

@@ -17,6 +17,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Literal
 
 from auto_ext.core.errors import EnvResolutionError
@@ -110,6 +111,29 @@ def resolve_env(required: set[str], overrides: dict[str, str]) -> EnvResolution:
             logger.warning("env %s is unresolved (no override, not in os.environ)", var)
 
     return EnvResolution(resolved=resolved, sources=sources)
+
+
+def derive_parent_dir_from_env_candidates(
+    candidate_var_names: list[str],
+    resolved_env: dict[str, str],
+) -> str | None:
+    """Return ``Path(value).parent.name`` for the first candidate env var
+    that resolves to a non-empty path with a non-empty parent.
+
+    Used by ``tech_name`` auto-derivation: when ``project.tech_name`` is
+    unset, walk the project's ``tech_name_env_vars`` candidates and take
+    the parent dir of the first one set. Returns ``None`` if no candidate
+    resolves to something usable.
+    """
+
+    for var in candidate_var_names:
+        value = resolved_env.get(var, "")
+        if not value:
+            continue
+        parent = Path(value).parent.name
+        if parent:
+            return parent
+    return None
 
 
 def substitute_env(text: str, resolved: dict[str, str]) -> str:

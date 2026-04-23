@@ -1,4 +1,4 @@
-*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/CFXXX.wodio.qcilvs
+*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/[[lvs_runset_version]]/[[pdk_subdir]]/[[pdk_subdir]].wodio.qcilvs
 *lvsRunDir: [[output_dir]]
 *lvsLayoutPaths: [[cell]].calibre.db
 *lvsLayoutPrimary: [[cell]]
@@ -23,7 +23,7 @@
 *lvsSVDBcci: 1
 *lvsReportOptions: S
 *lvsPreTriggers: {{rm -rf %d/svdb} process 1}
-*lvsPostTriggers: {{rm -rf %d/query_output} process 1} {{mkdir %d/query_output} process 1} {{calibre -query_input $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck/query_cmd -query svdb } process 1}
+*lvsPostTriggers: {{rm -rf %d/query_output} process 1} {{mkdir %d/query_output} process 1} {{calibre -query_input $VERIFY_ROOT/runset/Calibre_QRC/QRC/[[qrc_runset_version]]/[[pdk_subdir]]/QCI_deck/query_cmd -query svdb } process 1}
 *lvsAbortOnSupplyError: 0
 *cmnWarnLayoutOverwrite: 0
 *cmnWarnSourceOverwrite: 0

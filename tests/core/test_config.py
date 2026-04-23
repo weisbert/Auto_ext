@@ -402,3 +402,27 @@ def test_project_config_runset_versions_partial(tmp_path: Path) -> None:
     project = load_project(p)
     assert project.runset_versions.lvs == "only-lvs"
     assert project.runset_versions.qrc is None
+
+
+def test_project_config_default_tech_name_env_vars(fixtures_dir: Path) -> None:
+    """tech_name_env_vars defaults to the three PDK env var names."""
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    assert project.tech_name_env_vars == [
+        "PDK_TECH_FILE",
+        "PDK_LAYER_MAP_FILE",
+        "PDK_DISPLAY_FILE",
+    ]
+
+
+def test_project_config_override_tech_name_env_vars(tmp_path: Path) -> None:
+    """Projects can override the candidate list when their PDK uses
+    different env var names."""
+    p = tmp_path / "project.yaml"
+    p.write_text(
+        "tech_name_env_vars:\n"
+        "  - MY_PDK_TECH\n"
+        "  - MY_PDK_LAYERS\n",
+        encoding="utf-8",
+    )
+    project = load_project(p)
+    assert project.tech_name_env_vars == ["MY_PDK_TECH", "MY_PDK_LAYERS"]

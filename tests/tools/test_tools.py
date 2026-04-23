@@ -227,6 +227,10 @@ def test_production_templates_render(
         "employee_id": "alice",
         "jivaro_frequency_limit": 14,
         "jivaro_error_max": 2,
+        "tech_name": "HN001",
+        "pdk_subdir": "CFXXX",
+        "lvs_runset_version": "Ver_Plus_1.0l_0.9",
+        "qrc_runset_version": "Ver_Plus_1.0a",
     }
     env = {
         "WORK_ROOT": "/w",

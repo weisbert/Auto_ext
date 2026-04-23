@@ -6,6 +6,7 @@ import pytest
 
 from auto_ext.core.env import (
     EnvResolution,
+    derive_parent_dir_from_env_candidates,
     discover_required_vars,
     resolve_env,
     substitute_env,
@@ -179,3 +180,47 @@ def test_envresolution_is_frozen() -> None:
     r = EnvResolution(resolved={"X": "1"}, sources={"X": "shell"})
     with pytest.raises((AttributeError, TypeError)):
         r.resolved = {}  # type: ignore[misc]
+
+
+# ---- derive_parent_dir_from_env_candidates ---------------------------------
+
+
+def test_derive_parent_dir_returns_first_set_var() -> None:
+    resolved = {
+        "PDK_TECH_FILE": "/pdk/HN042/techfile.tf",
+        "PDK_LAYER_MAP_FILE": "/pdk/HN001/layers.map",
+    }
+    assert (
+        derive_parent_dir_from_env_candidates(
+            ["PDK_TECH_FILE", "PDK_LAYER_MAP_FILE"], resolved
+        )
+        == "HN042"
+    )
+
+
+def test_derive_parent_dir_skips_empty_values() -> None:
+    resolved = {"PDK_TECH_FILE": "", "PDK_LAYER_MAP_FILE": "/pdk/HN001/layers.map"}
+    assert (
+        derive_parent_dir_from_env_candidates(
+            ["PDK_TECH_FILE", "PDK_LAYER_MAP_FILE"], resolved
+        )
+        == "HN001"
+    )
+
+
+def test_derive_parent_dir_returns_none_when_all_unset() -> None:
+    assert (
+        derive_parent_dir_from_env_candidates(
+            ["PDK_TECH_FILE", "PDK_LAYER_MAP_FILE", "PDK_DISPLAY_FILE"], {}
+        )
+        is None
+    )
+
+
+def test_derive_parent_dir_returns_none_when_path_has_no_parent() -> None:
+    # Bare filename (no parent dir) → no usable tech name.
+    resolved = {"PDK_TECH_FILE": "techfile.tf"}
+    assert (
+        derive_parent_dir_from_env_candidates(["PDK_TECH_FILE"], resolved)
+        is None
+    )

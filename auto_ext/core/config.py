@@ -90,8 +90,20 @@ class ProjectConfig(BaseModel):
     #: Cadence tech library name (e.g. ``HN001``) surfaced in Quantus
     #: ``-technology_name``. Populated by ``init-project`` from
     #: ``aggregate_pdk_tokens``; leave ``None`` for projects that do not
-    #: reference a tech name in any template.
+    #: reference a tech name in any template. When ``None``, runner falls
+    #: back to auto-derivation from ``tech_name_env_vars``.
     tech_name: str | None = None
+
+    #: Env vars consulted, in order, when ``tech_name`` is ``None``. First
+    #: var whose value is non-empty wins; tech name = ``Path(value).parent.name``.
+    #: Override per-project if the local PDK uses different env var names.
+    tech_name_env_vars: list[str] = Field(
+        default_factory=lambda: [
+            "PDK_TECH_FILE",
+            "PDK_LAYER_MAP_FILE",
+            "PDK_DISPLAY_FILE",
+        ]
+    )
 
     #: PDK subdirectory name (e.g. ``CFXXX``) that appears under
     #: ``$VERIFY_ROOT/runset/...`` in calibre/quantus/si templates.

@@ -173,6 +173,11 @@ work_root: {wa_posix}
 verify_root: {wa_posix}/fake/verify
 setup_root: {wa_posix}/fake/setup
 employee_id: alice
+tech_name: HN001
+pdk_subdir: CFXXX
+runset_versions:
+  lvs: Ver_Plus_1.0l_0.9
+  qrc: Ver_Plus_1.0a
 layer_map: {wa_posix}/fake/layers.map
 env_overrides:
   WORK_ROOT: {wa_posix}

@@ -1099,7 +1099,7 @@ def check_env(
     from rich.table import Table
 
     from auto_ext.core.config import load_project, load_tasks
-    from auto_ext.core.env import resolve_env
+    from auto_ext.core.env import derive_parent_dir_from_env_candidates, resolve_env
     from auto_ext.core.errors import AutoExtError
     from auto_ext.core.runner import _discover_env_vars
 
@@ -1127,6 +1127,18 @@ def check_env(
         style = {"missing": "red", "override": "yellow", "shell": "green"}[src]
         table.add_row(name, f"[{style}]{src}[/]", val or "[dim](empty)[/]")
     console.print(table)
+
+    if project.tech_name is None:
+        derived = derive_parent_dir_from_env_candidates(
+            project.tech_name_env_vars, resolution.resolved
+        )
+        if derived is None:
+            typer.secho(
+                f"warning: tech_name not set in project.yaml and could not "
+                f"auto-derive from {project.tech_name_env_vars}. Templates "
+                f"referencing [[tech_name]] will fail to render.",
+                fg=typer.colors.YELLOW,
+            )
 
     if resolution.missing:
         console.print(f"[red]missing vars: {resolution.missing}[/]")

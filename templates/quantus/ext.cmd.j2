@@ -15,7 +15,7 @@ extraction_setup \
               -max_fracture_length infinite \
               -max_fracture_length_unit "MICRONS" \
               -max_via_array_size "auto" \
-              -parasitic_blocking_device_cells_file "$env(VERIFY_ROOT)/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck/preserveCellList.txt" \
+              -parasitic_blocking_device_cells_file "$env(VERIFY_ROOT)/runset/Calibre_QRC/QRC/[[qrc_runset_version]]/[[pdk_subdir]]/QCI_deck/preserveCellList.txt" \
               -net_name_space "SCHEMATIC"
 filter_cap \
               -exclude_self_cap true \
@@ -59,6 +59,6 @@ process_technology \
               -technology_corner \
               "TYPICAL" \
               -technology_library_file "$env(SETUP_ROOT)/assura_tech.lib" \
-              -technology_name "<HNxxxx>" \
+              -technology_name "[[tech_name]]" \
               -temperature \
               [[temperature]]
