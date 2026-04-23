@@ -169,7 +169,7 @@ Si 失败最常见的几个原因：
 ```
 
 预期：
-- `strmout` 生成 `$WORK_ROOT/cds/verify/QCI_PATH_<cell>/<cell>.gds`
+- `strmout` 生成 `$WORK_ROOT/cds/verify/QCI_PATH_<cell>/<cell>.calibre.db`（GDSII 内容，文件名对齐 Calibre 模板里的 `*lvsLayoutPaths`）
 - `calibre` 产出 LVS report，`$WORK_ROOT/cds/verify/QCI_PATH_<cell>/<cell>.lvs.report`
 - runner 解析 report，banner=CORRECT 且 discrepancies=0 → stage passed
 

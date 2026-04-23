@@ -2,10 +2,13 @@
 
 Strict criterion:
 - Banner ``INCORRECT`` is authoritative: result is fail regardless of counts.
-- Banner ``CORRECT`` plus ``DISCREPANCIES = 0`` is the only true pass.
-- Banner ``CORRECT`` plus non-zero or missing ``DISCREPANCIES`` counts as fail
-  with a WARNING (the report is internally inconsistent; refusing to pass it
-  is safer than trusting the banner).
+- Banner ``CORRECT`` plus ``DISCREPANCIES = 0`` is a pass.
+- Banner ``CORRECT`` plus non-zero ``DISCREPANCIES`` is fail with a WARNING.
+- Banner ``CORRECT`` without a ``DISCREPANCIES`` line: some Calibre versions
+  (e.g. v2019.2) omit the count on clean passes, using the CELL SUMMARY table
+  as the authoritative record instead. Fall back to scanning CELL SUMMARY: if
+  every row reads CORRECT we pass; if the table is absent or empty we treat
+  the report as truncated and fail.
 - No banner at all -> :class:`CheckError` (report is too malformed to classify).
 
 ``parse_lvs_report`` is a thin wrapper over :func:`parse_lvs_report_detailed`
@@ -31,9 +34,32 @@ logger = logging.getLogger(__name__)
 _RE_BANNER_CORRECT = re.compile(r"(?<![A-Z])CORRECT(?![A-Z])")
 _RE_BANNER_INCORRECT = re.compile(r"(?<![A-Z])INCORRECT(?![A-Z])")
 
-# "DISCREPANCIES = N" — appears in both passing (= 0) and failing reports,
-# so we must parse the count, not just the presence.
+# "DISCREPANCIES = N" — newer Calibre prints this for passes and fails; older
+# versions (e.g. v2019.2) omit it on clean passes, hence the CELL SUMMARY
+# fallback below.
 _RE_DISCREPANCIES = re.compile(r"DISCREPANCIES\s*=\s*(\d+)", re.IGNORECASE)
+
+# CELL SUMMARY fallback: detect the section header, then scan its rows. Each
+# row is a three-column line "<result> <layout> <source>" where result is
+# CORRECT or INCORRECT. Used only when the DISCREPANCIES line is absent.
+_RE_CELL_SUMMARY_HEADER = re.compile(r"CELL\s+SUMMARY", re.IGNORECASE)
+_RE_CELL_SUMMARY_ROW = re.compile(
+    r"^\s*(CORRECT|INCORRECT)\s+\S+\s+\S+\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _cell_summary_results(text: str) -> list[str] | None:
+    """Extract CELL SUMMARY row verdicts (``CORRECT`` / ``INCORRECT``).
+
+    Returns ``None`` if no CELL SUMMARY section is present (report likely
+    truncated); an empty list if the header exists but no rows parse; else
+    one uppercase verdict per matched row.
+    """
+    header = _RE_CELL_SUMMARY_HEADER.search(text)
+    if header is None:
+        return None
+    return [m.upper() for m in _RE_CELL_SUMMARY_ROW.findall(text[header.end() :])]
 
 
 @dataclass(frozen=True)
@@ -83,12 +109,23 @@ def parse_lvs_report_detailed(report: Path) -> LvsReport:
     if banner == "INCORRECT":
         passed = False
     elif discrepancies is None:
-        logger.warning(
-            "LVS report %s has banner CORRECT but no DISCREPANCIES count; "
-            "treating as fail",
-            report.name,
-        )
-        passed = False
+        rows = _cell_summary_results(text)
+        if rows and all(r == "CORRECT" for r in rows):
+            logger.info(
+                "LVS report %s: banner CORRECT, no DISCREPANCIES line, "
+                "CELL SUMMARY has %d row(s) all CORRECT; treating as pass",
+                report.name,
+                len(rows),
+            )
+            passed = True
+        else:
+            logger.warning(
+                "LVS report %s has banner CORRECT but no DISCREPANCIES count "
+                "and no usable CELL SUMMARY; report may be truncated; "
+                "treating as fail",
+                report.name,
+            )
+            passed = False
     elif discrepancies > 0:
         logger.warning(
             "LVS report %s has banner CORRECT but %d discrepancies; treating as fail",

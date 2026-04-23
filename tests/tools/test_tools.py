@@ -123,7 +123,7 @@ def test_strmout_argv_built_from_context(tmp_path: Path) -> None:
     assert "-topCell" in argv and argv[argv.index("-topCell") + 1] == "inv"
     assert "-view" in argv and argv[argv.index("-view") + 1] == "layout"
     strm_idx = argv.index("-strmFile") + 1
-    assert argv[strm_idx].replace("\\", "/").endswith("/w/cds/out/inv.gds")
+    assert argv[strm_idx].replace("\\", "/").endswith("/w/cds/out/inv.calibre.db")
     assert "-layerMap" in argv
     assert argv[argv.index("-layerMap") + 1] == "/pdk/layers.map"
 

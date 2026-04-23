@@ -56,6 +56,48 @@ def test_correct_banner_without_discrepancies_is_false(
     assert any("no discrepancies" in m.lower() for m in caplog.messages)
 
 
+def test_correct_banner_no_discrepancies_but_cell_summary_passes(tmp_path: Path) -> None:
+    # Calibre v2019.2 format: clean pass omits the "DISCREPANCIES = N" line
+    # entirely and relies on CELL SUMMARY. The parser must fall through to
+    # the CELL SUMMARY scan and return pass when every row is CORRECT.
+    body = """
+                               OVERALL COMPARISON RESULTS
+
+                         #       #################
+                         #       #    CORRECT    #
+                         #       #################
+
+**************************************************************************************************************
+                                      CELL  SUMMARY
+**************************************************************************************************************
+
+  Result         Layout                        Source
+  -----------    -----------                   --------------
+  CORRECT        LO_Trace_v3                   LO_Trace_v3
+"""
+    rep = _write(tmp_path, body)
+    detail = parse_lvs_report_detailed(rep)
+    assert detail.passed is True
+    assert detail.banner == "CORRECT"
+    assert detail.discrepancies is None
+
+
+def test_correct_banner_with_incorrect_cell_summary_row_is_false(tmp_path: Path) -> None:
+    # Defense-in-depth: if a CELL SUMMARY row says INCORRECT, the top-level
+    # INCORRECT banner search should already have fired — but if the word
+    # only appears in a row and not in a banner block, treat as fail.
+    body = """
+                                      CELL  SUMMARY
+
+  Result         Layout                        Source
+  -----------    -----------                   --------------
+  INCORRECT      cell_a                        cell_a
+  CORRECT        cell_b                        cell_b
+"""
+    rep = _write(tmp_path, body)
+    assert parse_lvs_report(rep) is False
+
+
 # ---- malformed / edge ------------------------------------------------------
 
 
