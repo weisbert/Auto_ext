@@ -117,7 +117,7 @@ source <你平时 source 的项目 setup 脚本>
 ### 5.2 check-env
 
 ```bash
-./run.sh check-env --config-dir config
+./run.sh check-env --config-dir Auto_ext_pro/config
 ```
 
 预期：一张 rich 表格列出每个 env var 的来源（override / shell / missing），每一项都应该是 **green shell** 或 **yellow override**。如果有 **red missing**：
@@ -128,7 +128,7 @@ source <你平时 source 的项目 setup 脚本>
 ### 5.3 Dry-run（**不起真 EDA，只渲染模板**）
 
 ```bash
-./run.sh run --config-dir config --dry-run
+./run.sh run --config-dir Auto_ext_pro/config --dry-run
 ```
 
 预期：summary 显示 1 个 task，所有 stage 状态 `d`（dry_run），全部 passed。
@@ -152,7 +152,7 @@ cat runs/task_*/rendered/ext.cmd
 ### 5.4 只跑 si 一个 stage
 
 ```bash
-./run.sh run --config-dir config --stage si
+./run.sh run --config-dir Auto_ext_pro/config --stage si
 ```
 
 预期：1 个 task，`si` stage passed，生成 netlist `$WORK_ROOT/cds/verify/QCI_PATH_<cell>/<cell>.src.net`。日志在 `logs/task_<id>/si.log`。
@@ -165,7 +165,7 @@ Si 失败最常见的几个原因：
 ### 5.5 加上 strmout + calibre
 
 ```bash
-./run.sh run --config-dir config --stage si,strmout,calibre
+./run.sh run --config-dir Auto_ext_pro/config --stage si,strmout,calibre
 ```
 
 预期：
@@ -177,7 +177,7 @@ Calibre 失败的两种可能：
 1. **exit code 非 0** —— Calibre 报错，看 `logs/task_<id>/calibre.log`。通常是 runset 路径不对（`$VERIFY_ROOT/runset/.../CFXXX/CFXXX.wodio.qcilvs` 这个路径里 `CFXXX` 要对应到你项目的真工艺名）
 2. **exit code 0 但 LVS 不过** —— 真 LVS 错了，看 report 里的 error section。这种情况用 `--continue-on-lvs-fail` 继续跑 QRC：
    ```bash
-   ./run.sh run --config-dir config --stage si,strmout,calibre,quantus --continue-on-lvs-fail
+   ./run.sh run --config-dir Auto_ext_pro/config --stage si,strmout,calibre,quantus --continue-on-lvs-fail
    ```
 
 ### 5.6 全链
@@ -185,7 +185,7 @@ Calibre 失败的两种可能：
 LVS 过了之后：
 
 ```bash
-./run.sh run --config-dir config
+./run.sh run --config-dir Auto_ext_pro/config
 ```
 
 默认所有 5 个 stage（si → strmout → calibre → quantus → jivaro）。Jivaro 因为 task 里 `jivaro.enabled: false` 会被 silent skip。等整链通了再把 jivaro 开开。
@@ -247,14 +247,14 @@ LVS 过了之后：
 task_id 格式是 `<library>__<cell>__<layout_view>__<source_view>`：
 
 ```bash
-./run.sh run --config-dir config \
+./run.sh run --config-dir Auto_ext_pro/config \
   --task WB_PLL_DCO__LO_5GRX_LO_back_v3__layout__schematic
 ```
 
 `--task` 可重复使用跑多个：
 
 ```bash
-./run.sh run --config-dir config \
+./run.sh run --config-dir Auto_ext_pro/config \
   --task WB_PLL_DCO__cell_a__layout__schematic \
   --task WB_PLL_DCO__cell_b__layout__schematic
 ```
