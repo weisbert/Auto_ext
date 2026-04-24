@@ -1,15 +1,26 @@
-"""Serial task + stage execution driver.
+"""Task + stage execution driver (serial or parallel).
 
 Loads the resolved env once (fail-fast), instantiates each :class:`Tool`
 once, and iterates tasks × stages in the canonical order:
-``si`` → ``strmout`` → ``calibre`` → ``quantus`` → ``jivaro``. Tasks run
-one at a time (Phase 3 is serial-only; parallel is Phase 3.5).
+``si`` → ``strmout`` → ``calibre`` → ``quantus`` → ``jivaro``.
 
-Failure handling:
+Two execution modes:
+
+- **Serial** (default): tasks run one at a time, cwd = ``workarea``.
+  ``si.env`` is swapped into ``workarea/si.env`` via
+  :func:`serial_workdir` for the duration of the ``si`` stage.
+- **Parallel** (``max_workers >= 2``): each task gets its own workdir at
+  ``<auto_ext_root>/runs/task_<id>/`` with symlinks to ``workarea/cds.lib``
+  and ``workarea/.cdsinit``. All stages for that task run with
+  ``cwd = task_dir``; the rendered ``si.env`` is written directly into
+  ``task_dir`` with no shared-file mutation. Tasks are dispatched via a
+  :class:`concurrent.futures.ThreadPoolExecutor`.
+
+Failure handling (identical in both modes):
 
 - Stage raises :class:`AutoExtError` → that stage is marked failed,
   remaining stages for the task are skipped, runner continues with the
-  next task.
+  next task (or the other workers, in parallel mode).
 - ``calibre`` stage returning ``success=False``: if ``task.continue_on_lvs_fail``
   is True, log a warning and proceed to the next stage. Otherwise skip
   remaining stages for this task (same as a generic failure).
@@ -24,6 +35,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,7 +49,11 @@ from auto_ext.core.env import (
 )
 from auto_ext.core.errors import AutoExtError, ConfigError
 from auto_ext.core.manifest import load_manifest, resolve_knob_values
-from auto_ext.core.workdir import serial_workdir
+from auto_ext.core.workdir import (
+    place_si_env_in_parallel_dir,
+    prepare_parallel_workdir,
+    serial_workdir,
+)
 from auto_ext.tools.base import Tool, ToolResult
 from auto_ext.tools.calibre import CalibreTool
 from auto_ext.tools.jivaro import JivaroTool
@@ -98,6 +114,22 @@ class RunSummary:
         return sum(1 for t in self.tasks if t.overall == "failed")
 
 
+@dataclass
+class _TaskExecCtx:
+    """Per-task execution context: where stages run and how si.env is placed.
+
+    ``parallel=False``: ``cwd`` is the shared workarea; si uses
+    :func:`serial_workdir` to swap si.env in/out.
+    ``parallel=True``: ``cwd`` is the task's isolated
+    ``runs/task_<id>/`` dir; si.env is copied directly into it.
+    """
+
+    cwd: Path
+    rendered_dir: Path
+    log_dir: Path
+    parallel: bool
+
+
 # ---- entry point -----------------------------------------------------------
 
 
@@ -111,14 +143,18 @@ def run_tasks(
     verbose: bool = False,
     dry_run: bool = False,
     cli_knobs: dict[str, dict[str, Any]] | None = None,
+    max_workers: int | None = None,
 ) -> RunSummary:
-    """Execute the stage × task matrix serially.
+    """Execute the stage × task matrix, serial or parallel.
 
     Pre-flight:
 
     - Validates ``stages`` (must be a non-empty subset of :data:`STAGE_ORDER`).
     - If ``jivaro`` is among ``stages``, every task with ``jivaro.enabled=True``
       must have ``out_file`` set, else :class:`ConfigError`.
+    - Rejects tasks with duplicate ``(library, cell)`` pairs — they would
+      share ``extraction_output_dir`` and clobber each other (harmful in
+      parallel, misleading in serial).
     - Discovers env vars from every template in use and resolves them
       (override → shell → missing); any missing raises
       :class:`auto_ext.core.errors.EnvResolutionError` before any
@@ -127,9 +163,15 @@ def run_tasks(
     ``cli_knobs`` is the ``{stage: {name: str}}`` dict parsed from
     ``--knob`` options; values are still strings here and are coerced at
     render time per :class:`auto_ext.core.manifest.KnobSpec`.
+
+    ``max_workers`` gates the execution mode: ``None`` or ``<= 1`` runs
+    serially (cwd = ``workarea``, si.env swapped via
+    :func:`serial_workdir`); ``>= 2`` runs tasks on a thread pool, each
+    task isolated under ``<auto_ext_root>/runs/task_<id>/``.
     """
     _validate_stages(stages)
     _validate_tasks(tasks, stages)
+    _validate_task_outputs(tasks)
 
     required_env = _discover_env_vars(project, tasks)
     resolution = resolve_env(required_env, project.env_overrides)
@@ -140,24 +182,41 @@ def run_tasks(
     tool_instances: dict[str, Tool] = {name: cls() for name, cls in _TOOL_REGISTRY.items()}
 
     cli_knobs = cli_knobs or {}
+    parallel = max_workers is not None and max_workers >= 2
 
     summary = RunSummary()
-    for task in tasks:
-        summary.tasks.append(
-            _run_single_task(
-                project=project,
-                task=task,
-                stages=stages,
-                auto_ext_root=auto_ext_root,
-                workarea=workarea,
-                resolved_env=resolved_env,
-                subprocess_env=subprocess_env,
-                tools=tool_instances,
-                cli_knobs=cli_knobs,
-                verbose=verbose,
-                dry_run=dry_run,
-            )
+
+    def _submit(task: TaskConfig) -> TaskResult:
+        return _run_single_task(
+            project=project,
+            task=task,
+            stages=stages,
+            auto_ext_root=auto_ext_root,
+            workarea=workarea,
+            resolved_env=resolved_env,
+            subprocess_env=subprocess_env,
+            tools=tool_instances,
+            cli_knobs=cli_knobs,
+            verbose=verbose,
+            dry_run=dry_run,
+            parallel=parallel,
         )
+
+    if not parallel:
+        for task in tasks:
+            summary.tasks.append(_submit(task))
+    else:
+        logger.info("parallel mode: max_workers=%d across %d tasks", max_workers, len(tasks))
+        results_by_id: dict[str, TaskResult] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_submit, task): task for task in tasks}
+            for fut in as_completed(futures):
+                task = futures[fut]
+                result = fut.result()
+                results_by_id[task.task_id] = result
+        # Preserve the original task submission order in the summary so
+        # callers see deterministic output regardless of completion order.
+        summary.tasks = [results_by_id[t.task_id] for t in tasks]
 
     logger.info(
         "run complete: %d/%d passed, %d failed",
@@ -184,10 +243,25 @@ def _run_single_task(
     cli_knobs: dict[str, dict[str, Any]],
     verbose: bool,
     dry_run: bool,
+    parallel: bool = False,
 ) -> TaskResult:
     safe_id = _UNSAFE_TASK_ID.sub("_", task.task_id)
-    rendered_dir = auto_ext_root / "runs" / f"task_{safe_id}" / "rendered"
+    task_base = auto_ext_root / "runs" / f"task_{safe_id}"
+    rendered_dir = task_base / "rendered"
     log_dir = auto_ext_root / "logs" / f"task_{safe_id}"
+
+    if parallel:
+        # prepare_parallel_workdir does rmtree-on-exist + fresh symlinks,
+        # so a stale task_base from a prior run is handled. It also raises
+        # WorkdirError cleanly if symlink creation fails.
+        task_dir = prepare_parallel_workdir(auto_ext_root, workarea, task.task_id)
+        cwd = task_dir
+    else:
+        cwd = workarea
+
+    exec_ctx = _TaskExecCtx(
+        cwd=cwd, rendered_dir=rendered_dir, log_dir=log_dir, parallel=parallel
+    )
     context = _build_context(project, task, resolved_env)
 
     task_result = TaskResult(task_id=task.task_id)
@@ -214,9 +288,7 @@ def _run_single_task(
             project=project,
             task=task,
             tool=tools[stage],
-            rendered_dir=rendered_dir,
-            log_dir=log_dir,
-            workarea=workarea,
+            exec_ctx=exec_ctx,
             context=context,
             resolved_env=resolved_env,
             subprocess_env=subprocess_env,
@@ -246,16 +318,14 @@ def _run_single_stage(
     project: ProjectConfig,
     task: TaskConfig,
     tool: Tool,
-    rendered_dir: Path,
-    log_dir: Path,
-    workarea: Path,
+    exec_ctx: _TaskExecCtx,
     context: dict[str, Any],
     resolved_env: dict[str, str],
     subprocess_env: dict[str, str],
     cli_knobs: dict[str, dict[str, Any]],
     dry_run: bool,
 ) -> StageResult:
-    log_path = log_dir / f"{stage}.log"
+    log_path = exec_ctx.log_dir / f"{stage}.log"
 
     rendered_path: Path
     if tool.has_template:
@@ -281,13 +351,13 @@ def _run_single_stage(
                 template_path=template_path,
                 context=context,
                 env=resolved_env,
-                out_path=rendered_dir / template_path.stem,
+                out_path=exec_ctx.rendered_dir / template_path.stem,
                 knobs=stage_knobs,
             )
         except AutoExtError as exc:
             return StageResult(stage=stage, status="failed", error=f"render failed: {exc}")
     else:
-        rendered_path = rendered_dir
+        rendered_path = exec_ctx.rendered_dir
 
     if dry_run:
         return StageResult(stage=stage, status="dry_run")
@@ -296,10 +366,21 @@ def _run_single_stage(
 
     try:
         if stage == "si":
-            with serial_workdir(workarea, rendered_path):
-                raw = tool.run(argv, cwd=workarea, env=subprocess_env, log_path=log_path)
+            if exec_ctx.parallel:
+                # Parallel: each task owns its cwd, so si.env is placed
+                # directly inside it with no cleanup contention.
+                place_si_env_in_parallel_dir(exec_ctx.cwd, rendered_path)
+                raw = tool.run(argv, cwd=exec_ctx.cwd, env=subprocess_env, log_path=log_path)
+            else:
+                # Serial: swap rendered si.env into workarea/si.env for
+                # the stage, clean up on exit so tasks don't step on
+                # each other (even sequentially).
+                with serial_workdir(exec_ctx.cwd, rendered_path):
+                    raw = tool.run(
+                        argv, cwd=exec_ctx.cwd, env=subprocess_env, log_path=log_path
+                    )
         else:
-            raw = tool.run(argv, cwd=workarea, env=subprocess_env, log_path=log_path)
+            raw = tool.run(argv, cwd=exec_ctx.cwd, env=subprocess_env, log_path=log_path)
         result = tool.parse_result(raw)
     except AutoExtError as exc:
         return StageResult(stage=stage, status="failed", error=str(exc))
@@ -407,6 +488,32 @@ def _validate_tasks(tasks: list[TaskConfig], stages: list[str]) -> None:
                     f"task {t.task_id}: jivaro enabled but out_file is not set "
                     "(jivaro inputView renders to library/cell/out_file)"
                 )
+
+
+def _validate_task_outputs(tasks: list[TaskConfig]) -> None:
+    """Reject tasks whose ``(library, cell)`` pair collides with another.
+
+    ``extraction_output_dir`` substitutes ``{library}`` / ``{cell}``, so
+    two tasks with the same pair would write into the same output dir
+    and clobber each other. Harmful in parallel (race), misleading in
+    serial (second task silently overwrites). Always enforced.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    collisions: list[str] = []
+    for t in tasks:
+        key = (t.library, t.cell)
+        prior = seen.get(key)
+        if prior is not None:
+            collisions.append(
+                f"{t.library!r}+{t.cell!r}: task_ids {prior!r} and {t.task_id!r}"
+            )
+        else:
+            seen[key] = t.task_id
+    if collisions:
+        raise ConfigError(
+            "duplicate (library, cell) pair(s) would share extraction_output_dir:\n  "
+            + "\n  ".join(collisions)
+        )
 
 
 def _compute_overall(task_result: TaskResult) -> str:

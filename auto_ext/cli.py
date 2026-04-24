@@ -94,9 +94,19 @@ def run(
         "Repeatable. Quote values containing spaces, e.g. "
         '--knob "quantus.temperature=60".',
     ),
+    jobs: int = typer.Option(
+        1,
+        "--jobs",
+        "-j",
+        min=1,
+        max=64,
+        help="Run up to N tasks concurrently. Default 1 (serial). "
+        "N>=2 isolates each task under runs/task_<id>/ with symlinked "
+        "cds.lib/.cdsinit. License budget is yours to manage.",
+    ),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
 ) -> None:
-    """Run extraction tasks through the configured EDA tools (serial)."""
+    """Run extraction tasks through the configured EDA tools."""
     from auto_ext.core.config import load_project, load_tasks
     from auto_ext.core.errors import AutoExtError
     from auto_ext.core.runner import STAGE_ORDER, run_tasks
@@ -147,6 +157,7 @@ def run(
             verbose=verbose,
             dry_run=dry_run,
             cli_knobs=cli_knobs,
+            max_workers=jobs if jobs >= 2 else None,
         )
     except AutoExtError as exc:
         typer.secho(f"run aborted: {exc}", fg=typer.colors.RED, err=True)

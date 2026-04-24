@@ -11,6 +11,7 @@ import pytest
 from auto_ext.core.errors import WorkdirError
 from auto_ext.core.workdir import (
     cleanup_serial_workdir,
+    place_si_env_in_parallel_dir,
     prepare_parallel_workdir,
     prepare_serial_workdir,
     serial_workdir,
@@ -213,6 +214,36 @@ def test_prepare_parallel_missing_cds_lib(
 
     # And the task_dir must not be left lying around.
     assert not (auto_ext_root / "runs" / "task_1").exists()
+
+
+# ---- place_si_env_in_parallel_dir -----------------------------------------
+
+
+def test_place_si_env_copies_into_task_dir(tmp_path: Path) -> None:
+    task_dir = tmp_path / "task_1"
+    task_dir.mkdir()
+    src = tmp_path / "rendered" / "si.env"
+    src.parent.mkdir()
+    src.write_text("simOptions = parallel\n", encoding="utf-8")
+
+    dst = place_si_env_in_parallel_dir(task_dir, src)
+
+    assert dst == task_dir / "si.env"
+    assert dst.read_text(encoding="utf-8") == "simOptions = parallel\n"
+
+
+def test_place_si_env_missing_task_dir(tmp_path: Path) -> None:
+    src = tmp_path / "si.env"
+    src.write_text("x", encoding="utf-8")
+    with pytest.raises(WorkdirError, match="parallel task_dir"):
+        place_si_env_in_parallel_dir(tmp_path / "does_not_exist", src)
+
+
+def test_place_si_env_missing_source(tmp_path: Path) -> None:
+    task_dir = tmp_path / "task_1"
+    task_dir.mkdir()
+    with pytest.raises(WorkdirError, match="si.env source"):
+        place_si_env_in_parallel_dir(task_dir, tmp_path / "missing.env")
 
 
 def test_prepare_parallel_symlink_denied_raises_workdir_error(

@@ -80,6 +80,29 @@ def serial_workdir(workarea: Path, si_env_src: Path) -> Iterator[Path]:
         cleanup_serial_workdir(workarea)
 
 
+def place_si_env_in_parallel_dir(task_dir: Path, si_env_src: Path) -> Path:
+    """Copy ``si_env_src`` to ``task_dir/si.env`` and return the destination.
+
+    Parallel sibling of :func:`prepare_serial_workdir`. Unlike the serial
+    variant, there is no shared mutation — the task_dir is the cleanup
+    boundary, so no explicit cleanup helper is invoked in normal flow.
+    Kept symmetric with the serial helper for call-site clarity.
+    """
+
+    if not task_dir.is_dir():
+        raise WorkdirError(f"parallel task_dir not a directory: {task_dir}")
+    if not si_env_src.is_file():
+        raise WorkdirError(f"si.env source missing: {si_env_src}")
+
+    dst = task_dir / "si.env"
+    if dst.exists() and not dst.is_file():
+        raise WorkdirError(f"{dst} exists but is not a regular file")
+
+    shutil.copy2(si_env_src, dst)
+    logger.debug("parallel workdir: placed %s -> %s", si_env_src, dst)
+    return dst
+
+
 def prepare_parallel_workdir(
     auto_ext_root: Path,
     workarea: Path,

@@ -41,7 +41,7 @@ python3.11 -c "import jinja2, ruamel.yaml, pydantic, typer, rich; print('deps ok
 python3.11 -m pytest tests/ -v
 ```
 
-预期：**Phase 4b3 后应有 295 全绿**（Windows 上 289 绿 + 6 个 symlink 测试 skip；Linux 上 295 全绿，symlink 测试在 Linux 能跑起来）。
+预期：**Phase 3.5 后应有 303 全绿**（Windows 上 294 绿 + 9 个 symlink 测试 skip；Linux 上 303 全绿，symlink 测试在 Linux 能跑起来）。
 
 全绿数量随 phase 增长 —— 如果当前数量偏离太多**停下来**先查再往下走，后面出问题排查不清楚是 real-env 的锅还是代码的锅。
 
@@ -291,6 +291,34 @@ LVS 过了之后：
 
 想长期固定某个 knob 值：写到 `project.yaml`（全项目） 或 `tasks.yaml`（单 task） 的 `knobs:` 块里。优先级从低到高：`manifest default` < `project.yaml.knobs` < `tasks.yaml[...].knobs` < `--knob CLI`。
 
+### 5.8 并行跑多个 task（Phase 3.5）
+
+多个 cell 要同时跑时加 `--jobs N`：
+
+```bash
+./run.sh run --config-dir Auto_ext_pro/config --jobs 2
+```
+
+- `--jobs 1`（默认）= 串行，走跟之前 Phase 3 完全一样的代码路径，`si.env` 临时放到 `workarea/si.env` 再清理。
+- `--jobs >=2` = 并行，每个 task 独立建一个 `runs/task_<id>/`，用 symlink 指回 `workarea/cds.lib` + `.cdsinit`，`si.env` 直接写进 task 目录，所有 stage（不仅是 si）的 cwd 都切到 task 目录。workarea 不再共享 `si.env`，多个 task 写文件不会互踩。
+- 失败策略跟串行一致：某 task 某 stage 挂 → 那个 task 后续 stage 跳过，**其他 task 继续跑**；不做全局 fail-fast。
+
+**License 预算自己管**：Calibre / QRC / si 的 license 有数量上限，`--jobs 4` 撞到天花板时会在某 task 的 `logs/task_<id>/<stage>.log` 里看到 "no license available"（具体错误看 EDA 版本）。先 `--jobs 2` 稳住，确认 license 够再往上加。
+
+**重复 `(library, cell)` 会被提前拒绝**：两个 task 同 library 同 cell 会共用 `extraction_output_dir`（`$WORK_ROOT/cds/verify/QCI_PATH_{cell}`），多线程写同一目录必撞。runner 启动前扫一遍，撞了就 `ConfigError` + exit 2，连 render 都不会开始。
+
+### 5.9 Phase 3.5 办公室 smoke 清单（第一次 `--jobs 2` 要盯的）
+
+跑之前在 `tasks.yaml` 里准备至少 2 个不同 cell。按下面顺序踩：
+
+1. **si 单跑**：`./run.sh run --jobs 2 --stage si`。看 `logs/task_<id>/si.log`，`cds.lib` 在 symlink 下能被 si 正常解析吗？—— 这是 parallel 路径最大的未知数（见 `project_auto_ext_design.md` 的 open risk 列表）。
+2. **全链 2 job**：`./run.sh run --jobs 2`。两个 task 都绿 + 两份 `runs/task_<id>/rendered/` 无交叉污染就算过。
+3. **License 天花板**：`./run.sh run --jobs 4`。撞墙时错误是不是清清爽爽地出现在 stage log 里（而不是挂死 / silent fail）？
+4. **Preflight 挡 duplicate**：临时把 `tasks.yaml` 里一个 task 整段复制一份（同 library + cell），确认 `./run.sh run` 立刻 exit 2 并在 stderr 打出两个 task_id。改完恢复。
+5. **混合 pass/fail**：故意把某 cell 的 `.qci` 改坏，让它的 calibre 挂，另一 task 必须照常跑完。summary 应显示 `1 passed / 1 failed` + exit code 1。
+
+跑完把 license 天花板数记下来，后续决定默认用 `--jobs` 几。
+
 ---
 
 ## 6. 模板里可能需要改的硬编码
@@ -408,10 +436,10 @@ Calibre 失败时，`./run.sh run` 的 summary 里会显示 banner + discrepanci
 
 ## 10. 已知限制（下一阶段修）
 
-- **No parallel**：Phase 3 是 serial。跑 10 个 task × 每个 30 min = 5 小时。Phase 3.5 会 wire parallel（`core/workdir.py` 的 `prepare_parallel_workdir` 已就绪，runner 还没调）。
 - **No GUI**：Phase 5。而且要先解掉 PyQt5 ABI blocker（见下）。
 - **No template editor**：Phase 6，最复杂。
 - **No migrate**：Phase 4c。Run_ext.txt 现在手翻（§4.5 对照表）。
+- **Parallel 需要办公室 license 验证**：Phase 3.5 已 wire 好（`--jobs N`，见 §5.8），代码路径测试已覆盖，但 si 在 symlinked `cds.lib` 下的行为 + Calibre/QRC license 并发上限只能在真 Cadence 上确认（§5.9 清单）。
 
 ### PyQt5 ABI blocker 诊断
 
