@@ -61,7 +61,7 @@ output_db -type dspf \
               -add_bulk_terminal false \
               -sub_node_char "#"
 output_setup \
-              -directory_name "/tmpdata/RFIC/rfic_share/[[employee_id]]/cds/verify/QCI_PATH/query_output" \
+              -directory_name "[[output_dir]]/query_output" \
               -file_name "[[intermediate_dir]]/[[cell]].dspf" \
               -net_name_space "SCHEMATIC" \
               -temporary_directory_name "Design"
