@@ -185,6 +185,7 @@ env_overrides:
   VERIFY_ROOT: {wa_posix}/fake/verify
   SETUP_ROOT: {wa_posix}/fake/setup
   PDK_LAYER_MAP_FILE: {wa_posix}/fake/layers.map
+  calibre_source_added_place: {wa_posix}/fake/empty.cdl
 extraction_output_dir: "${{WORK_ROOT}}/cds/verify/QCI_PATH_{{cell}}"
 intermediate_dir: "${{WORK_ROOT2}}"
 templates:

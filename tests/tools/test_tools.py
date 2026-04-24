@@ -237,6 +237,7 @@ def test_production_templates_render(
         "WORK_ROOT2": "/w",
         "VERIFY_ROOT": "/v",
         "SETUP_ROOT": "/s",
+        "calibre_source_added_place": "/v/empty.cdl",
     }
     out = tmp_path / Path(subpath).stem
     rendered = SiTool().render_template(
