@@ -104,11 +104,25 @@ def run(
         "N>=2 isolates each task under runs/task_<id>/ with symlinked "
         "cds.lib/.cdsinit. License budget is yours to manage.",
     ),
+    no_progress: bool = typer.Option(
+        False,
+        "--no-progress",
+        help="Suppress the live progress table. Use in CI / non-TTY "
+        "contexts; the final summary table is still printed.",
+    ),
     verbose: bool = typer.Option(False, "-v", "--verbose"),
 ) -> None:
-    """Run extraction tasks through the configured EDA tools."""
+    """Run extraction tasks through the configured EDA tools.
+
+    Press Ctrl-C once to request a graceful cancel: the in-flight
+    subprocess is sent SIGTERM (10s grace) then SIGKILL; remaining
+    stages / tasks are skipped; the summary table still prints.
+    """
+    import signal
+
     from auto_ext.core.config import load_project, load_tasks
     from auto_ext.core.errors import AutoExtError
+    from auto_ext.core.progress import CancelToken, NullReporter, ProgressReporter
     from auto_ext.core.runner import STAGE_ORDER, run_tasks
 
     try:
@@ -147,6 +161,38 @@ def run(
     root = (auto_ext_root or config_dir.parent).resolve()
     wa = (workarea or root.parent).resolve()
 
+    cancel_token = CancelToken()
+    reporter: ProgressReporter
+    if no_progress:
+        reporter = NullReporter()
+    else:
+        from auto_ext.cli_reporter import RichCLIReporter
+
+        reporter = RichCLIReporter()
+
+    # Install a SIGINT handler that flips the cancel flag without
+    # aborting the Python interpreter; the runner / run_subprocess see
+    # the token within the next drain tick and terminate the in-flight
+    # subprocess. Second Ctrl-C falls through to the default handler
+    # (KeyboardInterrupt) so the user can still force-exit if a tool
+    # ignores SIGTERM + SIGKILL.
+    _sigint_fired = {"count": 0}
+
+    def _on_sigint(signum: int, frame: object) -> None:
+        _sigint_fired["count"] += 1
+        if _sigint_fired["count"] == 1:
+            cancel_token.cancel()
+            typer.secho(
+                "\ncancel requested; waiting for current stage to stop...",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+        else:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            raise KeyboardInterrupt
+
+    previous_handler = signal.signal(signal.SIGINT, _on_sigint)
+
     try:
         summary = run_tasks(
             project,
@@ -158,13 +204,66 @@ def run(
             dry_run=dry_run,
             cli_knobs=cli_knobs,
             max_workers=jobs if jobs >= 2 else None,
+            reporter=reporter,
+            cancel_token=cancel_token,
         )
     except AutoExtError as exc:
         typer.secho(f"run aborted: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
 
     _print_summary(summary)
-    raise typer.Exit(code=0 if summary.failed == 0 else 1)
+    exit_code = 0 if (summary.failed == 0 and summary.cancelled == 0) else 1
+    raise typer.Exit(code=exit_code)
+
+
+@app.command()
+def gui(
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        help="Directory containing project.yaml + tasks.yaml to preload.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    auto_ext_root: Optional[Path] = typer.Option(
+        None,
+        "--auto-ext-root",
+        help="Root for runs/ and logs/. Defaults to --config-dir parent.",
+    ),
+    workarea: Optional[Path] = typer.Option(
+        None,
+        "--workarea",
+        help="EDA cwd. Defaults to --auto-ext-root parent.",
+    ),
+) -> None:
+    """Launch the PyQt5 GUI.
+
+    The GUI reuses the same :func:`run_tasks` as the CLI; progress is
+    streamed via Qt signals. Linux: ``run.sh gui ...`` prepends the
+    bundled PyQt5 Qt5 lib path to ``LD_LIBRARY_PATH`` before spawning
+    Python; see commit ``bc0d735`` for the ABI-blocker context.
+    """
+    try:
+        from auto_ext.ui.app import run_gui
+    except ImportError as exc:
+        typer.secho(
+            f"GUI dependencies not available: {exc}. "
+            f"On Linux, use ./run.sh gui so LD_LIBRARY_PATH is set "
+            f"for the bundled PyQt5 Qt5 libs.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    run_gui(
+        config_dir=config_dir,
+        auto_ext_root=auto_ext_root,
+        workarea=workarea,
+    )
 
 
 @app.command()
@@ -1191,16 +1290,29 @@ def _print_summary(summary) -> None:
     from rich.console import Console
     from rich.table import Table
 
+    overall_style = {
+        "passed": "green",
+        "failed": "red",
+        "cancelled": "yellow",
+        "pending": "dim",
+    }
+
     console = Console()
     table = Table(title="Run summary")
     table.add_column("task_id", style="cyan")
     table.add_column("overall")
     table.add_column("stages")
     for t in summary.tasks:
-        stages_str = " ".join(f"{s.stage}:{s.status[0]}" for s in t.stages)
-        style = "green" if t.overall == "passed" else "red"
+        stages_str = " ".join(f"{s.stage}:{str(s.status)[0]}" for s in t.stages)
+        style = overall_style.get(str(t.overall), "red")
         table.add_row(t.task_id, f"[{style}]{t.overall}[/]", stages_str)
     console.print(table)
+    extras = []
+    if summary.failed:
+        extras.append(f"[red]{summary.failed} failed[/]")
+    if summary.cancelled:
+        extras.append(f"[yellow]{summary.cancelled} cancelled[/]")
+    tail = f" ({', '.join(extras)})" if extras else ""
     console.print(
-        f"[bold]{summary.passed}/{summary.total} tasks passed[/] ({summary.failed} failed)"
+        f"[bold]{summary.passed}/{summary.total} tasks passed[/]" + tail
     )

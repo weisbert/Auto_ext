@@ -57,8 +57,15 @@ def _stub_si_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
     calls: list[dict] = []
 
-    def fake(argv, cwd, env, log_path):
-        calls.append({"argv": list(argv), "cwd": cwd, "log_path": log_path})
+    def fake(argv, cwd, env, log_path, *, cancel_token=None):
+        calls.append(
+            {
+                "argv": list(argv),
+                "cwd": cwd,
+                "log_path": log_path,
+                "cancel_token": cancel_token,
+            }
+        )
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("stubbed\n", encoding="utf-8")
         return 0

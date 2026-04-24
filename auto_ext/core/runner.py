@@ -28,6 +28,19 @@ Failure handling (identical in both modes):
   this task.
 - ``jivaro`` stage is silently skipped (not failed) when
   ``task.jivaro.enabled`` is False.
+
+Observability (Phase 5.1):
+
+- ``reporter`` (optional :class:`ProgressReporter`) receives lifecycle
+  events at run / task / stage boundaries, including synthetic
+  start+end pairs for every skipped stage so UI trees stay consistent.
+  Reporter exceptions are logged and swallowed — a buggy reporter must
+  never tear down a running subprocess.
+- ``cancel_token`` (optional :class:`CancelToken`) is checked before
+  each stage and forwarded into :func:`run_subprocess`; when set
+  mid-subprocess, the in-flight EDA process is terminated (SIGTERM
+  with a 10s grace, then SIGKILL) and the stage is marked
+  :attr:`StageStatus.CANCELLED`.
 """
 
 from __future__ import annotations
@@ -50,6 +63,13 @@ from auto_ext.core.env import (
 )
 from auto_ext.core.errors import AutoExtError, ConfigError
 from auto_ext.core.manifest import load_manifest, resolve_knob_values
+from auto_ext.core.progress import (
+    CancelToken,
+    NullReporter,
+    ProgressReporter,
+    StageStatus,
+    TaskStatus,
+)
 from auto_ext.core.workdir import (
     place_si_env_in_parallel_dir,
     prepare_parallel_workdir,
@@ -83,10 +103,14 @@ _UNSAFE_TASK_ID = re.compile(r"[^A-Za-z0-9_.-]")
 
 @dataclass
 class StageResult:
-    """Per-stage outcome. ``status`` ∈ {passed, failed, skipped, dry_run}."""
+    """Per-stage outcome.
+
+    ``status`` is a :class:`StageStatus`; string comparisons (``== "passed"``)
+    continue to work because ``StageStatus`` is a :class:`~enum.StrEnum`.
+    """
 
     stage: str
-    status: str
+    status: StageStatus
     tool_result: ToolResult | None = None
     error: str | None = None
 
@@ -95,7 +119,7 @@ class StageResult:
 class TaskResult:
     task_id: str
     stages: list[StageResult] = field(default_factory=list)
-    overall: str = "pending"  # passed | failed
+    overall: TaskStatus = TaskStatus.PENDING
 
 
 @dataclass
@@ -108,11 +132,15 @@ class RunSummary:
 
     @property
     def passed(self) -> int:
-        return sum(1 for t in self.tasks if t.overall == "passed")
+        return sum(1 for t in self.tasks if t.overall == TaskStatus.PASSED)
 
     @property
     def failed(self) -> int:
-        return sum(1 for t in self.tasks if t.overall == "failed")
+        return sum(1 for t in self.tasks if t.overall == TaskStatus.FAILED)
+
+    @property
+    def cancelled(self) -> int:
+        return sum(1 for t in self.tasks if t.overall == TaskStatus.CANCELLED)
 
 
 @dataclass
@@ -145,6 +173,8 @@ def run_tasks(
     dry_run: bool = False,
     cli_knobs: dict[str, dict[str, Any]] | None = None,
     max_workers: int | None = None,
+    reporter: ProgressReporter | None = None,
+    cancel_token: CancelToken | None = None,
 ) -> RunSummary:
     """Execute the stage × task matrix, serial or parallel.
 
@@ -169,10 +199,19 @@ def run_tasks(
     serially (cwd = ``workarea``, si.env swapped via
     :func:`serial_workdir`); ``>= 2`` runs tasks on a thread pool, each
     task isolated under ``<auto_ext_root>/runs/task_<id>/``.
+
+    ``reporter`` / ``cancel_token`` default to a :class:`NullReporter`
+    and a fresh :class:`CancelToken` that is never set — same blocking
+    behavior as pre-Phase-5 callers.
     """
     _validate_stages(stages)
     _validate_tasks(tasks, stages)
     _validate_task_outputs(tasks)
+
+    if reporter is None:
+        reporter = NullReporter()
+    if cancel_token is None:
+        cancel_token = CancelToken()
 
     required_env = _discover_env_vars(project, tasks)
     resolution = resolve_env(required_env, project.env_overrides)
@@ -186,6 +225,7 @@ def run_tasks(
     parallel = max_workers is not None and max_workers >= 2
 
     summary = RunSummary()
+    _safe_call(reporter, "on_run_start", len(tasks), list(stages))
 
     def _submit(task: TaskConfig) -> TaskResult:
         return _run_single_task(
@@ -201,6 +241,8 @@ def run_tasks(
             verbose=verbose,
             dry_run=dry_run,
             parallel=parallel,
+            reporter=reporter,
+            cancel_token=cancel_token,
         )
 
     if not parallel:
@@ -220,11 +262,13 @@ def run_tasks(
         summary.tasks = [results_by_id[t.task_id] for t in tasks]
 
     logger.info(
-        "run complete: %d/%d passed, %d failed",
+        "run complete: %d/%d passed, %d failed, %d cancelled",
         summary.passed,
         summary.total,
         summary.failed,
+        summary.cancelled,
     )
+    _safe_call(reporter, "on_run_end", summary)
     return summary
 
 
@@ -245,6 +289,8 @@ def _run_single_task(
     verbose: bool,
     dry_run: bool,
     parallel: bool = False,
+    reporter: ProgressReporter,
+    cancel_token: CancelToken,
 ) -> TaskResult:
     safe_id = _UNSAFE_TASK_ID.sub("_", task.task_id)
     task_base = auto_ext_root / "runs" / f"task_{safe_id}"
@@ -265,25 +311,47 @@ def _run_single_task(
     )
     context = _build_context(project, task, resolved_env)
 
+    active_stages = [s for s in STAGE_ORDER if s in stages]
+    _safe_call(reporter, "on_task_start", task.task_id, active_stages)
+
     task_result = TaskResult(task_id=task.task_id)
     abort = False
+    cancel_seen = False  # once set: first stage marked CANCELLED, rest SKIPPED
 
-    for stage in STAGE_ORDER:
-        if stage not in stages:
+    for stage in active_stages:
+        # Pre-stage cancel check: short-circuit before any rendering or
+        # subprocess spawn.
+        if not cancel_seen and cancel_token.is_cancelled():
+            # First stage hit by cancel → CANCELLED; subsequent → SKIPPED.
+            _emit_synthetic_stage(
+                task_result, reporter, task.task_id, stage,
+                StageStatus.CANCELLED, "run cancelled by user",
+            )
+            cancel_seen = True
+            continue
+
+        if cancel_seen:
+            _emit_synthetic_stage(
+                task_result, reporter, task.task_id, stage,
+                StageStatus.SKIPPED, "aborted after cancellation",
+            )
             continue
 
         if stage == "jivaro" and not task.jivaro.enabled:
-            task_result.stages.append(
-                StageResult(stage=stage, status="skipped", error="jivaro disabled for task")
+            _emit_synthetic_stage(
+                task_result, reporter, task.task_id, stage,
+                StageStatus.SKIPPED, "jivaro disabled for task",
             )
             continue
 
         if abort:
-            task_result.stages.append(
-                StageResult(stage=stage, status="skipped", error="aborted after earlier stage failure")
+            _emit_synthetic_stage(
+                task_result, reporter, task.task_id, stage,
+                StageStatus.SKIPPED, "aborted after earlier stage failure",
             )
             continue
 
+        _safe_call(reporter, "on_stage_start", task.task_id, stage)
         sr = _run_single_stage(
             stage=stage,
             project=project,
@@ -295,10 +363,24 @@ def _run_single_task(
             subprocess_env=subprocess_env,
             cli_knobs=cli_knobs,
             dry_run=dry_run,
+            cancel_token=cancel_token,
         )
-        task_result.stages.append(sr)
+        # If the subprocess was hard-killed by cancel, reclassify FAILED
+        # as CANCELLED so the summary distinguishes "user stopped us"
+        # from "the tool errored".
+        if sr.status == StageStatus.FAILED and cancel_token.is_cancelled():
+            sr = StageResult(
+                stage=sr.stage,
+                status=StageStatus.CANCELLED,
+                tool_result=sr.tool_result,
+                error=sr.error or "stage terminated by user cancellation",
+            )
+            cancel_seen = True
 
-        if sr.status == "failed":
+        task_result.stages.append(sr)
+        _safe_call(reporter, "on_stage_end", task.task_id, stage, sr.status, sr.error)
+
+        if sr.status == StageStatus.FAILED:
             if stage == "calibre" and task.continue_on_lvs_fail:
                 logger.warning(
                     "task %s: calibre failed but continue_on_lvs_fail=True; proceeding",
@@ -306,11 +388,34 @@ def _run_single_task(
                 )
             else:
                 abort = True
+        elif sr.status == StageStatus.CANCELLED:
+            cancel_seen = True
 
     task_result.overall = _compute_overall(task_result)
     if verbose:
         print(f"[task {task.task_id}] {task_result.overall}")
+    _safe_call(reporter, "on_task_end", task.task_id, task_result.overall)
     return task_result
+
+
+def _emit_synthetic_stage(
+    task_result: TaskResult,
+    reporter: ProgressReporter,
+    task_id: str,
+    stage: str,
+    status: StageStatus,
+    reason: str,
+) -> None:
+    """Append a skipped/cancelled :class:`StageResult` and emit both events.
+
+    Both the StageResult bookkeeping and the ``on_stage_start`` /
+    ``on_stage_end`` pair happen here so callers don't accidentally
+    emit one without the other — a GUI tree that sees ``on_stage_start``
+    without an end gets stuck on "running" forever.
+    """
+    _safe_call(reporter, "on_stage_start", task_id, stage)
+    task_result.stages.append(StageResult(stage=stage, status=status, error=reason))
+    _safe_call(reporter, "on_stage_end", task_id, stage, status, reason)
 
 
 def _run_single_stage(
@@ -325,6 +430,7 @@ def _run_single_stage(
     subprocess_env: dict[str, str],
     cli_knobs: dict[str, dict[str, Any]],
     dry_run: bool,
+    cancel_token: CancelToken,
 ) -> StageResult:
     log_path = exec_ctx.log_dir / f"{stage}.log"
 
@@ -334,7 +440,7 @@ def _run_single_stage(
         if template_path is None:
             return StageResult(
                 stage=stage,
-                status="failed",
+                status=StageStatus.FAILED,
                 error=(
                     f"no template configured for {stage}: neither project.templates.{stage} "
                     f"nor task.templates.{stage} is set"
@@ -356,12 +462,14 @@ def _run_single_stage(
                 knobs=stage_knobs,
             )
         except AutoExtError as exc:
-            return StageResult(stage=stage, status="failed", error=f"render failed: {exc}")
+            return StageResult(
+                stage=stage, status=StageStatus.FAILED, error=f"render failed: {exc}"
+            )
     else:
         rendered_path = exec_ctx.rendered_dir
 
     if dry_run:
-        return StageResult(stage=stage, status="dry_run")
+        return StageResult(stage=stage, status=StageStatus.DRY_RUN)
 
     argv = tool.build_argv(rendered_path, context)
 
@@ -371,34 +479,54 @@ def _run_single_stage(
                 # Parallel: each task owns its cwd, so si.env is placed
                 # directly inside it with no cleanup contention.
                 place_si_env_in_parallel_dir(exec_ctx.cwd, rendered_path)
-                raw = tool.run(argv, cwd=exec_ctx.cwd, env=subprocess_env, log_path=log_path)
+                raw = tool.run(
+                    argv, cwd=exec_ctx.cwd, env=subprocess_env,
+                    log_path=log_path, cancel_token=cancel_token,
+                )
             else:
                 # Serial: swap rendered si.env into workarea/si.env for
                 # the stage, clean up on exit so tasks don't step on
                 # each other (even sequentially).
                 with serial_workdir(exec_ctx.cwd, rendered_path):
                     raw = tool.run(
-                        argv, cwd=exec_ctx.cwd, env=subprocess_env, log_path=log_path
+                        argv, cwd=exec_ctx.cwd, env=subprocess_env,
+                        log_path=log_path, cancel_token=cancel_token,
                     )
-            # Quantus's -cdl_out_map_directory points at output_dir and
-            # errors with LBRCXM-756 if si.env is not there. si writes
-            # netlist + map/ + ihnl/ to simRunDir (= output_dir) but
-            # does not copy its own control file across. Publish it so
-            # the downstream Quantus stage can run.
-            _publish_si_env_to_output_dir(
-                rendered_path, Path(context["output_dir"])
-            )
+            # Publish rendered si.env into output_dir only on success.
+            # On a failed or cancelled si, leaving a stale si.env where
+            # Quantus (or a retry) would read it is worse than the
+            # missing-file error Quantus would throw on retry.
+            if raw.success:
+                _publish_si_env_to_output_dir(
+                    rendered_path, Path(context["output_dir"])
+                )
         else:
-            raw = tool.run(argv, cwd=exec_ctx.cwd, env=subprocess_env, log_path=log_path)
+            raw = tool.run(
+                argv, cwd=exec_ctx.cwd, env=subprocess_env,
+                log_path=log_path, cancel_token=cancel_token,
+            )
         result = tool.parse_result(raw)
     except AutoExtError as exc:
-        return StageResult(stage=stage, status="failed", error=str(exc))
+        return StageResult(stage=stage, status=StageStatus.FAILED, error=str(exc))
 
-    status = "passed" if result.success else "failed"
+    status = StageStatus.PASSED if result.success else StageStatus.FAILED
     return StageResult(stage=stage, status=status, tool_result=result)
 
 
 # ---- helpers ---------------------------------------------------------------
+
+
+def _safe_call(reporter: ProgressReporter, method: str, *args: Any) -> None:
+    """Invoke ``reporter.<method>(*args)``, logging and swallowing exceptions.
+
+    A reporter that raises must never abort a running subprocess — this
+    is especially important for the Qt reporter during UI development,
+    where a slot raising could otherwise tear down an expensive EDA run.
+    """
+    try:
+        getattr(reporter, method)(*args)
+    except Exception:  # noqa: BLE001 — intentional broad catch
+        logger.exception("reporter.%s raised; ignoring", method)
 
 
 def _resolve_template_path(task: TaskConfig, stage: str) -> Path | None:
@@ -500,15 +628,15 @@ def _validate_tasks(tasks: list[TaskConfig], stages: list[str]) -> None:
 
 
 def _publish_si_env_to_output_dir(rendered_si_env: Path, output_dir: Path) -> None:
-    """Copy the rendered ``si.env`` into ``output_dir`` after si runs.
+    """Copy the rendered ``si.env`` into ``output_dir`` after a successful si run.
 
     Quantus errors with LBRCXM-756 when its ``-cdl_out_map_directory``
     (``= output_dir``) is missing ``si.env``. si writes the netlist +
     ``map/`` + ``ihnl/`` to ``simRunDir = output_dir`` but not a copy
-    of its own control file, so the runner stages it over. Called
-    unconditionally after the si subprocess returns — a failed si
-    leaves the file as a debugging artifact, and the runner aborts
-    downstream stages anyway.
+    of its own control file, so the runner stages it over. The caller
+    (:func:`_run_single_stage`) only invokes this on ``raw.success``:
+    publishing on failure or cancel would leave stale state for the
+    next Quantus run or retry.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(rendered_si_env, output_dir / "si.env")
@@ -540,8 +668,17 @@ def _validate_task_outputs(tasks: list[TaskConfig]) -> None:
         )
 
 
-def _compute_overall(task_result: TaskResult) -> str:
+def _compute_overall(task_result: TaskResult) -> TaskStatus:
+    """Collapse per-stage statuses into an overall task status.
+
+    Precedence: any CANCELLED stage → CANCELLED; else any FAILED →
+    FAILED; else PASSED. SKIPPED and DRY_RUN alone don't count as
+    failures.
+    """
     for s in task_result.stages:
-        if s.status == "failed":
-            return "failed"
-    return "passed"
+        if s.status == StageStatus.CANCELLED:
+            return TaskStatus.CANCELLED
+    for s in task_result.stages:
+        if s.status == StageStatus.FAILED:
+            return TaskStatus.FAILED
+    return TaskStatus.PASSED

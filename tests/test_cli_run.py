@@ -44,6 +44,56 @@ def test_run_happy_path(
     assert "1/1 tasks passed" in result.stdout
 
 
+def test_run_no_progress_flag_suppresses_live_table(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+) -> None:
+    """--no-progress: no RichCLIReporter live table, final summary still there."""
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--config-dir", str(project_tools_config),
+            "--no-progress",
+            "--dry-run",
+            "--auto-ext-root", str(tmp_path / "pr"),
+            "--workarea", str(workarea),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    # Final summary always prints.
+    assert "1/1 tasks passed" in result.stdout
+    # The live reporter's title "Run progress" should NOT appear; only
+    # the static summary's "Run summary" title.
+    assert "Run progress" not in result.stdout
+    assert "Run summary" in result.stdout
+
+
+def test_run_with_progress_default_renders_live_table(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+) -> None:
+    """Without --no-progress: RichCLIReporter's Run progress table renders.
+
+    CliRunner captures stdout as text; Live falls back to non-animated
+    rendering under non-TTY, which still emits the table title.
+    """
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--config-dir", str(project_tools_config),
+            "--dry-run",
+            "--auto-ext-root", str(tmp_path / "pr"),
+            "--workarea", str(workarea),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "Run progress" in result.stdout
+
+
 def test_run_filters_by_task_id_miss_exits_2(
     project_tools_config: Path,
     workarea: Path,

@@ -13,9 +13,10 @@ Lifecycle per task stage (orchestrated by :mod:`auto_ext.core.runner`):
    is ``False`` (``strmout``).
 2. ``build_argv(input_path, context)`` returns the argv list. This is the
    one place each tool declares its command-line shape.
-3. ``run(argv, cwd, env, log_path)`` spawns the subprocess. Default impl
-   tees combined stdout/stderr to ``log_path``; tools only override for
-   special invocation patterns (license wait, retries, etc.).
+3. ``run(argv, cwd, env, log_path, *, cancel_token=None)`` spawns the
+   subprocess. Default impl tees combined stdout/stderr to ``log_path``
+   via :func:`run_subprocess`; tools only override for special invocation
+   patterns (license wait, retries, etc.).
 4. ``parse_result(result)`` post-processes outputs. Default returns the
    result unchanged. ``CalibreTool`` overrides to run the strict LVS
    check from :mod:`auto_ext.core.checks`.
@@ -23,12 +24,27 @@ Lifecycle per task stage (orchestrated by :mod:`auto_ext.core.runner`):
 
 from __future__ import annotations
 
+import queue
 import shutil
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from auto_ext.core.progress import CancelToken
+
+#: SIGTERM → SIGKILL grace window when :class:`CancelToken` fires mid-run.
+#: 10s matches the Kubernetes default; chosen over 3s because Calibre
+#: LVS writes multi-GB SVDB databases and Quantus writes parasitic
+#: netlists — mid-write corruption on retry is worse than a 7-second
+#: extra Cancel latency.
+CANCEL_GRACE_SECONDS: float = 10.0
+
+#: Bounded poll interval for the main drain loop. Sets the worst-case
+#: cancel latency when the subprocess is silent (no stdout arriving).
+_DRAIN_POLL_SECONDS: float = 0.5
 
 
 @dataclass
@@ -46,6 +62,8 @@ def run_subprocess(
     cwd: Path,
     env: dict[str, str],
     log_path: Path,
+    *,
+    cancel_token: CancelToken | None = None,
 ) -> int:
     """Blocking: execute ``argv`` with ``cwd`` + ``env``, tee stdout/stderr to ``log_path``.
 
@@ -53,6 +71,21 @@ def run_subprocess(
     before the command output so the log is self-describing. Returns the
     subprocess exit code, or 127 if the executable is not found (bash
     "command not found" convention).
+
+    Cancellation: when ``cancel_token`` is supplied and fires mid-run, the
+    subprocess is terminated via :meth:`subprocess.Popen.terminate` and
+    given :data:`CANCEL_GRACE_SECONDS` to exit; if it doesn't,
+    :meth:`~subprocess.Popen.kill` escalates. Returned exit code then
+    reflects the signal (POSIX: negative signal number; Windows: the
+    ``TerminateProcess`` return code — usually 1). Callers should
+    distinguish "cancelled" from "failed" by checking the token itself,
+    not by inspecting the exit code.
+
+    Implementation note: stdout is drained on a dedicated reader thread
+    into a queue so the main loop can poll the cancel token between
+    queue waits. A direct ``for line in proc.stdout`` would block
+    indefinitely on a silent subprocess (Quantus routinely goes minutes
+    without output during parasitic solve), making cancel unresponsive.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Resolve argv[0] via PATH ourselves so .bat shims work on Windows
@@ -85,10 +118,62 @@ def run_subprocess(
             log.write(f"# ERROR: executable not found: {resolved_argv[0]!r}\n# {exc}\n")
             return 127
         assert proc.stdout is not None
-        for line in proc.stdout:
-            log.write(line)
-        exit_code = proc.wait()
-        log.write(f"\n# exit: {exit_code}\n")
+
+        line_queue: queue.Queue[str | None] = queue.Queue()
+
+        def _reader() -> None:
+            try:
+                for line in proc.stdout:  # type: ignore[union-attr]
+                    line_queue.put(line)
+            finally:
+                line_queue.put(None)
+
+        reader_thread = threading.Thread(
+            target=_reader, name=f"run_subprocess-reader-{proc.pid}", daemon=True
+        )
+        reader_thread.start()
+
+        cancelled = False
+        while True:
+            if cancel_token is not None and cancel_token.is_cancelled():
+                cancelled = True
+                break
+            try:
+                item = line_queue.get(timeout=_DRAIN_POLL_SECONDS)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            log.write(item)
+
+        if cancelled:
+            log.write("\n# CANCELLED: terminating subprocess...\n")
+            log.flush()
+            proc.terminate()
+            try:
+                exit_code = proc.wait(timeout=CANCEL_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                log.write(
+                    f"# subprocess ignored terminate() after "
+                    f"{CANCEL_GRACE_SECONDS}s; escalating to kill\n"
+                )
+                proc.kill()
+                exit_code = proc.wait()
+            # Drain anything the reader captured before the pipe closed.
+            reader_thread.join(timeout=2.0)
+            while True:
+                try:
+                    item = line_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if item is None:
+                    break
+                log.write(item)
+            log.write(f"\n# exit: {exit_code} (cancelled)\n")
+        else:
+            exit_code = proc.wait()
+            reader_thread.join(timeout=2.0)
+            log.write(f"\n# exit: {exit_code}\n")
     return exit_code
 
 
@@ -157,13 +242,22 @@ class Tool(ABC):
         cwd: Path,
         env: dict[str, str],
         log_path: Path,
+        *,
+        cancel_token: CancelToken | None = None,
     ) -> ToolResult:
         """Spawn the subprocess and return a :class:`ToolResult`.
 
         Default: :func:`run_subprocess` + exit-code to success. Override
         only when the tool needs pre/post-execution logic beyond the norm.
+
+        ``cancel_token`` is threaded through so the runner can hard-kill
+        this stage's subprocess mid-run. Overriders that do their own
+        pre-run work (e.g. :class:`SiTool.run` unlinking ``.running``)
+        must forward the token to :func:`run_subprocess`.
         """
-        exit_code = run_subprocess(argv, cwd=cwd, env=env, log_path=log_path)
+        exit_code = run_subprocess(
+            argv, cwd=cwd, env=env, log_path=log_path, cancel_token=cancel_token
+        )
         return ToolResult(
             success=(exit_code == 0),
             stdout_path=log_path,

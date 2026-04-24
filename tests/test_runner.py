@@ -86,6 +86,35 @@ def test_si_env_published_to_output_dir(
     assert (output_dir / "si.env").is_file()
 
 
+def test_si_env_not_published_when_stage_fails(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 5.1: si failure must not leave a stale si.env in output_dir.
+
+    Publishing post-si only on success avoids masking bugs on retry —
+    Quantus reads output_dir/si.env, so a leftover from a prior failed
+    run would make the next Quantus look like it passed for the wrong
+    reason.
+    """
+    monkeypatch.setenv("AUTO_EXT_MOCK_FORCE_FAIL", "si")
+    project, tasks = _load(project_tools_config)
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["si"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+    )
+
+    assert summary.failed == 1
+    output_dir = workarea / "cds" / "verify" / f"QCI_PATH_{tasks[0].cell}"
+    assert not (output_dir / "si.env").exists()
+
+
 def test_calibre_fail_aborts_without_continue(
     project_tools_config: Path,
     workarea: Path,
