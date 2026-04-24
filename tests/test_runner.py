@@ -60,6 +60,32 @@ def test_happy_path_all_stages_pass(
         assert (log_dir / f"{stage}.log").is_file()
 
 
+def test_si_env_published_to_output_dir(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """After the si stage runs, the rendered si.env must appear inside
+    output_dir (= extraction_output_dir resolved for this task's cell).
+    Quantus's LBRCXM-756 error fires if si.env is missing there; the
+    runner stages it over post-si because si itself does not.
+    """
+    project, tasks = _load(project_tools_config)
+    run_tasks(
+        project,
+        tasks,
+        stages=["si"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+    )
+
+    # extraction_output_dir = "${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"
+    # with WORK_ROOT pinned to workarea in the fixture.
+    output_dir = workarea / "cds" / "verify" / f"QCI_PATH_{tasks[0].cell}"
+    assert (output_dir / "si.env").is_file()
+
+
 def test_calibre_fail_aborts_without_continue(
     project_tools_config: Path,
     workarea: Path,

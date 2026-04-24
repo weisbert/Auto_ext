@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -379,6 +380,14 @@ def _run_single_stage(
                     raw = tool.run(
                         argv, cwd=exec_ctx.cwd, env=subprocess_env, log_path=log_path
                     )
+            # Quantus's -cdl_out_map_directory points at output_dir and
+            # errors with LBRCXM-756 if si.env is not there. si writes
+            # netlist + map/ + ihnl/ to simRunDir (= output_dir) but
+            # does not copy its own control file across. Publish it so
+            # the downstream Quantus stage can run.
+            _publish_si_env_to_output_dir(
+                rendered_path, Path(context["output_dir"])
+            )
         else:
             raw = tool.run(argv, cwd=exec_ctx.cwd, env=subprocess_env, log_path=log_path)
         result = tool.parse_result(raw)
@@ -488,6 +497,21 @@ def _validate_tasks(tasks: list[TaskConfig], stages: list[str]) -> None:
                     f"task {t.task_id}: jivaro enabled but out_file is not set "
                     "(jivaro inputView renders to library/cell/out_file)"
                 )
+
+
+def _publish_si_env_to_output_dir(rendered_si_env: Path, output_dir: Path) -> None:
+    """Copy the rendered ``si.env`` into ``output_dir`` after si runs.
+
+    Quantus errors with LBRCXM-756 when its ``-cdl_out_map_directory``
+    (``= output_dir``) is missing ``si.env``. si writes the netlist +
+    ``map/`` + ``ihnl/`` to ``simRunDir = output_dir`` but not a copy
+    of its own control file, so the runner stages it over. Called
+    unconditionally after the si subprocess returns — a failed si
+    leaves the file as a debugging artifact, and the runner aborts
+    downstream stages anyway.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(rendered_si_env, output_dir / "si.env")
 
 
 def _validate_task_outputs(tasks: list[TaskConfig]) -> None:
