@@ -363,3 +363,81 @@ def dump_project_yaml(project: ProjectConfig) -> str:
     buf = StringIO()
     yaml.dump(project.raw, buf)
     return buf.getvalue()
+
+
+# ---- GUI write-back --------------------------------------------------------
+
+
+_EDIT_SCALAR_KEYS = frozenset(
+    {
+        "work_root",
+        "verify_root",
+        "setup_root",
+        "employee_id",
+        "tech_name",
+        "pdk_subdir",
+        "project_subdir",
+        "layer_map",
+        "extraction_output_dir",
+        "intermediate_dir",
+    }
+)
+
+# parent → allowed children, or None for "arbitrary child keys"
+_EDIT_NESTED_KEYS: dict[str, frozenset[str] | None] = {
+    "runset_versions": frozenset({"lvs", "qrc"}),
+    "env_overrides": None,  # env var names are arbitrary
+}
+
+
+def apply_project_edits(raw: Any, edits: dict[str, Any]) -> None:
+    """Mutate a ruamel ``CommentedMap`` in place per ``edits``.
+
+    Keys are either flat (``tech_name``) or dotted for the two known
+    nested mappings (``runset_versions.lvs``, ``env_overrides.FOO``).
+    A value of ``None`` removes the key; any other value overwrites.
+    Comments attached to existing keys survive; newly-introduced keys
+    appear without leading comments (expected — the dump is user-driven).
+
+    Deleting the last child of a nested mapping also prunes the parent,
+    so ``env_overrides: {}`` does not linger after every override is
+    cleared.
+
+    Raises :class:`ConfigError` on unknown keys to catch typos before
+    they disappear silently into the YAML.
+    """
+
+    if raw is None:
+        raise ConfigError("apply_project_edits: raw CommentedMap is None")
+
+    for key, value in edits.items():
+        if "." in key:
+            parent, _, child = key.partition(".")
+            if parent not in _EDIT_NESTED_KEYS:
+                raise ConfigError(f"apply_project_edits: unknown key {key!r}")
+            allowed = _EDIT_NESTED_KEYS[parent]
+            if allowed is not None and child not in allowed:
+                raise ConfigError(
+                    f"apply_project_edits: unknown nested key {key!r} "
+                    f"(allowed under {parent!r}: {sorted(allowed)})"
+                )
+            _apply_nested_edit(raw, parent, child, value)
+        else:
+            if key not in _EDIT_SCALAR_KEYS:
+                raise ConfigError(f"apply_project_edits: unknown key {key!r}")
+            if value is None:
+                raw.pop(key, None)
+            else:
+                raw[key] = value
+
+
+def _apply_nested_edit(raw: Any, parent: str, child: str, value: Any) -> None:
+    if value is None:
+        if parent in raw and isinstance(raw[parent], dict) and child in raw[parent]:
+            del raw[parent][child]
+            if not raw[parent]:
+                del raw[parent]
+        return
+    if parent not in raw or not isinstance(raw[parent], dict):
+        raw[parent] = {}
+    raw[parent][child] = value

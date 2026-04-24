@@ -16,15 +16,18 @@ pytest.importorskip("pytestqt")
 
 from PyQt5.QtCore import Qt  # noqa: E402
 
-from auto_ext.ui.tabs.run_tab import RunContext, RunTab  # noqa: E402
+from auto_ext.ui.config_controller import ConfigController  # noqa: E402
+from auto_ext.ui.tabs.run_tab import RunTab  # noqa: E402
 
 
 def test_load_config_populates_task_list(
     qtbot, project_tools_config: Path
 ) -> None:
-    ctx = RunContext(config_dir=project_tools_config)
-    tab = RunTab(ctx)
+    controller = ConfigController()
+    tab = RunTab(controller)
     qtbot.addWidget(tab)
+
+    controller.load(project_tools_config)
 
     # project_tools_config declares exactly one task.
     assert tab._task_list.count() == 1
@@ -34,13 +37,14 @@ def test_load_config_populates_task_list(
 def test_dry_run_populates_status_tree(
     qtbot, project_tools_config: Path, workarea: Path, tmp_path: Path
 ) -> None:
-    ctx = RunContext(
-        config_dir=project_tools_config,
+    controller = ConfigController(
         auto_ext_root=tmp_path / "pr",
         workarea=workarea,
     )
-    tab = RunTab(ctx)
+    tab = RunTab(controller)
     qtbot.addWidget(tab)
+
+    controller.load(project_tools_config)
 
     # Enable dry-run so we don't spawn real subprocesses.
     tab._dry_run_check.setChecked(True)

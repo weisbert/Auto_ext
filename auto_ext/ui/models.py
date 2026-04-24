@@ -40,3 +40,21 @@ STATUS_COLOR: dict[str, str] = {
     str(TaskStatus.FAILED): "#c83232",
     str(TaskStatus.CANCELLED): "#d69016",
 }
+
+
+#: Env-resolution source → display label used by the Project tab's env
+#: panel. Keys match :data:`auto_ext.core.env.EnvSource` string values.
+ENV_SOURCE_DISPLAY: dict[str, str] = {
+    "override": "⇄ override",
+    "shell": "✓ shell",
+    "missing": "✗ missing",
+}
+
+#: Env-resolution source → HTML color, same palette family as
+#: :data:`STATUS_COLOR`. ``override`` reuses the amber tone reserved for
+#: "user deliberately deviating"; ``missing`` uses the same red as FAILED.
+ENV_SOURCE_COLOR: dict[str, str] = {
+    "override": "#d69016",
+    "shell": "#2e8b2e",
+    "missing": "#c83232",
+}

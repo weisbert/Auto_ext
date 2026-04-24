@@ -10,6 +10,12 @@ Owns:
   in response to :class:`QtProgressReporter` signals,
 - the :class:`RunWorker` lifecycle (one at a time).
 
+Config state (``config_dir`` / ``project`` / ``tasks``) lives on the
+shared :class:`ConfigController` so the Project tab sees the same
+truth. The Open / Reload buttons on the top bar drive the controller;
+the tab listens on ``config_loaded`` / ``config_saved`` to refresh its
+task list.
+
 Emits :attr:`stage_selected` when the user clicks a stage row so the
 Log tab can switch to that stage's log file.
 """
@@ -17,7 +23,6 @@ Log tab can switch to that stage's log file.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -41,25 +46,15 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from auto_ext.core.config import load_project, load_tasks
-from auto_ext.core.errors import AutoExtError
 from auto_ext.core.progress import CancelToken
 from auto_ext.core.runner import STAGE_ORDER
+from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import STAGE_DISPLAY, STATUS_COLOR, TASK_DISPLAY
 from auto_ext.ui.qt_reporter import QtProgressReporter
 from auto_ext.ui.worker import RunWorker
 
 
 _UNSAFE_TASK_ID = re.compile(r"[^A-Za-z0-9_.-]")
-
-
-@dataclass
-class RunContext:
-    """Defaults passed in from the main window (CLI mirrors these)."""
-
-    config_dir: Path | None = None
-    auto_ext_root: Path | None = None
-    workarea: Path | None = None
 
 
 class RunTab(QWidget):
@@ -69,11 +64,11 @@ class RunTab(QWidget):
     #: selects a stage row. Main window wires this into LogTab.
     stage_selected = pyqtSignal(object)
 
-    def __init__(self, ctx: RunContext, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, controller: ConfigController, parent: QWidget | None = None
+    ) -> None:
         super().__init__(parent)
-        self._ctx = ctx
-        self._project: Any | None = None
-        self._tasks: list[Any] = []
+        self._controller = controller
         self._worker: RunWorker | None = None
         self._reporter: QtProgressReporter | None = None
 
@@ -82,8 +77,22 @@ class RunTab(QWidget):
         self._task_items: dict[str, QTreeWidgetItem] = {}
 
         self._build_ui()
-        if ctx.config_dir is not None:
-            self._load_config(ctx.config_dir)
+
+        controller.config_loaded.connect(self._on_config_loaded)
+        controller.config_saved.connect(self._on_config_loaded)
+        controller.config_error.connect(self._on_config_error)
+
+        if controller.project is not None:
+            self._on_config_loaded(controller.config_dir)
+
+    # ---- public helpers ----------------------------------------------
+
+    def is_worker_active(self) -> bool:
+        """True while a :class:`RunWorker` is in flight. Other tabs use
+        this to disable destructive actions (e.g. save while running).
+        """
+
+        return self._worker is not None
 
     # ---- UI construction ---------------------------------------------
 
@@ -92,15 +101,12 @@ class RunTab(QWidget):
 
         # Top bar: config dir path + reload + jobs
         top = QHBoxLayout()
-        self._config_label = QLabel(
-            str(self._ctx.config_dir) if self._ctx.config_dir else "(no config loaded)",
-            self,
-        )
+        self._config_label = QLabel("(no config loaded)", self)
         self._config_label.setStyleSheet("font-family: monospace; color: #444;")
         browse = QPushButton("Open config dir...", self)
         browse.clicked.connect(self._browse_config_dir)
         reload_btn = QPushButton("Reload", self)
-        reload_btn.clicked.connect(self._reload)
+        reload_btn.clicked.connect(self._controller.reload)
 
         top.addWidget(QLabel("Config:", self))
         top.addWidget(self._config_label, stretch=1)
@@ -171,42 +177,40 @@ class RunTab(QWidget):
 
         root.addWidget(splitter, stretch=1)
 
-    # ---- config loading ----------------------------------------------
+    # ---- controller wiring -------------------------------------------
 
     def _browse_config_dir(self) -> None:
+        start = str(self._controller.config_dir or Path.cwd())
         path = QFileDialog.getExistingDirectory(
             self,
             "Select config dir (containing project.yaml + tasks.yaml)",
-            str(self._ctx.config_dir or Path.cwd()),
+            start,
         )
         if path:
-            self._load_config(Path(path))
+            self._controller.load(Path(path))
 
-    def _reload(self) -> None:
-        if self._ctx.config_dir is not None:
-            self._load_config(self._ctx.config_dir)
+    def _on_config_loaded(self, config_dir: object) -> None:
+        path = Path(config_dir) if config_dir is not None else None
+        self._config_label.setText(str(path) if path else "(no config loaded)")
 
-    def _load_config(self, config_dir: Path) -> None:
-        try:
-            project = load_project(config_dir / "project.yaml")
-            tasks = load_tasks(config_dir / "tasks.yaml", project=project)
-        except AutoExtError as exc:
-            QMessageBox.critical(self, "Config error", str(exc))
-            return
-        except OSError as exc:
-            QMessageBox.critical(self, "Config error", str(exc))
-            return
-
-        self._ctx.config_dir = config_dir
-        self._project = project
-        self._tasks = tasks
-        self._config_label.setText(str(config_dir))
+        # Preserve user's check/uncheck selections across reloads when task
+        # ids are stable.
+        previously_unchecked: set[str] = set()
+        for i in range(self._task_list.count()):
+            item = self._task_list.item(i)
+            if item.checkState() != Qt.Checked:
+                previously_unchecked.add(item.text())
 
         self._task_list.clear()
-        for t in tasks:
-            item = QListWidgetItem(t.task_id, self._task_list)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked)
+        for t in self._controller.tasks:
+            lw_item = QListWidgetItem(t.task_id, self._task_list)
+            lw_item.setFlags(lw_item.flags() | Qt.ItemIsUserCheckable)
+            lw_item.setCheckState(
+                Qt.Unchecked if t.task_id in previously_unchecked else Qt.Checked
+            )
+
+    def _on_config_error(self, message: str) -> None:
+        QMessageBox.critical(self, "Config error", message)
 
     # ---- run lifecycle ------------------------------------------------
 
@@ -216,7 +220,7 @@ class RunTab(QWidget):
             item = self._task_list.item(i)
             if item.checkState() == Qt.Checked:
                 want.add(item.text())
-        return [t for t in self._tasks if t.task_id in want]
+        return [t for t in self._controller.tasks if t.task_id in want]
 
     def _selected_stages(self) -> list[str]:
         return [s for s in STAGE_ORDER if self._stage_checks[s].isChecked()]
@@ -224,9 +228,25 @@ class RunTab(QWidget):
     def _start_run(self) -> None:
         if self._worker is not None:
             return  # one run at a time
-        if self._project is None:
+        if self._controller.project is None:
             QMessageBox.warning(self, "No config", "Load a config dir first.")
             return
+
+        if self._controller.is_dirty:
+            choice = QMessageBox.question(
+                self,
+                "Unsaved project edits",
+                "The Project tab has unsaved edits that will NOT be used by "
+                "this run (the loaded project.yaml is used instead).\n\n"
+                "Save first, or continue anyway?",
+                QMessageBox.Save | QMessageBox.Cancel | QMessageBox.Ignore,
+                QMessageBox.Save,
+            )
+            if choice == QMessageBox.Save:
+                if not self._controller.save():
+                    return
+            elif choice == QMessageBox.Cancel:
+                return
 
         tasks = self._selected_tasks()
         if not tasks:
@@ -240,8 +260,8 @@ class RunTab(QWidget):
         jobs = self._jobs_spin.value()
         dry_run = self._dry_run_check.isChecked()
 
-        ae_root = self._ctx.auto_ext_root or (self._ctx.config_dir.parent if self._ctx.config_dir else None)
-        workarea = self._ctx.workarea or (ae_root.parent if ae_root else None)
+        ae_root = self._controller.auto_ext_root
+        workarea = self._controller.workarea
         if ae_root is None or workarea is None:
             QMessageBox.critical(
                 self,
@@ -265,7 +285,7 @@ class RunTab(QWidget):
 
         self._reporter = reporter
         self._worker = RunWorker(
-            project=self._project,
+            project=self._controller.project,
             tasks=tasks,
             stages=stages,
             auto_ext_root=ae_root,
@@ -372,7 +392,7 @@ class RunTab(QWidget):
         task_id = parent.text(0)
         stage = item.text(0)
 
-        ae_root = self._ctx.auto_ext_root or (self._ctx.config_dir.parent if self._ctx.config_dir else None)
+        ae_root = self._controller.auto_ext_root
         if ae_root is None:
             return
         safe_id = _UNSAFE_TASK_ID.sub("_", task_id)

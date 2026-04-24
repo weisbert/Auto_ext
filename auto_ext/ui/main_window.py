@@ -1,8 +1,9 @@
 """Top-level :class:`QMainWindow` with 5 tabs.
 
-Owns the :class:`RunTab` and :class:`LogTab`; wires the Run tab's
-``stage_selected`` signal into the Log tab so clicking a stage in the
-status tree switches the log viewer.
+Owns the shared :class:`ConfigController` so the Run and Project tabs
+see the same loaded ``project.yaml`` + ``tasks.yaml``, and wires the
+Run tab's ``stage_selected`` signal into the Log tab so clicking a
+stage in the status tree switches the log viewer.
 """
 
 from __future__ import annotations
@@ -11,14 +12,17 @@ from pathlib import Path
 
 from PyQt5.QtWidgets import QMainWindow, QTabWidget
 
+from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.tabs.log_tab import LogTab
 from auto_ext.ui.tabs.project_tab import ProjectTab
-from auto_ext.ui.tabs.run_tab import RunContext, RunTab
+from auto_ext.ui.tabs.run_tab import RunTab
 from auto_ext.ui.tabs.tasks_tab import TasksTab
 from auto_ext.ui.tabs.templates_tab import TemplatesTab
 
 
 class MainWindow(QMainWindow):
+    _TITLE_BASE = "Auto_ext"
+
     def __init__(
         self,
         *,
@@ -27,19 +31,20 @@ class MainWindow(QMainWindow):
         workarea: Path | None = None,
     ) -> None:
         super().__init__()
-        self.setWindowTitle("Auto_ext")
+        self.setWindowTitle(self._TITLE_BASE)
         self.resize(1280, 800)
 
-        self._ctx = RunContext(
-            config_dir=config_dir,
+        self._controller = ConfigController(
             auto_ext_root=auto_ext_root,
             workarea=workarea,
+            parent=self,
         )
+        self._controller.dirty_changed.connect(self._on_dirty_changed)
 
         tabs = QTabWidget(self)
-        self._run_tab = RunTab(self._ctx, tabs)
+        self._run_tab = RunTab(self._controller, tabs)
         self._log_tab = LogTab(tabs)
-        self._project_tab = ProjectTab(tabs)
+        self._project_tab = ProjectTab(self._controller, self._run_tab, tabs)
         self._tasks_tab = TasksTab(tabs)
         self._templates_tab = TemplatesTab(tabs)
 
@@ -56,7 +61,14 @@ class MainWindow(QMainWindow):
         # jumps to the Log tab so the user sees it without manual nav.
         self._run_tab.stage_selected.connect(self._on_stage_selected)
 
+        if config_dir is not None:
+            self._controller.load(config_dir)
+
     def _on_stage_selected(self, log_path: Path | None) -> None:
         self._log_tab.set_active_log(log_path)
         if log_path is not None:
             self._tabs.setCurrentWidget(self._log_tab)
+
+    def _on_dirty_changed(self, dirty: bool) -> None:
+        suffix = " *" if dirty else ""
+        self.setWindowTitle(f"{self._TITLE_BASE}{suffix}")

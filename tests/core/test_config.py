@@ -13,6 +13,7 @@ from auto_ext.core.config import (
     RunsetVersions,
     TaskConfig,
     TemplatePaths,
+    apply_project_edits,
     dump_project_yaml,
     load_project,
     load_tasks,
@@ -88,6 +89,78 @@ def test_dump_project_yaml_roundtrips(fixtures_dir: Path) -> None:
     # Original comment must survive; ruamel preserves it.
     assert "Minimal valid project.yaml" in dumped
     assert "employee_id: alice" in dumped
+
+
+# ---- apply_project_edits ---------------------------------------------------
+
+
+def test_apply_project_edits_scalar_overwrite_preserves_comments(
+    fixtures_dir: Path,
+) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(project.raw, {"employee_id": "bob"})
+    dumped = dump_project_yaml(project)
+    assert "employee_id: bob" in dumped
+    # Original comment must still be intact.
+    assert "Minimal valid project.yaml" in dumped
+
+
+def test_apply_project_edits_new_scalar_key(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(project.raw, {"tech_name": "HN042"})
+    dumped = dump_project_yaml(project)
+    assert "tech_name: HN042" in dumped
+
+
+def test_apply_project_edits_none_deletes_key(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    assert "employee_id" in project.raw
+    apply_project_edits(project.raw, {"employee_id": None})
+    assert "employee_id" not in project.raw
+    dumped = dump_project_yaml(project)
+    assert "employee_id" not in dumped
+
+
+def test_apply_project_edits_nested_runset_versions(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(
+        project.raw,
+        {"runset_versions.lvs": "Ver_Plus_1.0a", "runset_versions.qrc": "Ver_Plus_1.0b"},
+    )
+    dumped = dump_project_yaml(project)
+    assert "runset_versions:" in dumped
+    assert "lvs: Ver_Plus_1.0a" in dumped
+    assert "qrc: Ver_Plus_1.0b" in dumped
+
+
+def test_apply_project_edits_nested_env_override_round_trip(
+    fixtures_dir: Path,
+) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(
+        project.raw,
+        {"env_overrides.WORK_ROOT": "/tmp/override_root"},
+    )
+    dumped = dump_project_yaml(project)
+    assert "env_overrides:" in dumped
+    assert "WORK_ROOT: /tmp/override_root" in dumped
+    # Removing the only child should prune the parent mapping.
+    apply_project_edits(project.raw, {"env_overrides.WORK_ROOT": None})
+    assert "env_overrides" not in project.raw
+    dumped2 = dump_project_yaml(project)
+    assert "env_overrides" not in dumped2
+
+
+def test_apply_project_edits_unknown_key_raises(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    with pytest.raises(ConfigError, match="unknown key 'bogus'"):
+        apply_project_edits(project.raw, {"bogus": "value"})
+
+
+def test_apply_project_edits_unknown_nested_child_raises(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    with pytest.raises(ConfigError, match="unknown nested key"):
+        apply_project_edits(project.raw, {"runset_versions.typo": "x"})
 
 
 # ---- load_tasks ------------------------------------------------------------

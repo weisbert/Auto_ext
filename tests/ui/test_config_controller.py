@@ -1,0 +1,166 @@
+"""Tests for :class:`auto_ext.ui.config_controller.ConfigController`.
+
+Runs under pytest-qt so the QObject signal machinery is live. Uses the
+``project_tools_config`` fixture (from :mod:`tests.conftest`) to get a
+full ``project.yaml`` + ``tasks.yaml`` on disk.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("PyQt5")
+pytest.importorskip("pytestqt")
+
+from auto_ext.ui.config_controller import ConfigController  # noqa: E402
+
+
+def test_load_emits_config_loaded(qtbot, project_tools_config: Path) -> None:
+    controller = ConfigController()
+    with qtbot.waitSignal(controller.config_loaded, timeout=2000) as blocker:
+        controller.load(project_tools_config)
+    assert blocker.args[0] == project_tools_config
+    assert controller.project is not None
+    assert controller.tasks  # at least one task
+    assert controller.is_dirty is False
+
+
+def test_load_missing_emits_config_error(qtbot, tmp_path: Path) -> None:
+    controller = ConfigController()
+    with qtbot.waitSignal(controller.config_error, timeout=2000) as blocker:
+        controller.load(tmp_path / "nonexistent")
+    assert "not found" in blocker.args[0]
+    assert controller.project is None
+
+
+def test_stage_edits_flips_dirty(qtbot, project_tools_config: Path) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    assert controller.is_dirty is False
+
+    with qtbot.waitSignal(controller.dirty_changed, timeout=2000) as blocker:
+        controller.stage_edits({"tech_name": "HN999"})
+    assert blocker.args[0] is True
+    assert controller.is_dirty is True
+    assert controller.pending_edits == {"tech_name": "HN999"}
+
+
+def test_revert_clears_pending(qtbot, project_tools_config: Path) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    controller.stage_edits({"tech_name": "HN999"})
+    assert controller.is_dirty is True
+
+    with qtbot.waitSignal(controller.dirty_changed, timeout=2000) as blocker:
+        controller.revert()
+    assert blocker.args[0] is False
+    assert controller.pending_edits == {}
+
+
+def test_save_writes_edits_to_disk(qtbot, project_tools_config: Path) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    controller.stage_edits({"tech_name": "HN999"})
+
+    with qtbot.waitSignal(controller.config_saved, timeout=2000):
+        ok = controller.save()
+    assert ok is True
+    assert controller.is_dirty is False
+    # Reload raw from disk to verify the edit stuck.
+    on_disk = (project_tools_config / "project.yaml").read_text(encoding="utf-8")
+    assert "tech_name: HN999" in on_disk
+    # Other original fields untouched.
+    assert "pdk_subdir: CFXXX" in on_disk
+    assert controller.project is not None
+    assert controller.project.tech_name == "HN999"
+
+
+def test_save_noop_when_no_pending(project_tools_config: Path) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    # No stage_edits call — save() should return False silently.
+    assert controller.save() is False
+
+
+def test_save_detects_external_change(
+    qtbot, project_tools_config: Path
+) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    controller.stage_edits({"tech_name": "HN999"})
+
+    # Simulate a different process rewriting project.yaml after load().
+    import os
+
+    path = project_tools_config / "project.yaml"
+    current = path.read_text(encoding="utf-8")
+    path.write_text(current + "# external edit\n", encoding="utf-8")
+    # Force mtime forward defensively in case the write landed in the
+    # same ns bucket as the load.
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    with qtbot.waitSignal(controller.config_error, timeout=2000) as blocker:
+        ok = controller.save()
+    assert ok is False
+    assert "changed on disk" in blocker.args[0]
+    # Pending edits should still be intact so the user can retry.
+    assert controller.is_dirty is True
+
+
+def test_save_force_overrides_external_change(
+    qtbot, project_tools_config: Path
+) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    controller.stage_edits({"tech_name": "HN999"})
+
+    import os
+
+    path = project_tools_config / "project.yaml"
+    current = path.read_text(encoding="utf-8")
+    path.write_text(current + "# external edit\n", encoding="utf-8")
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+    assert controller.save(force=True) is True
+    on_disk = path.read_text(encoding="utf-8")
+    assert "tech_name: HN999" in on_disk
+
+
+def test_effective_env_overrides_merges_staged(
+    qtbot, project_tools_config: Path
+) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    baseline = controller.effective_env_overrides()
+    # Fixture seeds several overrides; baseline should match the project.
+    assert controller.project is not None
+    assert baseline == controller.project.env_overrides
+
+    controller.stage_edits(
+        {
+            "env_overrides.NEW_VAR": "new_value",
+            "env_overrides.WORK_ROOT": None,  # clear existing
+        }
+    )
+    effective = controller.effective_env_overrides()
+    assert effective["NEW_VAR"] == "new_value"
+    assert "WORK_ROOT" not in effective
+
+
+def test_pending_overwrite_is_single_signal(
+    qtbot, project_tools_config: Path
+) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+
+    received: list[bool] = []
+    controller.dirty_changed.connect(lambda state: received.append(state))
+
+    controller.stage_edits({"tech_name": "HN999"})
+    controller.stage_edits({"tech_name": "HN888"})  # already dirty, no flip
+    assert received == [True]
+    assert controller.pending_edits == {"tech_name": "HN888"}
