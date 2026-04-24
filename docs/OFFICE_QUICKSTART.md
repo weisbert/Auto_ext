@@ -436,23 +436,27 @@ Calibre 失败时，`./run.sh run` 的 summary 里会显示 banner + discrepanci
 
 ## 10. 已知限制（下一阶段修）
 
-- **No GUI**：Phase 5。而且要先解掉 PyQt5 ABI blocker（见下）。
+- **No GUI**：Phase 5。PyQt5 ABI blocker **已解决**（见下），Phase 5 可以直接写代码。
 - **No template editor**：Phase 6，最复杂。
 - **No migrate**：Phase 4c。Run_ext.txt 现在手翻（§4.5 对照表）。
-- **Parallel 需要办公室 license 验证**：Phase 3.5 已 wire 好（`--jobs N`，见 §5.8），代码路径测试已覆盖，但 si 在 symlinked `cds.lib` 下的行为 + Calibre/QRC license 并发上限只能在真 Cadence 上确认（§5.9 清单）。
+- **Parallel Steps 4-6 未验**：Phase 3.5 代码 + 3 个办公室实跑发现的 bug fix 已全部 ship（HEAD=63c0af8）；`--jobs 2` 全链办公室实跑通过（2026-04-24）。`--jobs 4` license 天花板 / duplicate preflight / 混合 fail 三项不 block 用户正常工作，下次有时间再补。
 
-### PyQt5 ABI blocker 诊断
+### PyQt5 ABI blocker（已解决）
 
-服务器上预装的 PyQt5 5.15.9 的 `.abi3.so` 需要 Qt5 符号 `_ZdaPvm`（sized array delete，Qt 5.9+），但 Cadence / PDK setup 可能把老 Qt5 塞进 `LD_LIBRARY_PATH` 前面覆盖掉系统新 Qt5。Phase 5 GUI 跑不起来时：
+2026-04-24 办公室诊断：
+
+- 服务器 `/usr/lib64/libstdc++.so.6` 的最高版本符号是 `GLIBCXX_3.4.19`（GCC 4.8），**不提供** `_ZdaPvm`（C++14 sized-delete operator，GLIBCXX_3.4.21+ 才有）。
+- PyQt5 5.15.9 的 `QtCore.abi3.so` 链接时引用了 `_ZdaPvm@Qt_5`。任何依赖系统 libstdc++ 的 Qt5（如 `/software/public/qt/5.15.3_xcb/lib/libQt5Core.so.5`，`nm -D` 显示 `U _ZdaPvm`）都无法解析这个符号。
+- **PyQt5 的 manylinux2014 wheel 自带一份 Qt5**（`<PyQt5_path>/Qt5/lib/`），用较新工具链编译，`libQt5Core.so.5` 里 `T _ZdaPvm`（已定义，非引用）。只要把这个路径前置到 `LD_LIBRARY_PATH` 就能 bypass 系统 libstdc++ 老旧的问题。
+
+`run.sh` 已加上这个逻辑：当检测到 subcommand 为 `gui` 或 `gui-*` 时自动前置 `<PyQt5>/Qt5/lib` 到 `LD_LIBRARY_PATH`。非 GUI 命令（如 `run` / `check-env` / `init-project`）不触发，保持 EDA 子进程环境干净。
+
+诊断确认（bash 里跑）：
 
 ```bash
-# 看 PyQt5 绑的是哪个 Qt5
-ldd $(python3.11 -c 'import PyQt5, os; print(os.path.dirname(PyQt5.__file__))')/QtCore.abi3.so | grep -i qt
-
-# 看那个 libQt5Core.so.5 里有哪些 Qt 版本符号
-strings <上面输出里的 libQt5Core.so.5 路径> | grep -E '^Qt_5(\.[0-9]+)?$' | sort -u
+export LD_LIBRARY_PATH=/software/public/python/3.11.4/lib/python3.11/site-packages/PyQt5/Qt5/lib:$LD_LIBRARY_PATH
+python3 -c 'from PyQt5 import QtCore, QtGui, QtWidgets; print("modules ok")'
+python3 -c 'from PyQt5 import QtWidgets; a = QtWidgets.QApplication([]); print("QApplication ok")'
 ```
 
-90% 情况是 LD_LIBRARY_PATH 里混了老 Qt5 —— `echo $LD_LIBRARY_PATH | tr : '\n' | xargs -I{} ls {}/libQt5Core* 2>/dev/null` 看哪几条路径有。
-
-**现在 CLI 不受影响**，PyQt5 blocker 等做 Phase 5 再处理。
+两行都打 `ok` → OK。出现 `qt.qpa.xcb: ...` 之类 warning 但最终 `QApplication ok` 打出来也 OK —— 那是 X11 display 问题，真跑 GUI 用 `ssh -Y` 或 VNC 解决，不是 ABI 问题。
