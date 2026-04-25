@@ -8,15 +8,20 @@ import pytest
 from pydantic import ValidationError
 
 from auto_ext.core.config import (
+    ExcludeMatch,
     JivaroConfig,
+    JivaroOverride,
     ProjectConfig,
     RunsetVersions,
     TaskConfig,
     TemplatePaths,
     apply_project_edits,
+    apply_tasks_edits,
     dump_project_yaml,
+    dump_tasks_yaml,
     load_project,
     load_tasks,
+    load_tasks_with_raw,
 )
 from auto_ext.core.errors import ConfigError
 
@@ -499,3 +504,230 @@ def test_project_config_override_tech_name_env_vars(tmp_path: Path) -> None:
     )
     project = load_project(p)
     assert project.tech_name_env_vars == ["MY_PDK_TECH", "MY_PDK_LAYERS"]
+
+
+# ---- Phase 5.4: exclude + jivaro_overrides --------------------------------
+
+
+def _write_tasks(tmp_path: Path, body: str) -> Path:
+    p = tmp_path / "t.yaml"
+    p.write_text(body, encoding="utf-8")
+    return p
+
+
+def test_exclude_match_requires_at_least_one_axis() -> None:
+    from pydantic import ValidationError as _VE
+
+    with pytest.raises(_VE, match="at least one"):
+        ExcludeMatch()  # type: ignore[call-arg]
+
+
+def test_expand_spec_drops_excluded_combination(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: [A, B]\n"
+        "  lvs_layout_view: [lay, lay_t]\n"
+        "  exclude:\n"
+        "    - {cell: B, lvs_layout_view: lay_t}\n",
+    )
+    tasks = load_tasks(p)
+    task_ids = [t.task_id for t in tasks]
+    assert "L__B__lay_t__schematic" not in task_ids
+    assert len(task_ids) == 3
+
+
+def test_expand_spec_multiple_excludes(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: [A, B]\n"
+        "  lvs_layout_view: [lay, lay_t]\n"
+        "  exclude:\n"
+        "    - {cell: A, lvs_layout_view: lay_t}\n"
+        "    - {cell: B, lvs_layout_view: lay}\n",
+    )
+    tasks = load_tasks(p)
+    assert {t.task_id for t in tasks} == {
+        "L__A__lay__schematic",
+        "L__B__lay_t__schematic",
+    }
+
+
+def test_exclude_draining_all_raises(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: lay\n"
+        "  exclude:\n"
+        "    - {cell: A}\n",
+    )
+    with pytest.raises(ConfigError, match="dropped every combination"):
+        load_tasks(p)
+
+
+def test_exclude_single_axis_selector(tmp_path: Path) -> None:
+    """Selector with only ``library`` should match any combination of that library."""
+    p = _write_tasks(
+        tmp_path,
+        "- library: [A, B]\n"
+        "  cell: c\n"
+        "  lvs_layout_view: [lay, lay_t]\n"
+        "  exclude:\n"
+        "    - {library: B}\n",
+    )
+    tasks = load_tasks(p)
+    assert {t.library for t in tasks} == {"A"}
+    assert len(tasks) == 2
+
+
+def test_jivaro_override_replaces_enabled_only(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: [A, B]\n"
+        "  lvs_layout_view: lay\n"
+        "  jivaro: {enabled: true, frequency_limit: 14, error_max: 2}\n"
+        "  jivaro_overrides:\n"
+        "    B: {enabled: false}\n",
+    )
+    tasks = {t.cell: t for t in load_tasks(p)}
+    assert tasks["A"].jivaro.enabled is True
+    assert tasks["B"].jivaro.enabled is False
+    # other fields inherit from spec default
+    assert tasks["B"].jivaro.frequency_limit == 14
+    assert tasks["B"].jivaro.error_max == 2
+
+
+def test_jivaro_override_for_stale_cell_is_ignored(tmp_path: Path) -> None:
+    """Override keyed on a cell that's not in the cell axis should not break load."""
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: [A]\n"
+        "  lvs_layout_view: lay\n"
+        "  jivaro: {enabled: true}\n"
+        "  jivaro_overrides:\n"
+        "    GHOST: {enabled: false}\n",
+    )
+    tasks = load_tasks(p)
+    assert len(tasks) == 1
+    assert tasks[0].jivaro.enabled is True
+
+
+def test_jivaro_override_rejects_unknown_field(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: lay\n"
+        "  jivaro_overrides:\n"
+        "    A: {bogus: 1}\n",
+    )
+    with pytest.raises(ConfigError):
+        load_tasks(p)
+
+
+def test_load_tasks_with_raw_returns_commented_tree(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "# preamble\n- library: L\n  cell: c\n  lvs_layout_view: lay\n",
+    )
+    tasks, raw = load_tasks_with_raw(p)
+    assert len(tasks) == 1
+    # Either a ruamel CommentedSeq (list subclass) or a plain list — both accepted
+    assert isinstance(raw, list)
+
+
+def test_apply_tasks_edits_overwrites_preserves_preamble(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "# top preamble comment\n"
+        "# keep this line\n"
+        "- library: OLD\n  cell: c\n  lvs_layout_view: lay\n",
+    )
+    _, raw = load_tasks_with_raw(p)
+    apply_tasks_edits(
+        raw,
+        [{"library": "NEW", "cell": "c2", "lvs_layout_view": "lay"}],
+    )
+    text = dump_tasks_yaml(raw)
+    assert "# top preamble comment" in text
+    assert "# keep this line" in text
+    assert "library: NEW" in text
+    assert "library: OLD" not in text
+
+
+def test_apply_tasks_edits_appends_new_spec(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "- library: A\n  cell: c\n  lvs_layout_view: lay\n",
+    )
+    _, raw = load_tasks_with_raw(p)
+    apply_tasks_edits(
+        raw,
+        [
+            {"library": "A", "cell": "c", "lvs_layout_view": "lay"},
+            {"library": "B", "cell": "c2", "lvs_layout_view": "lay"},
+        ],
+    )
+    text = dump_tasks_yaml(raw)
+    assert "library: A" in text
+    assert "library: B" in text
+
+
+def test_apply_tasks_edits_pops_trailing(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "- library: A\n  cell: c\n  lvs_layout_view: lay\n"
+        "- library: B\n  cell: c2\n  lvs_layout_view: lay\n",
+    )
+    _, raw = load_tasks_with_raw(p)
+    apply_tasks_edits(
+        raw,
+        [{"library": "A", "cell": "c", "lvs_layout_view": "lay"}],
+    )
+    text = dump_tasks_yaml(raw)
+    assert "library: A" in text
+    assert "library: B" not in text
+
+
+def test_apply_tasks_edits_empty_specs_rejected(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "- library: A\n  cell: c\n  lvs_layout_view: lay\n",
+    )
+    _, raw = load_tasks_with_raw(p)
+    with pytest.raises(ConfigError, match="empty"):
+        apply_tasks_edits(raw, [])
+
+
+def test_apply_tasks_edits_supports_wrapped_form(tmp_path: Path) -> None:
+    """tasks.yaml may wrap the list in a ``tasks:`` mapping; roundtrip must survive."""
+    p = _write_tasks(
+        tmp_path,
+        "tasks:\n  - library: L\n    cell: c\n    lvs_layout_view: lay\n",
+    )
+    _, raw = load_tasks_with_raw(p)
+    apply_tasks_edits(
+        raw,
+        [{"library": "L2", "cell": "c", "lvs_layout_view": "lay"}],
+    )
+    text = dump_tasks_yaml(raw)
+    assert "tasks:" in text
+    assert "library: L2" in text
+
+
+def test_exclude_selector_also_matches_by_source_view(tmp_path: Path) -> None:
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: c\n"
+        "  lvs_layout_view: lay\n"
+        "  lvs_source_view: [schematic, schematic_test]\n"
+        "  exclude:\n"
+        "    - {lvs_source_view: schematic_test}\n",
+    )
+    tasks = load_tasks(p)
+    assert [t.lvs_source_view for t in tasks] == ["schematic"]

@@ -19,7 +19,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
@@ -37,6 +37,49 @@ class JivaroConfig(BaseModel):
     enabled: bool = False
     frequency_limit: float | None = None
     error_max: float | None = None
+
+
+class JivaroOverride(BaseModel):
+    """Per-cell partial override merged on top of ``TaskSpec.jivaro``.
+
+    Every field is optional; only the set fields displace the spec-level
+    default. Used by :attr:`TaskSpec.jivaro_overrides`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    frequency_limit: float | None = None
+    error_max: float | None = None
+
+
+class ExcludeMatch(BaseModel):
+    """Selector dropped from a :class:`TaskSpec` expansion.
+
+    At least one axis field must be set; an empty selector would match every
+    combination and is almost certainly a mistake. Match semantics: every
+    set field must equal the expanded task's corresponding axis value (AND).
+    Unset fields are treated as wildcards.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    library: str | None = None
+    cell: str | None = None
+    lvs_source_view: str | None = None
+    lvs_layout_view: str | None = None
+
+    @model_validator(mode="after")
+    def _must_set_at_least_one(self) -> "ExcludeMatch":
+        if not any(
+            v is not None
+            for v in (self.library, self.cell, self.lvs_source_view, self.lvs_layout_view)
+        ):
+            raise ValueError(
+                "exclude entry must set at least one of "
+                "library / cell / lvs_layout_view / lvs_source_view"
+            )
+        return self
 
 
 class TemplatePaths(BaseModel):
@@ -156,6 +199,15 @@ class TaskSpec(BaseModel):
     #: Per-task knob overrides. Same shape as :attr:`ProjectConfig.knobs`.
     #: Precedence is applied at render time (task > project > manifest).
     knobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    #: Cartesian-product combinations to drop after expansion. Each entry is
+    #: a selector dict (``{cell: AMP2, lvs_layout_view: layout_test}``);
+    #: every set field must equal the expanded task's axis value.
+    exclude: list[ExcludeMatch] = Field(default_factory=list)
+    #: Per-cell overrides layered on top of :attr:`jivaro`. Key is the cell
+    #: name from :attr:`cell`; values whose field is ``None`` fall through
+    #: to the spec-level default. Cells absent from :attr:`cell` are silently
+    #: ignored at expansion time (stale overrides do not break the load).
+    jivaro_overrides: dict[str, JivaroOverride] = Field(default_factory=dict)
 
 
 class TaskConfig(BaseModel):
@@ -215,24 +267,28 @@ def load_tasks(path: Path, project: ProjectConfig | None = None) -> list[TaskCon
     ``library`` -> ``cell`` -> ``lvs_layout_view`` -> ``lvs_source_view``).
     """
 
+    tasks, _raw = load_tasks_with_raw(path, project)
+    return tasks
+
+
+def load_tasks_with_raw(
+    path: Path, project: ProjectConfig | None = None
+) -> tuple[list[TaskConfig], Any]:
+    """Same as :func:`load_tasks` but also returns the raw ruamel tree.
+
+    The second element is the outer YAML structure (``CommentedSeq`` for a
+    bare-list file, ``CommentedMap`` for the ``tasks:`` wrapped form). Used
+    by the Phase 5 GUI to write back spec edits via
+    :func:`apply_tasks_edits` while preserving top-level comments.
+    """
+
     data = _load_yaml(path)
 
     if data is None:
         raise ConfigError(f"{path}: file is empty")
 
-    if isinstance(data, dict):
-        if "tasks" not in data:
-            raise ConfigError(f"{path}: mapping at top level must have a 'tasks' key")
-        entries = data["tasks"]
-    elif isinstance(data, list):
-        entries = data
-    else:
-        raise ConfigError(
-            f"{path}: expected a list or mapping at top level, got {type(data).__name__}"
-        )
+    entries = _tasks_sequence(data, path)
 
-    if not isinstance(entries, list):
-        raise ConfigError(f"{path}: 'tasks' must be a list")
     if not entries:
         raise ConfigError(f"{path}: tasks list is empty")
 
@@ -248,7 +304,23 @@ def load_tasks(path: Path, project: ProjectConfig | None = None) -> list[TaskCon
     _warn_on_duplicate_task_ids(tasks)
 
     logger.info("expanded %d task specs -> %d subtasks", len(entries), len(tasks))
-    return tasks
+    return tasks, data
+
+
+def _tasks_sequence(data: Any, path: Path) -> Any:
+    if isinstance(data, dict):
+        if "tasks" not in data:
+            raise ConfigError(f"{path}: mapping at top level must have a 'tasks' key")
+        entries = data["tasks"]
+    elif isinstance(data, list):
+        entries = data
+    else:
+        raise ConfigError(
+            f"{path}: expected a list or mapping at top level, got {type(data).__name__}"
+        )
+    if not isinstance(entries, list):
+        raise ConfigError(f"{path}: 'tasks' must be a list")
+    return entries
 
 
 # ---- internals -------------------------------------------------------------
@@ -321,6 +393,11 @@ def _expand_spec(
         for cell in cells:
             for layout in layouts:
                 for src in sources:
+                    if _is_excluded(spec.exclude, library, cell, layout, src):
+                        continue
+                    jivaro = _merge_jivaro_override(
+                        spec.jivaro, spec.jivaro_overrides.get(cell)
+                    )
                     result.append(
                         TaskConfig(
                             task_id=f"{library}__{cell}__{layout}__{src}",
@@ -331,7 +408,7 @@ def _expand_spec(
                             templates=merged_templates,
                             ground_net=spec.ground_net,
                             out_file=spec.out_file,
-                            jivaro=spec.jivaro,
+                            jivaro=jivaro,
                             continue_on_lvs_fail=spec.continue_on_lvs_fail,
                             knobs=copy.deepcopy(spec.knobs),
                             spec_index=spec_index,
@@ -339,7 +416,49 @@ def _expand_spec(
                         )
                     )
                     expansion_index += 1
+    if not result and (libs and cells and layouts and sources):
+        raise ConfigError(
+            f"{source} [entry #{spec_index}]: exclude list dropped every "
+            f"combination; spec produces zero tasks"
+        )
     return result
+
+
+def _is_excluded(
+    excludes: list[ExcludeMatch],
+    library: str,
+    cell: str,
+    layout: str,
+    source: str,
+) -> bool:
+    for match in excludes:
+        if match.library is not None and match.library != library:
+            continue
+        if match.cell is not None and match.cell != cell:
+            continue
+        if match.lvs_layout_view is not None and match.lvs_layout_view != layout:
+            continue
+        if match.lvs_source_view is not None and match.lvs_source_view != source:
+            continue
+        return True
+    return False
+
+
+def _merge_jivaro_override(
+    base: JivaroConfig, override: JivaroOverride | None
+) -> JivaroConfig:
+    if override is None:
+        return base
+    update: dict[str, Any] = {}
+    if override.enabled is not None:
+        update["enabled"] = override.enabled
+    if override.frequency_limit is not None:
+        update["frequency_limit"] = override.frequency_limit
+    if override.error_max is not None:
+        update["error_max"] = override.error_max
+    if not update:
+        return base
+    return base.model_copy(update=update)
 
 
 def _warn_on_duplicate_task_ids(tasks: list[TaskConfig]) -> None:
@@ -441,3 +560,62 @@ def _apply_nested_edit(raw: Any, parent: str, child: str, value: Any) -> None:
     if parent not in raw or not isinstance(raw[parent], dict):
         raw[parent] = {}
     raw[parent][child] = value
+
+
+def dump_tasks_yaml(raw: Any) -> str:
+    """Serialize a tasks.yaml raw tree back to YAML text.
+
+    ``raw`` is the tree returned by :func:`load_tasks_with_raw` (either a
+    ruamel ``CommentedSeq`` or a ``CommentedMap`` wrapping a ``tasks:`` key).
+    Symmetric with :func:`dump_project_yaml` for the Phase 5 GUI write-back.
+    """
+
+    if raw is None:
+        raise ConfigError("dump_tasks_yaml: raw is None")
+    yaml = YAML(typ="rt")
+    buf = StringIO()
+    yaml.dump(raw, buf)
+    return buf.getvalue()
+
+
+def apply_tasks_edits(raw: Any, specs: list[dict[str, Any]]) -> None:
+    """Replace the tasks sequence in ``raw`` with ``specs`` at spec granularity.
+
+    ``raw`` is the tree from :func:`load_tasks_with_raw`; it is mutated in
+    place. ``specs`` is a list of fully-formed TaskSpec dicts (validated
+    upstream by constructing ``TaskSpec(**spec)`` before calling).
+
+    Semantics:
+    - overlapping indexes: ``seq[i]`` overwritten by ``specs[i]``. Inline
+      comments on the old entry's scalar fields are lost; top-level
+      container comments (file preamble, inter-spec blank lines) survive.
+    - ``i >= len(seq)``: ``specs[i]`` appended.
+    - ``i >= len(specs)``: trailing entries in ``seq`` are popped.
+
+    Raises :class:`ConfigError` if ``specs`` is empty (tasks.yaml cannot
+    round-trip to an empty file — the loader rejects it on next read).
+    """
+
+    if raw is None:
+        raise ConfigError("apply_tasks_edits: raw is None")
+    if not specs:
+        raise ConfigError("apply_tasks_edits: specs list is empty")
+
+    if isinstance(raw, dict):
+        if "tasks" not in raw:
+            raise ConfigError("apply_tasks_edits: raw mapping has no 'tasks' key")
+        seq = raw["tasks"]
+    elif isinstance(raw, list):
+        seq = raw
+    else:
+        raise ConfigError(
+            f"apply_tasks_edits: unsupported raw type {type(raw).__name__}"
+        )
+
+    for i, spec in enumerate(specs):
+        if i < len(seq):
+            seq[i] = spec
+        else:
+            seq.append(spec)
+    while len(seq) > len(specs):
+        seq.pop()
