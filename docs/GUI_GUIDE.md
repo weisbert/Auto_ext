@@ -61,7 +61,11 @@ PYTHONPATH=/c/code/Auto_ext/Auto_ext /c/code/Auto_ext/.venv/Scripts/python -m au
 
 - `run.sh` 是 Linux-only（处理 `LD_LIBRARY_PATH` + bundled Qt5），Windows 直接调 venv 里的 `python.exe` 即可。
 - Windows 不需要 `LD_LIBRARY_PATH` 这一套；PyQt5 的 wheel 自带 Qt5 二进制。
-- 仓库里 `config/project.yaml` 的 `templates:` 路径是 Linux deployment 用的（`Auto_ext_pro/templates/...`），在 Windows 本地这个路径不存在 —— TemplatesTab 会显示 "Template file not found"。这是预期，不影响 GUI 探索：你可以用 picker 选 `C:\code\Auto_ext\Auto_ext\templates\` 下的本地模板做实验。
+
+**关于 templates 路径**：`config/project.yaml` 现在用 auto_ext-root-relative 写法（如 `templates/calibre/foo.qci.j2`），不带部署目录前缀。`resolve_template_path` 会按 `cwd → workarea → auto_ext_root` 顺序回退，所以：
+
+- 老的 workarea-relative 写法（`Auto_ext_pro/templates/...`）依然能工作 —— 向后兼容
+- 新写法在 Windows 本地（仓库名 `Auto_ext`）和 Linux 部署（仓库名可能叫 `Auto_ext_pro`）下都能解析，部署目录改名不影响
 
 ---
 
@@ -204,13 +208,14 @@ PYTHONPATH=/c/code/Auto_ext/Auto_ext /c/code/Auto_ext/.venv/Scripts/python -m au
 1. **Project tab**：env 面板里看 `WORK_ROOT` / `WORK_ROOT2` / `PDK_LAYER_MAP_FILE` 等大概率显示 `✗ missing`（Windows 上没 source PDK setup） —— 正常。点一个 `[Override]` 给个假值（比如 `D:\fake`），看下 `●` 标记 + `[Save]` 是否 enable。
 2. **Tasks tab**：选中那一行 spec，往 `cell` chip 里加个值，下面 cartesian 表行数应当变化；对某行取消勾选看下灰色删除线效果。
 3. **Templates tab**（重点）：
-   - 顶部 4 行路径选择器应该有 `calibre / quantus / si / jivaro` 4 行（跟 `project.yaml` 一致）；这些路径在 Windows 本地不存在，下方右栏会显示 `Template file not found: ...`
-   - 改其中一个路径选择器，用 `[…]` picker 指向 `C:\code\Auto_ext\Auto_ext\templates\quantus\ext.cmd.j2`
-   - 列表自动刷新，选中那行后右侧：
-     - **Inventory** 应填出 `[[temperature]]` `[[exclude_floating_nets_limit]]` `[[tech_name]]` `[[output_dir]]` 等行（jinja kind），manifest 声明的 knob + identity 都标 `ok` 绿
+   - 顶部 4 行路径选择器应该有 `si / calibre / quantus / jivaro`，路径形如 `templates/quantus/ext.cmd.j2`
+   - 列表里前 4 行是绑定模板（`[si]` / `[calibre]` / `[quantus]` / `[jivaro]` 标签），下面应该还能看到 1 行 `[unused]` 灰色 —— `templates/quantus/dspf.cmd.j2`，仓库里有但没绑到任何 slot
+   - 选中 `[quantus] templates/quantus/ext.cmd.j2`，右侧：
+     - **Inventory** 应填出 `[[temperature]]` `[[exclude_floating_nets_limit]]` `[[tech_name]]` `[[output_dir]]` 等行（jinja kind），manifest 声明的 knob + identity 都标 `ok` 绿；env vars (`WORK_ROOT` 等) 应该是红 `missing`（没 source PDK setup）
      - **Knobs** 子 tab 应有 4 行（manifest 里声明的 4 个 knob），每行末尾灰字 hint 显示 unit / range
    - 改一个 knob 值（比如 `temperature` 改成 `25`），回车后 `(default: 55)` hint 出来，`●` 标记 + Save 按钮 enable
    - 点 `[reset]`，hint 应该消失，按钮再次变灰
+   - 试试 `[…]` picker：选中 `[unused]` 那行的 `dspf.cmd.j2` 看下 picker 默认起始目录是不是 `templates\quantus\`
 4. **Save** 后切到外面用 git 看 diff：
 
    ```bash
