@@ -145,3 +145,51 @@ def _find_env_row(tab: ProjectTab, var_name: str) -> int | None:
         if item is not None and item.text() == var_name:
             return r
     return None
+
+
+def test_env_panel_resolves_auto_ext_root_relative_templates(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """Regression: env discover must resolve auto_ext-root-relative
+    template paths even when cwd is neither workarea nor the deploy dir.
+    Reproduces the 'discover error: cannot read template templates\\si\\
+    default.env.j2' that surfaced after stripping the Auto_ext_pro/ prefix.
+    """
+    deploy = tmp_path / "auto_ext_pro_max"
+    config_dir = deploy / "config"
+    config_dir.mkdir(parents=True)
+    templates = deploy / "templates" / "calibre"
+    templates.mkdir(parents=True)
+    # Template references one env var so _discover_env_vars actually has
+    # work to do (and would fail to read the file if path resolution broke).
+    (templates / "x.qci.j2").write_text(
+        "*lvsRulesFile: $VERIFY_ROOT/foo\n", encoding="utf-8"
+    )
+    (config_dir / "project.yaml").write_text(
+        "templates:\n"
+        "  calibre: templates/calibre/x.qci.j2\n",
+        encoding="utf-8",
+    )
+    (config_dir / "tasks.yaml").write_text(
+        "- library: L\n  cell: C\n  lvs_layout_view: layout\n", encoding="utf-8"
+    )
+    # cwd outside both deploy and workarea — exercises step-3 fallback
+    # in resolve_template_path. This is the realistic GUI launch case
+    # when run.sh is not used.
+    monkeypatch.chdir(tmp_path)
+
+    controller = ConfigController(auto_ext_root=deploy, workarea=tmp_path)
+    run_tab = RunTab(controller)
+    tab = ProjectTab(controller, run_tab)
+    qtbot.addWidget(run_tab)
+    qtbot.addWidget(tab)
+    controller.load(config_dir)
+
+    # Env panel should have populated with VERIFY_ROOT (read from the
+    # template), not collapsed into a "(discover error: ...)" row.
+    assert tab._env_table.rowCount() > 0
+    first_cell = tab._env_table.item(0, 0).text()
+    assert not first_cell.startswith("(discover error"), (
+        f"env panel showed discover error: {first_cell!r}"
+    )
+    assert _find_env_row(tab, "VERIFY_ROOT") is not None

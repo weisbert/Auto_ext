@@ -357,7 +357,11 @@ class TemplatesTab(QWidget):
         resolution = None
         if project is not None and inventory.env_vars:
             try:
-                required = _discover_env_vars(project, self._controller.tasks)
+                required = _discover_env_vars(
+                    project,
+                    self._controller.tasks,
+                    auto_ext_root=self._controller.auto_ext_root,
+                )
             except AutoExtError:
                 required = set(inventory.env_vars)
             effective = self._controller.effective_env_overrides()

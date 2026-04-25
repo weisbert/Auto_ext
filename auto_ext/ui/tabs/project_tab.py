@@ -252,7 +252,11 @@ class ProjectTab(QWidget):
             return
 
         try:
-            required = _discover_env_vars(project, self._controller.tasks)
+            required = _discover_env_vars(
+                project,
+                self._controller.tasks,
+                auto_ext_root=self._controller.auto_ext_root,
+            )
         except AutoExtError as exc:
             self._env_table.clearSpans()
             self._env_table.setRowCount(1)

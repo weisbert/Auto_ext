@@ -36,3 +36,4 @@ templates:
 #   quantus:
 #     temperature: 25.0
 #     exclude_floating_nets_limit: 10000
+layer_map: ${PDK_LAYER_MAP_FILE}
