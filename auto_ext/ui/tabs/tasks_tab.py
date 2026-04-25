@@ -47,9 +47,16 @@ from auto_ext.core.config import (
     TaskSpec,
     _expand_spec,
 )
-from auto_ext.core.errors import ConfigError
+from auto_ext.core.errors import AutoExtError, ConfigError
+from auto_ext.core.manifest import (
+    TemplateManifest,
+    current_knob_value,
+    load_manifest,
+)
+from auto_ext.core.template import resolve_template_path
 from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import EXCLUDED_ROW_COLOR
+from auto_ext.ui.widgets.knob_editor import KnobEditor
 from auto_ext.ui.widgets.tag_list_edit import TagListEdit
 
 if TYPE_CHECKING:
@@ -59,6 +66,8 @@ if TYPE_CHECKING:
 _AXIS_FIELDS = ("library", "cell", "lvs_layout_view", "lvs_source_view")
 
 _JIVARO_TRI_STATES = ["(inherit)", "true", "false"]
+
+_KNOB_STAGES: tuple[str, ...] = ("si", "calibre", "quantus", "jivaro")
 
 
 class TasksTab(QWidget):
@@ -239,6 +248,42 @@ class TasksTab(QWidget):
         jivaro_form.addRow("error_max:", self._jivaro_err)
         self._editor_layout.addWidget(jivaro_box)
 
+        # Per-task knob overrides — fold by default. Knobs are usually
+        # tuned at the project layer; this section is for "this task
+        # needs different values than the rest of the project".
+        knobs_box = QGroupBox(
+            "knobs (advanced — per-task overrides)", self._editor_body
+        )
+        knobs_box.setCheckable(True)
+        knobs_box.setChecked(False)
+        knobs_box.setToolTip(
+            "Per-task knob overrides on top of the project layer.\n"
+            "\n"
+            "Precedence (low → high):\n"
+            "  manifest.default < project.knobs < task.knobs < --knob CLI\n"
+            "\n"
+            "Use this when one spec needs different knob values than the\n"
+            "project default — e.g. one task wants a tighter\n"
+            "exclude_floating_nets_limit while the rest of the project\n"
+            "uses the default. To run the same cell with two different\n"
+            "configs side by side, also customise\n"
+            "extraction_output_dir to include {lvs_layout_view} or\n"
+            "{task_id} so each task lands in its own dir.\n"
+            "\n"
+            "Most projects leave this folded — auto-expands when loaded."
+        )
+        kb_outer = QVBoxLayout(knobs_box)
+        self._knobs_form_host = QWidget(knobs_box)
+        self._knobs_form_layout = QVBoxLayout(self._knobs_form_host)
+        self._knobs_form_layout.setContentsMargins(0, 0, 0, 0)
+        kb_outer.addWidget(self._knobs_form_host)
+        self._knobs_form_host.setVisible(False)
+        knobs_box.toggled.connect(self._knobs_form_host.setVisible)
+        self._knobs_box = knobs_box
+        # (stage, knob_name) -> KnobEditor for the currently rendered spec.
+        self._task_knob_editors: dict[tuple[str, str], KnobEditor] = {}
+        self._editor_layout.addWidget(knobs_box)
+
         # Per-cell jivaro override table — uncommon, fold by default so
         # casual users don't have to mentally model "what is this".
         override_box = QGroupBox(
@@ -375,6 +420,7 @@ class TasksTab(QWidget):
             self._jivaro_err.setText(_fmt_num(j.get("error_max")))
 
             self._rebuild_override_table(spec)
+            self._rebuild_knobs_form(spec)
         finally:
             self._populating = False
 
@@ -390,6 +436,7 @@ class TasksTab(QWidget):
             self._jivaro_freq.setText("")
             self._jivaro_err.setText("")
             self._override_table.setRowCount(0)
+            self._clear_knobs_form()
         finally:
             self._populating = False
 
@@ -463,6 +510,167 @@ class TasksTab(QWidget):
                 lambda _=False, c=cell_name: self._on_override_cleared(c)
             )
             self._override_table.setCellWidget(row, 4, clear_btn)
+
+    # ---- per-task knobs ---------------------------------------------
+
+    def _clear_knobs_form(self) -> None:
+        """Drop every per-stage subwidget and clear the editor lookup."""
+        while self._knobs_form_layout.count() > 0:
+            item = self._knobs_form_layout.takeAt(0)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.deleteLater()
+        self._task_knob_editors.clear()
+
+    def _rebuild_knobs_form(self, spec: dict[str, Any]) -> None:
+        """Re-render KnobEditor rows for the loaded spec.
+
+        Walks the four stages, resolves each one's template against the
+        controller's auto_ext_root + workarea, loads the manifest, and
+        renders one editor per declared knob. The editor's
+        ``is_default`` reflects whether this **task** overrides the
+        knob; the ``(default: <X>)`` hint shows the effective lower-
+        layer fallback (project layer or manifest default).
+        """
+        self._clear_knobs_form()
+
+        project = self._controller.project
+        if project is None:
+            return
+
+        task_knobs = spec.get("knobs") or {}
+        # Auto-track fold to spec content: any task knob set → expand.
+        has_task_knobs = any(task_knobs.get(s) for s in _KNOB_STAGES)
+        if self._knobs_box.isChecked() != has_task_knobs:
+            self._knobs_box.blockSignals(True)
+            try:
+                self._knobs_box.setChecked(has_task_knobs)
+                self._knobs_form_host.setVisible(has_task_knobs)
+            finally:
+                self._knobs_box.blockSignals(False)
+
+        any_section_added = False
+        for stage in _KNOB_STAGES:
+            section = self._build_knob_section(spec, stage, task_knobs)
+            if section is None:
+                continue
+            self._knobs_form_layout.addWidget(section)
+            any_section_added = True
+
+        if not any_section_added:
+            hint = QLabel(
+                "(no manifest knobs declared by any bound template)",
+                self._knobs_form_host,
+            )
+            hint.setStyleSheet("color: #888; font-style: italic;")
+            self._knobs_form_layout.addWidget(hint)
+
+    def _build_knob_section(
+        self,
+        spec: dict[str, Any],
+        stage: str,
+        task_knobs: dict[str, dict[str, Any]],
+    ) -> QGroupBox | None:
+        """Return a per-stage QGroupBox of KnobEditors, or None if the
+        stage has no template / manifest / declared knobs."""
+        manifest = self._manifest_for_stage(spec, stage)
+        if manifest is None or not manifest.knobs:
+            return None
+
+        project = self._controller.project
+        assert project is not None
+
+        section = QGroupBox(stage, self._knobs_form_host)
+        form = QFormLayout(section)
+        stage_task_layer = task_knobs.get(stage) or {}
+
+        for knob_name, knob_spec in manifest.knobs.items():
+            try:
+                lower_value, _provenance = current_knob_value(
+                    manifest, project.knobs, stage, knob_name
+                )
+            except ConfigError:
+                # Stale knob in project layer that's no longer in the
+                # manifest. Skip rather than break the whole section;
+                # the project layer's stale entry is its own problem
+                # that the project tab is not yet reporting either.
+                continue
+
+            has_task_override = knob_name in stage_task_layer
+            shown_value = (
+                stage_task_layer[knob_name] if has_task_override else lower_value
+            )
+            editor = KnobEditor(knob_name, knob_spec, section)
+            editor.set_value(
+                shown_value,
+                is_default=not has_task_override,
+                default_hint=lower_value,
+            )
+            editor.value_changed.connect(
+                lambda name, val, s=stage: self._on_task_knob_changed(s, name, val)
+            )
+            label = QLabel(knob_name + ":", section)
+            if knob_spec.description:
+                label.setToolTip(knob_spec.description)
+            form.addRow(label, editor)
+            self._task_knob_editors[(stage, knob_name)] = editor
+
+        return section
+
+    def _manifest_for_stage(
+        self, spec: dict[str, Any], stage: str
+    ) -> TemplateManifest | None:
+        """Resolve this spec's template path for ``stage`` and load its
+        manifest. Returns None on missing template / unreadable manifest."""
+        project = self._controller.project
+        if project is None:
+            return None
+        # spec-level template overrides project-level
+        spec_tp_raw = (spec.get("templates") or {}).get(stage)
+        if spec_tp_raw:
+            tp_input = Path(spec_tp_raw)
+        else:
+            proj_tp = getattr(project.templates, stage, None)
+            if proj_tp is None:
+                return None
+            tp_input = Path(proj_tp)
+        tp = resolve_template_path(
+            tp_input,
+            auto_ext_root=self._controller.auto_ext_root,
+            workarea=self._controller.workarea,
+        )
+        if not tp.is_file():
+            return None
+        try:
+            return load_manifest(tp)
+        except (AutoExtError, OSError):
+            return None
+
+    def _on_task_knob_changed(
+        self, stage: str, knob_name: str, value: Any
+    ) -> None:
+        def mutate(spec: dict[str, Any]) -> None:
+            knobs = dict(spec.get("knobs") or {})
+            stage_layer = dict(knobs.get(stage) or {})
+            if value is None:
+                stage_layer.pop(knob_name, None)
+            else:
+                stage_layer[knob_name] = value
+            if stage_layer:
+                knobs[stage] = stage_layer
+            else:
+                knobs.pop(stage, None)
+            if knobs:
+                spec["knobs"] = knobs
+            else:
+                spec.pop("knobs", None)
+
+        self._mutate_current_spec(mutate)
+        # Re-render so (default: <X>) hint + reset-button state stay
+        # in sync with the new spec content.
+        spec = self._current_spec()
+        if spec is not None:
+            self._rebuild_knobs_form(spec)
 
     # ---- editor edits -> _specs -------------------------------------
 

@@ -166,6 +166,13 @@ class ProjectConfig(BaseModel):
     layer_map: Path = Path("${PDK_LAYER_MAP_FILE}")
 
     env_overrides: dict[str, str] = Field(default_factory=dict)
+    #: Per-task extraction output directory. Env vars (``$X`` / ``${X}`` /
+    #: ``$env(X)``) are substituted via :func:`resolve_env`, then Python
+    #: ``str.format`` substitutes axis-derived keys. Supported keys:
+    #: ``{cell}``, ``{library}``, ``{task_id}``, ``{lvs_layout_view}``,
+    #: ``{lvs_source_view}``. Add a discriminator key when you want same-
+    #: cell tasks (e.g. two specs with different ``knobs`` for the same
+    #: cell) to land in separate dirs.
     extraction_output_dir: str = "${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"
     intermediate_dir: str = "${WORK_ROOT2}"
     templates: TemplatePaths = Field(default_factory=TemplatePaths)

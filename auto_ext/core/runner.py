@@ -207,7 +207,6 @@ def run_tasks(
     """
     _validate_stages(stages)
     _validate_tasks(tasks, stages)
-    _validate_task_outputs(tasks)
 
     if reporter is None:
         reporter = NullReporter()
@@ -217,6 +216,12 @@ def run_tasks(
     required_env = _discover_env_vars(project, tasks, auto_ext_root=auto_ext_root)
     resolution = resolve_env(required_env, project.env_overrides)
     resolved_env = resolution.require()
+
+    # output_dir collision check needs resolved env so ``${WORK_ROOT}`` is
+    # gone before ``str.format`` runs (Python would otherwise interpret
+    # ``{WORK_ROOT}`` as a missing format key). Runs after env resolution
+    # but before any subprocess; env errors are more fundamental anyway.
+    _validate_task_outputs(tasks, project, resolved_env)
 
     subprocess_env: dict[str, str] = {**os.environ, **project.env_overrides}
 
@@ -555,9 +560,8 @@ def _resolve_template_path(
 def _build_context(
     project: ProjectConfig, task: TaskConfig, resolved_env: dict[str, str]
 ) -> dict[str, Any]:
-    output_dir_tpl = substitute_env(project.extraction_output_dir, resolved_env)
+    output_dir = _resolve_output_dir(project, task, resolved_env)
     intermediate_tpl = substitute_env(project.intermediate_dir, resolved_env)
-    output_dir = output_dir_tpl.format(cell=task.cell, library=task.library)
     intermediate_dir = intermediate_tpl.format(cell=task.cell, library=task.library)
     layer_map = substitute_env(str(project.layer_map), resolved_env)
 
@@ -660,29 +664,82 @@ def _publish_si_env_to_output_dir(rendered_si_env: Path, output_dir: Path) -> No
     shutil.copy2(rendered_si_env, output_dir / "si.env")
 
 
-def _validate_task_outputs(tasks: list[TaskConfig]) -> None:
-    """Reject tasks whose ``(library, cell)`` pair collides with another.
+_OUTPUT_DIR_FORMAT_KEYS: tuple[str, ...] = (
+    "cell",
+    "library",
+    "task_id",
+    "lvs_layout_view",
+    "lvs_source_view",
+)
 
-    ``extraction_output_dir`` substitutes ``{library}`` / ``{cell}``, so
-    two tasks with the same pair would write into the same output dir
-    and clobber each other. Harmful in parallel (race), misleading in
+
+def _resolve_output_dir(
+    project: ProjectConfig,
+    task: TaskConfig,
+    resolved_env: dict[str, str],
+) -> str:
+    """Substitute env vars + format keys in ``project.extraction_output_dir``.
+
+    Format keys: ``{cell}``, ``{library}``, ``{task_id}``,
+    ``{lvs_layout_view}``, ``{lvs_source_view}``. Default pattern uses
+    only ``{cell}``; users who want same-cell parallel runs with
+    different knobs change the pattern to include another axis (e.g.
+    ``QCI_PATH_{cell}_{lvs_layout_view}``) so each task lands in its
+    own directory.
+
+    Env vars must be resolved before this runs — Python ``str.format``
+    would otherwise treat ``{WORK_ROOT}`` (from an unresolved
+    ``${WORK_ROOT}``) as a format field and raise ``KeyError``.
+    """
+    tpl = substitute_env(project.extraction_output_dir, resolved_env)
+    try:
+        return tpl.format(
+            cell=task.cell,
+            library=task.library,
+            task_id=task.task_id,
+            lvs_layout_view=task.lvs_layout_view,
+            lvs_source_view=task.lvs_source_view,
+        )
+    except KeyError as exc:
+        raise ConfigError(
+            f"extraction_output_dir uses unknown format key {exc.args[0]!r}; "
+            f"supported: {list(_OUTPUT_DIR_FORMAT_KEYS)}"
+        ) from exc
+
+
+def _validate_task_outputs(
+    tasks: list[TaskConfig],
+    project: ProjectConfig,
+    resolved_env: dict[str, str],
+) -> None:
+    """Reject tasks whose resolved ``output_dir`` collides with another.
+
+    Collision detection is on the **fully substituted** output dir, not
+    just the ``(library, cell)`` pair. Users who customise
+    ``extraction_output_dir`` to include other axes (``{task_id}``,
+    ``{lvs_layout_view}``, etc.) so same-cell tasks land in separate
+    dirs are NOT flagged. Harmful in parallel (race), misleading in
     serial (second task silently overwrites). Always enforced.
     """
-    seen: dict[tuple[str, str], str] = {}
+    seen: dict[str, str] = {}
     collisions: list[str] = []
     for t in tasks:
-        key = (t.library, t.cell)
-        prior = seen.get(key)
+        out = _resolve_output_dir(project, t, resolved_env)
+        prior = seen.get(out)
         if prior is not None:
             collisions.append(
-                f"{t.library!r}+{t.cell!r}: task_ids {prior!r} and {t.task_id!r}"
+                f"task_ids {prior!r} and {t.task_id!r} both resolve to "
+                f"output_dir {out!r}"
             )
         else:
-            seen[key] = t.task_id
+            seen[out] = t.task_id
     if collisions:
         raise ConfigError(
-            "duplicate (library, cell) pair(s) would share extraction_output_dir:\n  "
+            "duplicate extraction_output_dir(s) across tasks:\n  "
             + "\n  ".join(collisions)
+            + "\n\nHint: if these tasks should run independently, change "
+            "project.extraction_output_dir to include a discriminator key "
+            f"(supported: {list(_OUTPUT_DIR_FORMAT_KEYS)})."
         )
 
 

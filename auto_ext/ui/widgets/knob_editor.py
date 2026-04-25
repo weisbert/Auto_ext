@@ -89,15 +89,28 @@ class KnobEditor(QWidget):
     def spec(self) -> KnobSpec:
         return self._spec
 
-    def set_value(self, value: Any, *, is_default: bool) -> None:
+    def set_value(
+        self,
+        value: Any,
+        *,
+        is_default: bool,
+        default_hint: Any = None,
+    ) -> None:
         """Render ``value`` without emitting a signal.
 
-        ``is_default=True`` means the project layer has no override and
-        ``value`` is the manifest default; the [reset] button is
-        disabled and the trailing hint is cleared. ``is_default=False``
-        means the project explicitly overrode the manifest default;
+        ``is_default=True`` means this layer has no override and
+        ``value`` is the effective fallback; the [reset] button is
+        disabled and the trailing hint shows unit/range only.
+        ``is_default=False`` means this layer overrides the fallback;
         the hint shows ``(default: <X>)`` so the user can compare and
         the [reset] button is enabled.
+
+        ``default_hint`` is the value to display in the ``(default:
+        ...)`` hint when ``is_default=False``. Pass the **effective
+        lower-layer fallback** here — the project-layer value for a
+        task editor, or :attr:`KnobSpec.default` for a project editor.
+        ``None`` falls back to the manifest default for backward
+        compatibility with the project-layer caller.
         """
         self._silent = True
         try:
@@ -116,7 +129,8 @@ class KnobEditor(QWidget):
                     )
                 self._hint.setText(" · ".join(hint_parts))
             else:
-                self._hint.setText(f"(default: {_fmt(self._spec.default)})")
+                shown = default_hint if default_hint is not None else self._spec.default
+                self._hint.setText(f"(default: {_fmt(shown)})")
         finally:
             self._silent = False
 

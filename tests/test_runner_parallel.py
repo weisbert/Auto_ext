@@ -175,6 +175,82 @@ def test_parallel_one_failure_other_continues(
         assert stages["jivaro"] == "skipped"
 
 
+def test_preflight_accepts_same_cell_when_pattern_discriminates(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+) -> None:
+    """Two tasks sharing (library, cell) used to be hard-rejected. The
+    new preflight checks the *resolved* output_dir, so adding
+    {lvs_layout_view} (or any axis key) to extraction_output_dir lets
+    them coexist — covers the "same cell, two knob configs" use case.
+    """
+    proj_path = project_tools_config / "project.yaml"
+    proj_text = proj_path.read_text(encoding="utf-8").replace(
+        '"${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"',
+        '"${WORK_ROOT}/cds/verify/QCI_PATH_{cell}_{lvs_layout_view}"',
+    )
+    proj_path.write_text(proj_text, encoding="utf-8")
+
+    (project_tools_config / "tasks.yaml").write_text(
+        """\
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout
+  lvs_source_view: schematic
+  jivaro:
+    enabled: false
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout_test
+  lvs_source_view: schematic
+  jivaro:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+
+    # Should NOT raise — the pattern discriminates the two tasks.
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["si"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        dry_run=True,
+    )
+    assert len(summary.tasks) == 2
+
+
+def test_preflight_rejects_unknown_format_key(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+) -> None:
+    """A typo in the format pattern (``{bogus}``) must surface a clean
+    ConfigError naming the offending key plus the supported set, not a
+    bare KeyError leaking from str.format.
+    """
+    proj_path = project_tools_config / "project.yaml"
+    proj_text = proj_path.read_text(encoding="utf-8").replace(
+        '"${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"',
+        '"${WORK_ROOT}/QCI_PATH_{bogus}"',
+    )
+    proj_path.write_text(proj_text, encoding="utf-8")
+    project, tasks = _load(project_tools_config)
+
+    with pytest.raises(ConfigError, match="unknown format key.*'bogus'"):
+        run_tasks(
+            project,
+            tasks,
+            stages=["si"],
+            auto_ext_root=tmp_path / "project_root",
+            workarea=workarea,
+            dry_run=True,
+        )
+
+
 def test_preflight_rejects_duplicate_library_cell(
     project_tools_config: Path,
     workarea: Path,

@@ -251,3 +251,168 @@ def test_jivaro_overrides_refolds_when_switching_to_no_override_spec(
     tab._spec_list.setCurrentRow(1)
     assert tab._override_box.isChecked() is False
     assert tab._override_table.isHidden() is True
+
+
+# ---- per-task knob editor (Phase 5.5.1 A) -----------------------------
+
+
+def _knobs_config(tmp_path: Path) -> Path:
+    """Build a config_dir with a project.yaml + tasks.yaml + a quantus
+    template + manifest so the per-task knob editor has real knobs to
+    render. Mimics the real repo's quantus shape on a tiny scale.
+    """
+    root = tmp_path
+    templates = root / "templates" / "quantus"
+    templates.mkdir(parents=True)
+    (templates / "ext.cmd.j2").write_text(
+        "filter_cap -limit [[exclude_floating_nets_limit]]\n"
+        "temperature [[temperature]]\n",
+        encoding="utf-8",
+    )
+    (templates / "ext.cmd.j2.manifest.yaml").write_text(
+        "template: ext.cmd.j2\n"
+        "knobs:\n"
+        "  exclude_floating_nets_limit:\n"
+        "    type: int\n"
+        "    default: 5000\n"
+        "    range: [100, 100000]\n"
+        "  temperature:\n"
+        "    type: float\n"
+        "    default: 55.0\n",
+        encoding="utf-8",
+    )
+
+    cfg = root / "config"
+    cfg.mkdir()
+    (cfg / "project.yaml").write_text(
+        "templates:\n"
+        f"  quantus: {(templates / 'ext.cmd.j2').as_posix()}\n",
+        encoding="utf-8",
+    )
+    (cfg / "tasks.yaml").write_text(
+        "- library: L\n  cell: A\n  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    return cfg
+
+
+def test_per_task_knobs_starts_folded_when_no_task_overrides(
+    qtbot, tmp_path: Path
+) -> None:
+    cfg = _knobs_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    assert tab._knobs_box.isCheckable() is True
+    assert tab._knobs_box.isChecked() is False
+    assert tab._knobs_form_host.isHidden() is True
+
+
+def test_per_task_knobs_auto_expands_when_spec_has_task_knobs(
+    qtbot, tmp_path: Path
+) -> None:
+    root = tmp_path
+    cfg = _knobs_config(tmp_path)
+    (cfg / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  knobs:\n"
+        "    quantus:\n"
+        "      temperature: 25.0\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, cfg)
+    assert tab._knobs_box.isChecked() is True
+    assert tab._knobs_form_host.isHidden() is False
+    # The quantus group should hold 2 KnobEditor rows; temperature should
+    # be in override mode (is_default=False), the other in default mode.
+    editors = tab._task_knob_editors
+    assert ("quantus", "temperature") in editors
+    assert ("quantus", "exclude_floating_nets_limit") in editors
+    temp = editors[("quantus", "temperature")]
+    assert temp._reset_btn.isEnabled() is True
+
+
+def test_per_task_knob_edit_stages_spec_change(qtbot, tmp_path: Path) -> None:
+    cfg = _knobs_config(tmp_path)
+    tab, controller = _make_tab(qtbot, cfg)
+    # Pull the editor for temperature and fake an edit.
+    # The fold starts collapsed; the editor was still rendered though
+    # (rebuild runs regardless of the box state — only visibility differs).
+    editor = tab._task_knob_editors[("quantus", "temperature")]
+    editor._line.setText("25.0")
+    editor._line.editingFinished.emit()
+    assert controller.is_dirty is True
+    specs = controller.pending_task_specs
+    assert specs is not None
+    assert specs[0]["knobs"]["quantus"]["temperature"] == 25.0
+
+
+def test_per_task_knob_reset_removes_task_override(qtbot, tmp_path: Path) -> None:
+    cfg = _knobs_config(tmp_path)
+    (cfg / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  knobs:\n"
+        "    quantus:\n"
+        "      temperature: 25.0\n",
+        encoding="utf-8",
+    )
+    tab, controller = _make_tab(qtbot, cfg)
+    editor = tab._task_knob_editors[("quantus", "temperature")]
+    editor._reset_btn.click()
+    specs = controller.pending_task_specs
+    assert specs is not None
+    # Cascading prune: the only task override was removed → knobs key
+    # should be gone entirely from the spec dict.
+    assert "knobs" not in specs[0]
+
+
+def test_per_task_knob_default_hint_shows_project_layer_value(
+    qtbot, tmp_path: Path
+) -> None:
+    cfg = _knobs_config(tmp_path)
+    # Set a project-layer override, but no task-layer override yet.
+    (cfg / "project.yaml").write_text(
+        "templates:\n"
+        f"  quantus: {(tmp_path / 'templates' / 'quantus' / 'ext.cmd.j2').as_posix()}\n"
+        "knobs:\n"
+        "  quantus:\n"
+        "    temperature: 60.0\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, cfg)
+    editor = tab._task_knob_editors[("quantus", "temperature")]
+    # Task layer empty → is_default=True; the (default) hint should
+    # show only unit/range, not the manifest's 55.0.
+    assert editor._reset_btn.isEnabled() is False
+    # Now stage a task-layer override and re-render.
+    editor._line.setText("70.0")
+    editor._line.editingFinished.emit()
+    # After re-render the editor is a fresh instance; re-fetch.
+    editor2 = tab._task_knob_editors[("quantus", "temperature")]
+    # The hint should reference the project layer (60.0), not manifest
+    # default (55.0), because the project layer is the effective fallback.
+    assert "60" in editor2._hint.text()
+    assert editor2._reset_btn.isEnabled() is True
+
+
+def test_per_task_knobs_isolation_across_specs(qtbot, tmp_path: Path) -> None:
+    cfg = _knobs_config(tmp_path)
+    (cfg / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  knobs:\n"
+        "    quantus: {temperature: 25.0}\n"
+        "- library: M\n"
+        "  cell: B\n"
+        "  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, cfg)
+    # Spec 0 has knobs → expanded.
+    assert tab._knobs_box.isChecked() is True
+    # Switch to spec 1 (no task knobs) → fold.
+    tab._spec_list.setCurrentRow(1)
+    assert tab._knobs_box.isChecked() is False

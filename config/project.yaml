@@ -13,7 +13,7 @@
 #     ./run.sh run --config-dir Auto_ext_pro/config --dry-run
 
 templates:
-  si: templates/si/default.env.j2
+  si: templates\si\default.env.j2
   calibre: templates/calibre/wiodio_noConnectByNetName.qci.j2
   quantus: templates/quantus/ext.cmd.j2
   jivaro: templates/jivaro/default.xml.j2
@@ -23,9 +23,14 @@ templates:
 #   PDK_LAYER_MAP_FILE: /abs/path/to/layers.map
 #   VERIFY_ROOT: /abs/path/to/verify
 
-# Output directory pattern. Default per-cell isolation:
+# Output directory pattern. Format keys available:
+#     {cell}  {library}  {task_id}  {lvs_layout_view}  {lvs_source_view}
+# Default per-cell isolation:
 #     ${WORK_ROOT}/cds/verify/QCI_PATH_<cell>
-# Change to match your old flow (all cells share one dir):
+# To run same-cell with two different knob configs side by side, add a
+# discriminator (e.g. lvs_layout_view) so each task gets its own dir:
+# extraction_output_dir: "${WORK_ROOT}/cds/verify/QCI_PATH_{cell}_{lvs_layout_view}"
+# To match the old flow (all cells share one dir):
 # extraction_output_dir: "${WORK_ROOT}/cds/verify/QCI_PATH"
 
 # Project-wide knob overrides. Each template's *.manifest.yaml declares
@@ -37,3 +42,6 @@ templates:
 #     temperature: 25.0
 #     exclude_floating_nets_limit: 10000
 layer_map: ${PDK_LAYER_MAP_FILE}
+knobs:
+  quantus:
+    exclude_floating_nets_limit: 100
