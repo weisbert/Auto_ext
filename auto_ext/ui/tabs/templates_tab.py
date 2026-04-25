@@ -55,7 +55,11 @@ from auto_ext.core.manifest import (
     load_manifest,
 )
 from auto_ext.core.runner import _discover_env_vars
-from auto_ext.core.template import PlaceholderInventory, scan_placeholders
+from auto_ext.core.template import (
+    PlaceholderInventory,
+    resolve_template_path,
+    scan_placeholders,
+)
 from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import ENV_SOURCE_COLOR
 from auto_ext.ui.templates_view import (
@@ -338,13 +342,11 @@ class TemplatesTab(QWidget):
     def _resolved_selected_path(self) -> Path | None:
         if self._selected_path is None:
             return None
-        p = self._selected_path
-        if p.is_absolute():
-            return p
-        workarea = self._controller.workarea
-        if workarea is not None:
-            return workarea / p
-        return p
+        return resolve_template_path(
+            self._selected_path,
+            auto_ext_root=self._controller.auto_ext_root,
+            workarea=self._controller.workarea,
+        )
 
     def _populate_inventory_table(
         self,

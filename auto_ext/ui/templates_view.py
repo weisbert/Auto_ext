@@ -30,6 +30,7 @@ from typing import Literal
 from auto_ext.core.config import ProjectConfig
 from auto_ext.core.env import EnvResolution
 from auto_ext.core.manifest import TemplateManifest, _IDENTITY_KEYS
+from auto_ext.core.template import resolve_template_path
 
 #: One of the four tool slots in ``project.templates``. ``None`` for an
 #: unbound ``.j2`` discovered under ``templates/`` but not currently
@@ -86,10 +87,15 @@ def collect_template_entries(
             p = getattr(project.templates, tool, None)
             if p is None:
                 continue
-            resolved = _resolve_for_dedup(p, workarea)
+            resolved = resolve_template_path(
+                Path(p), auto_ext_root=auto_ext_root, workarea=workarea
+            )
             entries.append(TemplateEntry(tool=tool, path=Path(p), in_project=True))
-            if resolved is not None:
-                bound_paths.add(resolved)
+            if resolved.is_absolute() or resolved.exists():
+                try:
+                    bound_paths.add(resolved.resolve())
+                except OSError:
+                    pass
 
     if auto_ext_root is not None:
         templates_dir = auto_ext_root / "templates"
@@ -101,24 +107,6 @@ def collect_template_entries(
                 entries.append(TemplateEntry(tool=None, path=j2, in_project=False))
 
     return entries
-
-
-def _resolve_for_dedup(path: Path, workarea: Path | None) -> Path | None:
-    """Best-effort absolute resolution for deduping bound vs. discovered.
-
-    Returns ``None`` if the path doesn't exist on disk so the dedup set
-    never collapses two unrelated relative paths just because their
-    string forms differ.
-    """
-    candidate = path if path.is_absolute() else (
-        (workarea / path) if workarea is not None else path
-    )
-    try:
-        if candidate.exists():
-            return candidate.resolve()
-    except OSError:
-        return None
-    return None
 
 
 # ---- placeholder classification --------------------------------------------

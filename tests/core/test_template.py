@@ -11,6 +11,7 @@ from auto_ext.core.errors import TemplateError
 from auto_ext.core.template import (
     PlaceholderInventory,
     render_template,
+    resolve_template_path,
     scan_placeholders,
 )
 
@@ -201,3 +202,68 @@ def test_render_missing_knob_raises_undefined(tmp_path: Path) -> None:
 
     with pytest.raises(TemplateError, match="undefined Jinja variable"):
         render_template(tpl, context={}, env={}, knobs={})
+
+
+# ---- resolve_template_path -------------------------------------------------
+
+
+def test_resolve_template_absolute_passthrough(tmp_path: Path) -> None:
+    p = tmp_path / "x.j2"
+    p.write_text("[[x]]", encoding="utf-8")
+    # Absolute path returns as-is regardless of bases.
+    assert resolve_template_path(p) == p
+    assert resolve_template_path(p, auto_ext_root=tmp_path) == p
+
+
+def test_resolve_template_cwd_relative_legacy(tmp_path: Path, monkeypatch) -> None:
+    # Legacy `Auto_ext_pro/templates/foo.j2` form: caller has cwd =
+    # workarea (tmp_path) and the bare relative path resolves via cwd.
+    deploy = tmp_path / "Auto_ext_pro"
+    (deploy / "templates" / "calibre").mkdir(parents=True)
+    target = deploy / "templates" / "calibre" / "foo.j2"
+    target.write_text("[[x]]", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    rel = Path("Auto_ext_pro/templates/calibre/foo.j2")
+    assert resolve_template_path(rel).is_file()
+
+
+def test_resolve_template_auto_ext_root_fallback(tmp_path: Path) -> None:
+    # New auto_ext-root-relative form: no cwd hit, but auto_ext_root / path exists.
+    root = tmp_path / "Auto_ext"
+    (root / "templates" / "calibre").mkdir(parents=True)
+    target = root / "templates" / "calibre" / "foo.j2"
+    target.write_text("[[x]]", encoding="utf-8")
+
+    rel = Path("templates/calibre/foo.j2")
+    resolved = resolve_template_path(rel, auto_ext_root=root)
+    assert resolved == root / rel
+    assert resolved.is_file()
+
+
+def test_resolve_template_workarea_fallback_for_gui(tmp_path: Path) -> None:
+    # GUI may run with cwd != workarea. Explicit workarea hint must be
+    # tried before auto_ext_root so legacy paths still resolve.
+    workarea = tmp_path / "wa"
+    deploy = workarea / "Auto_ext_pro"
+    (deploy / "templates" / "si").mkdir(parents=True)
+    target = deploy / "templates" / "si" / "x.j2"
+    target.write_text("[[x]]", encoding="utf-8")
+
+    rel = Path("Auto_ext_pro/templates/si/x.j2")
+    resolved = resolve_template_path(rel, workarea=workarea)
+    assert resolved == workarea / rel
+
+
+def test_resolve_template_miss_returns_original(tmp_path: Path) -> None:
+    # Nothing matches → original path so callers surface the user's
+    # input in the error message rather than a fabricated candidate.
+    rel = Path("templates/nope/missing.j2")
+    assert resolve_template_path(rel, auto_ext_root=tmp_path) == rel
+
+
+def test_resolve_template_no_bases_falls_through(tmp_path: Path, monkeypatch) -> None:
+    # Without any base hints the helper degrades to cwd-relative behavior.
+    (tmp_path / "x.j2").write_text("[[x]]", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert resolve_template_path(Path("x.j2")).is_file()

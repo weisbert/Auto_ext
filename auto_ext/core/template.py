@@ -77,6 +77,50 @@ def _make_jinja_env() -> Environment:
     )
 
 
+def resolve_template_path(
+    path: Path,
+    *,
+    auto_ext_root: Path | None = None,
+    workarea: Path | None = None,
+) -> Path:
+    """Best-effort lookup that decouples paths from the deploy-dir name.
+
+    Resolution order, first hit wins:
+
+    1. ``path`` as-is — covers absolute paths and the legacy
+       workarea-relative form (e.g. ``Auto_ext_pro/templates/foo.j2``)
+       when cwd is the workarea, as the runner configures it.
+    2. ``workarea / path`` — explicit workarea fallback for callers
+       (such as the GUI) whose cwd may not be the workarea.
+    3. ``auto_ext_root / path`` — covers auto_ext-root-relative paths
+       (e.g. ``templates/calibre/foo.j2``) so a project.yaml is portable
+       across deploy dirs without rewriting every template entry.
+
+    On miss returns ``path`` unchanged so downstream errors surface the
+    caller's original string rather than a derived candidate. ``None``
+    bases fall through (each step is a no-op), matching pre-fallback
+    semantics when neither hint is supplied.
+    """
+
+    if path.is_absolute():
+        return path
+    try:
+        if path.is_file():
+            return path
+    except OSError:
+        pass
+    for base in (workarea, auto_ext_root):
+        if base is None:
+            continue
+        candidate = base / path
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            pass
+    return path
+
+
 def render_template(
     template_path: Path,
     context: dict[str, Any],

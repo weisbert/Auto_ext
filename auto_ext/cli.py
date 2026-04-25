@@ -1220,7 +1220,7 @@ def check_env(
         typer.secho(f"config error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
-    required = _discover_env_vars(project, tasks)
+    required = _discover_env_vars(project, tasks, auto_ext_root=config_dir.parent)
     resolution = resolve_env(required, project.env_overrides)
 
     console = Console()

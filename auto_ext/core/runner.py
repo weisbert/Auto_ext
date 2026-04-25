@@ -63,6 +63,7 @@ from auto_ext.core.env import (
 )
 from auto_ext.core.errors import AutoExtError, ConfigError
 from auto_ext.core.manifest import load_manifest, resolve_knob_values
+from auto_ext.core.template import resolve_template_path
 from auto_ext.core.progress import (
     CancelToken,
     NullReporter,
@@ -213,7 +214,7 @@ def run_tasks(
     if cancel_token is None:
         cancel_token = CancelToken()
 
-    required_env = _discover_env_vars(project, tasks)
+    required_env = _discover_env_vars(project, tasks, auto_ext_root=auto_ext_root)
     resolution = resolve_env(required_env, project.env_overrides)
     resolved_env = resolution.require()
 
@@ -364,6 +365,7 @@ def _run_single_task(
             cli_knobs=cli_knobs,
             dry_run=dry_run,
             cancel_token=cancel_token,
+            auto_ext_root=auto_ext_root,
         )
         # If the subprocess was hard-killed by cancel, reclassify FAILED
         # as CANCELLED so the summary distinguishes "user stopped us"
@@ -431,12 +433,13 @@ def _run_single_stage(
     cli_knobs: dict[str, dict[str, Any]],
     dry_run: bool,
     cancel_token: CancelToken,
+    auto_ext_root: Path,
 ) -> StageResult:
     log_path = exec_ctx.log_dir / f"{stage}.log"
 
     rendered_path: Path
     if tool.has_template:
-        template_path = _resolve_template_path(task, stage)
+        template_path = _resolve_template_path(task, stage, auto_ext_root=auto_ext_root)
         if template_path is None:
             return StageResult(
                 stage=stage,
@@ -529,15 +532,24 @@ def _safe_call(reporter: ProgressReporter, method: str, *args: Any) -> None:
         logger.exception("reporter.%s raised; ignoring", method)
 
 
-def _resolve_template_path(task: TaskConfig, stage: str) -> Path | None:
+def _resolve_template_path(
+    task: TaskConfig, stage: str, *, auto_ext_root: Path | None = None
+) -> Path | None:
     """Return the template path for this task's stage.
 
     ``TaskConfig.templates`` has fields named after the four templated
     tools (``si``, ``calibre``, ``quantus``, ``jivaro``). Phase 2's
     ``_merge_templates`` already collapsed project-level defaults into
     the task's copy, so a single attribute lookup suffices.
+
+    Relative paths are resolved via :func:`resolve_template_path` so
+    auto_ext-root-relative entries work without requiring the deploy
+    directory name in every ``project.templates`` value.
     """
-    return getattr(task.templates, stage, None)
+    raw = getattr(task.templates, stage, None)
+    if raw is None:
+        return None
+    return resolve_template_path(raw, auto_ext_root=auto_ext_root)
 
 
 def _build_context(
@@ -582,7 +594,12 @@ def _build_context(
     }
 
 
-def _discover_env_vars(project: ProjectConfig, tasks: list[TaskConfig]) -> set[str]:
+def _discover_env_vars(
+    project: ProjectConfig,
+    tasks: list[TaskConfig],
+    *,
+    auto_ext_root: Path | None = None,
+) -> set[str]:
     sources: list[str] = [
         project.extraction_output_dir,
         project.intermediate_dir,
@@ -595,8 +612,9 @@ def _discover_env_vars(project: ProjectConfig, tasks: list[TaskConfig]) -> set[s
             if tp is None or tp in seen:
                 continue
             seen.add(tp)
+            resolved = resolve_template_path(tp, auto_ext_root=auto_ext_root)
             try:
-                sources.append(Path(tp).read_text(encoding="utf-8"))
+                sources.append(resolved.read_text(encoding="utf-8"))
             except OSError as exc:
                 raise ConfigError(f"cannot read template {tp}: {exc}") from exc
     required = discover_required_vars(sources)

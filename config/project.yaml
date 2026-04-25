@@ -13,10 +13,10 @@
 #     ./run.sh run --config-dir Auto_ext_pro/config --dry-run
 
 templates:
-  si: Auto_ext_pro/templates/si/default.env.j2
-  calibre: Auto_ext_pro/templates/calibre/wiodio_noConnectByNetName.qci.j2
-  quantus: Auto_ext_pro/templates/quantus/ext.cmd.j2
-  jivaro: Auto_ext_pro/templates/jivaro/default.xml.j2
+  si: templates/si/default.env.j2
+  calibre: templates/calibre/wiodio_noConnectByNetName.qci.j2
+  quantus: templates/quantus/ext.cmd.j2
+  jivaro: templates/jivaro/default.xml.j2
 
 # Uncomment and fill in only if ``check-env`` reports a var as "missing":
 # env_overrides:
