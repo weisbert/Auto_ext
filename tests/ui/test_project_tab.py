@@ -14,8 +14,9 @@ import pytest
 pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
+from auto_ext.core.config import ProjectConfig  # noqa: E402
 from auto_ext.ui.config_controller import ConfigController  # noqa: E402
-from auto_ext.ui.tabs.project_tab import ProjectTab  # noqa: E402
+from auto_ext.ui.tabs.project_tab import ProjectTab, _hint_for_field  # noqa: E402
 from auto_ext.ui.tabs.run_tab import RunTab  # noqa: E402
 
 
@@ -193,3 +194,95 @@ def test_env_panel_resolves_auto_ext_root_relative_templates(
         f"env panel showed discover error: {first_cell!r}"
     )
     assert _find_env_row(tab, "VERIFY_ROOT") is not None
+
+
+# ---- _hint_for_field (pure rules) -----------------------------------------
+
+
+def _bare_project(**kwargs) -> ProjectConfig:
+    return ProjectConfig(**kwargs)
+
+
+def test_hint_work_root_reads_shell(monkeypatch) -> None:
+    monkeypatch.setenv("WORK_ROOT", "/data/work")
+    hint = _hint_for_field("work_root", _bare_project(), {})
+    assert "shell $WORK_ROOT" in hint
+    assert "/data/work" in hint
+
+
+def test_hint_work_root_unset_when_no_shell(monkeypatch) -> None:
+    monkeypatch.delenv("WORK_ROOT", raising=False)
+    hint = _hint_for_field("work_root", _bare_project(), {})
+    assert "✗ unset" in hint
+
+
+def test_hint_work_root_prefers_override_over_shell(monkeypatch) -> None:
+    # Staged env override wins over shell — matches resolve_env precedence.
+    monkeypatch.setenv("WORK_ROOT", "/data/from_shell")
+    hint = _hint_for_field(
+        "work_root", _bare_project(), {"WORK_ROOT": "/data/from_override"}
+    )
+    assert "/data/from_override" in hint
+    assert "/data/from_shell" not in hint
+
+
+def test_hint_employee_id_falls_back_to_user(monkeypatch) -> None:
+    monkeypatch.setenv("USER", "alice")
+    hint = _hint_for_field("employee_id", _bare_project(), {})
+    assert "alice" in hint
+
+
+def test_hint_tech_name_derives_from_pdk_tech_file(monkeypatch) -> None:
+    # tech_name_env_vars defaults to PDK_TECH_FILE first; runner derives
+    # parent dir name as the tech_name.
+    monkeypatch.setenv("PDK_TECH_FILE", "/foo/HN001/tech.lib")
+    monkeypatch.delenv("PDK_LAYER_MAP_FILE", raising=False)
+    monkeypatch.delenv("PDK_DISPLAY_FILE", raising=False)
+    hint = _hint_for_field("tech_name", _bare_project(), {})
+    assert "auto-derived: HN001" in hint
+
+
+def test_hint_tech_name_no_candidate(monkeypatch) -> None:
+    for v in ("PDK_TECH_FILE", "PDK_LAYER_MAP_FILE", "PDK_DISPLAY_FILE"):
+        monkeypatch.delenv(v, raising=False)
+    hint = _hint_for_field("tech_name", _bare_project(), {})
+    assert "no candidate" in hint
+
+
+def test_hint_pdk_subdir_no_fallback() -> None:
+    hint = _hint_for_field("pdk_subdir", _bare_project(), {})
+    assert "no fallback" in hint
+    assert "[[pdk_subdir]]" in hint
+
+
+def test_hint_runset_versions_specific_template_var() -> None:
+    hint_lvs = _hint_for_field("runset_versions.lvs", _bare_project(), {})
+    hint_qrc = _hint_for_field("runset_versions.qrc", _bare_project(), {})
+    assert "[[lvs_runset_version]]" in hint_lvs
+    assert "[[qrc_runset_version]]" in hint_qrc
+
+
+def test_hint_layer_map_default() -> None:
+    hint = _hint_for_field("layer_map", _bare_project(), {})
+    assert "${PDK_LAYER_MAP_FILE}" in hint
+
+
+# ---- placeholder integration ----------------------------------------------
+
+
+def test_placeholder_updates_after_env_override(
+    qtbot, project_tools_config: Path, monkeypatch
+) -> None:
+    # Drop shell + fixture's project-level override so the staged
+    # override is the only source of truth for the hint.
+    monkeypatch.delenv("WORK_ROOT", raising=False)
+    tab, controller = _make_tab(qtbot, project_tools_config)
+    controller.stage_edits({"env_overrides.WORK_ROOT": None})  # clear fixture's seed
+    tab._refresh_hints()
+    line = tab._fields["work_root"]
+    assert "✗ unset" in line.placeholderText()
+
+    # Stage a fresh override; placeholder should pick it up immediately.
+    controller.stage_edits({"env_overrides.WORK_ROOT": "/staged/override"})
+    tab._refresh_hints()
+    assert "/staged/override" in line.placeholderText()

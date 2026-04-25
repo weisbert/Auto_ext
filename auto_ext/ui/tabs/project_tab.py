@@ -35,7 +35,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from auto_ext.core.env import resolve_env
+from auto_ext.core.config import ProjectConfig
+from auto_ext.core.env import derive_parent_dir_from_env_candidates, resolve_env
 from auto_ext.core.errors import AutoExtError
 from auto_ext.core.runner import _discover_env_vars
 from auto_ext.ui.config_controller import ConfigController
@@ -63,6 +64,64 @@ _FIELDS: list[tuple[str, str, str]] = [
 
 _DIR_FIELDS = {"work_root", "verify_root", "setup_root"}
 _FILE_FIELDS = {"layer_map"}
+
+#: form_key → shell env-var the field shadows. Identity fields fall through
+#: to ``$<VAR>`` from the resolved env (overrides → shell) at runtime.
+_SHELL_VAR_FOR_FIELD: dict[str, str] = {
+    "work_root": "WORK_ROOT",
+    "verify_root": "VERIFY_ROOT",
+    "setup_root": "SETUP_ROOT",
+}
+
+
+def _hint_for_field(
+    key: str, project: ProjectConfig, effective_env: dict[str, str]
+) -> str:
+    """Return a one-line hint describing what runtime would use if ``key``
+    is left unset in ``project.yaml``.
+
+    Pure (no Qt). Used as the line edit's placeholder + tooltip so the
+    user sees the live fallback value, not just an opaque ``(unset)``.
+    ``effective_env`` is :meth:`ConfigController.effective_env_overrides`
+    merged so staged-but-unsaved overrides are reflected immediately.
+    """
+    shell_var = _SHELL_VAR_FOR_FIELD.get(key)
+    if shell_var is not None:
+        v = effective_env.get(shell_var) or os.environ.get(shell_var)
+        if v:
+            return f"(shell ${shell_var}: {v})"
+        return f"(shell ${shell_var}: ✗ unset)"
+
+    if key == "employee_id":
+        u = os.environ.get("USER") or os.environ.get("USERNAME")
+        return f"(shell $USER: {u})" if u else "(fallback: 'unknown')"
+
+    if key == "tech_name":
+        candidates = list(project.tech_name_env_vars)
+        resolution = resolve_env(set(candidates), effective_env)
+        derived = derive_parent_dir_from_env_candidates(
+            candidates, resolution.resolved
+        )
+        if derived:
+            return f"(auto-derived: {derived})"
+        return f"(no candidate resolved from {candidates})"
+
+    if key in ("pdk_subdir", "project_subdir"):
+        return f"(no fallback — required if templates use [[{key}]])"
+
+    if key == "runset_versions.lvs":
+        return "(no fallback — required if calibre/si use [[lvs_runset_version]])"
+    if key == "runset_versions.qrc":
+        return "(no fallback — required if quantus uses [[qrc_runset_version]])"
+
+    if key == "layer_map":
+        return "(default: ${PDK_LAYER_MAP_FILE})"
+    if key == "extraction_output_dir":
+        return "(default: ${WORK_ROOT}/cds/verify/QCI_PATH_{cell})"
+    if key == "intermediate_dir":
+        return "(default: ${WORK_ROOT2})"
+
+    return "(unset)"
 
 
 class ProjectTab(QWidget):
@@ -205,11 +264,26 @@ class ProjectTab(QWidget):
                 )
 
             self._refresh_env_table()
+            self._refresh_hints()
             # Fresh load clears dirty; sync button state defensively in
             # case no dirty_changed signal fired (was_dirty=False path).
             self._on_dirty_changed(self._controller.is_dirty)
         finally:
             self._populating = False
+
+    def _refresh_hints(self) -> None:
+        """Recompute placeholder + tooltip per field from the current env state."""
+        project = self._controller.project
+        if project is None:
+            for line in self._fields.values():
+                line.setPlaceholderText("(no config)")
+                line.setToolTip("")
+            return
+        effective = self._controller.effective_env_overrides()
+        for key, line in self._fields.items():
+            hint = _hint_for_field(key, project, effective)
+            line.setPlaceholderText(hint)
+            line.setToolTip(hint)
 
     @staticmethod
     def _read_field_value(project: Any, key: str) -> str:
@@ -326,10 +400,12 @@ class ProjectTab(QWidget):
             return
         self._controller.stage_edits({f"env_overrides.{name}": text})
         self._refresh_env_table()
+        self._refresh_hints()
 
     def _on_clear_override(self, name: str) -> None:
         self._controller.stage_edits({f"env_overrides.{name}": None})
         self._refresh_env_table()
+        self._refresh_hints()
 
     # ---- save / dirty ------------------------------------------------
 
