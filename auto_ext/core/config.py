@@ -506,21 +506,30 @@ _EDIT_SCALAR_KEYS = frozenset(
 _EDIT_NESTED_KEYS: dict[str, frozenset[str] | None] = {
     "runset_versions": frozenset({"lvs", "qrc"}),
     "env_overrides": None,  # env var names are arbitrary
+    "templates": frozenset({"calibre", "quantus", "jivaro", "si"}),
 }
+
+# Stages allowed as the middle segment of a ``knobs.<stage>.<name>`` edit.
+# Hard-coded here to keep ``core/config`` runner-free; must mirror
+# ``runner.STAGE_ORDER``. If a new stage is added there, mirror it here.
+_KNOB_STAGES: frozenset[str] = frozenset({"si", "calibre", "quantus", "jivaro"})
 
 
 def apply_project_edits(raw: Any, edits: dict[str, Any]) -> None:
     """Mutate a ruamel ``CommentedMap`` in place per ``edits``.
 
-    Keys are either flat (``tech_name``) or dotted for the two known
-    nested mappings (``runset_versions.lvs``, ``env_overrides.FOO``).
-    A value of ``None`` removes the key; any other value overwrites.
-    Comments attached to existing keys survive; newly-introduced keys
-    appear without leading comments (expected — the dump is user-driven).
+    Keys are flat (``tech_name``), dotted for the known nested mappings
+    (``runset_versions.lvs``, ``env_overrides.FOO``, ``templates.calibre``),
+    or three-segment for project-level knob overrides
+    (``knobs.<stage>.<name>``). A value of ``None`` removes the key; any
+    other value overwrites. Comments attached to existing keys survive;
+    newly-introduced keys appear without leading comments (expected — the
+    dump is user-driven).
 
     Deleting the last child of a nested mapping also prunes the parent,
     so ``env_overrides: {}`` does not linger after every override is
-    cleared.
+    cleared. The same cascading prune applies through both levels of a
+    ``knobs.<stage>.<name>`` delete.
 
     Raises :class:`ConfigError` on unknown keys to catch typos before
     they disappear silently into the YAML.
@@ -530,8 +539,16 @@ def apply_project_edits(raw: Any, edits: dict[str, Any]) -> None:
         raise ConfigError("apply_project_edits: raw CommentedMap is None")
 
     for key, value in edits.items():
-        if "." in key:
-            parent, _, child = key.partition(".")
+        parts = key.split(".")
+        if len(parts) == 1:
+            if key not in _EDIT_SCALAR_KEYS:
+                raise ConfigError(f"apply_project_edits: unknown key {key!r}")
+            if value is None:
+                raw.pop(key, None)
+            else:
+                raw[key] = value
+        elif len(parts) == 2:
+            parent, child = parts
             if parent not in _EDIT_NESTED_KEYS:
                 raise ConfigError(f"apply_project_edits: unknown key {key!r}")
             allowed = _EDIT_NESTED_KEYS[parent]
@@ -541,13 +558,24 @@ def apply_project_edits(raw: Any, edits: dict[str, Any]) -> None:
                     f"(allowed under {parent!r}: {sorted(allowed)})"
                 )
             _apply_nested_edit(raw, parent, child, value)
+        elif len(parts) == 3:
+            parent, stage, name = parts
+            if parent != "knobs":
+                raise ConfigError(
+                    f"apply_project_edits: unknown key {key!r} "
+                    "(only knobs.<stage>.<name> is supported as a 3-level key)"
+                )
+            if stage not in _KNOB_STAGES:
+                raise ConfigError(
+                    f"apply_project_edits: unknown knob stage in {key!r} "
+                    f"(allowed: {sorted(_KNOB_STAGES)})"
+                )
+            _apply_doubly_nested_edit(raw, parent, stage, name, value)
         else:
-            if key not in _EDIT_SCALAR_KEYS:
-                raise ConfigError(f"apply_project_edits: unknown key {key!r}")
-            if value is None:
-                raw.pop(key, None)
-            else:
-                raw[key] = value
+            raise ConfigError(
+                f"apply_project_edits: too many dotted segments in {key!r} "
+                "(max 3: knobs.<stage>.<name>)"
+            )
 
 
 def _apply_nested_edit(raw: Any, parent: str, child: str, value: Any) -> None:
@@ -560,6 +588,36 @@ def _apply_nested_edit(raw: Any, parent: str, child: str, value: Any) -> None:
     if parent not in raw or not isinstance(raw[parent], dict):
         raw[parent] = {}
     raw[parent][child] = value
+
+
+def _apply_doubly_nested_edit(
+    raw: Any, parent: str, child: str, grandchild: str, value: Any
+) -> None:
+    """Two-level set/delete with cascading prune.
+
+    On delete (``value is None``), removes ``raw[parent][child][grandchild]``
+    and prunes ``child`` if it becomes empty, then ``parent`` if that
+    leaves it empty. On set, creates intermediate mappings as needed.
+    """
+    if value is None:
+        if (
+            parent in raw
+            and isinstance(raw[parent], dict)
+            and child in raw[parent]
+            and isinstance(raw[parent][child], dict)
+            and grandchild in raw[parent][child]
+        ):
+            del raw[parent][child][grandchild]
+            if not raw[parent][child]:
+                del raw[parent][child]
+            if not raw[parent]:
+                del raw[parent]
+        return
+    if parent not in raw or not isinstance(raw[parent], dict):
+        raw[parent] = {}
+    if child not in raw[parent] or not isinstance(raw[parent][child], dict):
+        raw[parent][child] = {}
+    raw[parent][child][grandchild] = value
 
 
 def dump_tasks_yaml(raw: Any) -> str:

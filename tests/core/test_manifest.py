@@ -11,6 +11,7 @@ from auto_ext.core.manifest import (
     KnobSpec,
     SourceRef,
     TemplateManifest,
+    current_knob_value,
     load_manifest,
     manifest_path_for,
     resolve_knob_values,
@@ -521,3 +522,78 @@ knobs:
     # does not coerce strings.
     with pytest.raises(ConfigError, match="expected int"):
         resolve_knob_values(m, {"limit": "5"}, {}, {})
+
+
+# ---- current_knob_value ----------------------------------------------------
+
+
+def test_current_knob_value_returns_default_when_unset(tmp_path: Path) -> None:
+    m = _manifest(
+        tmp_path,
+        """\
+template: example.cmd.j2
+knobs:
+  temperature:
+    type: float
+    default: 55.0
+""",
+    )
+    # Stage absent from project_knobs.
+    assert current_knob_value(m, {}, "quantus", "temperature") == (55.0, "default")
+    # Stage present but knob not set.
+    assert current_knob_value(m, {"quantus": {}}, "quantus", "temperature") == (
+        55.0,
+        "default",
+    )
+
+
+def test_current_knob_value_returns_project_override(tmp_path: Path) -> None:
+    m = _manifest(
+        tmp_path,
+        """\
+template: example.cmd.j2
+knobs:
+  temperature:
+    type: float
+    default: 55.0
+    range: [0.0, 200.0]
+""",
+    )
+    project_knobs = {"quantus": {"temperature": 70.0}}
+    assert current_knob_value(m, project_knobs, "quantus", "temperature") == (
+        70.0,
+        "project",
+    )
+
+
+def test_current_knob_value_unknown_knob_raises(tmp_path: Path) -> None:
+    m = _manifest(
+        tmp_path,
+        """\
+template: example.cmd.j2
+knobs:
+  temperature:
+    type: float
+    default: 55.0
+""",
+    )
+    with pytest.raises(ConfigError, match="not declared"):
+        current_knob_value(m, {}, "quantus", "bogus")
+
+
+def test_current_knob_value_out_of_range_raises(tmp_path: Path) -> None:
+    m = _manifest(
+        tmp_path,
+        """\
+template: example.cmd.j2
+knobs:
+  temperature:
+    type: float
+    default: 55.0
+    range: [0.0, 100.0]
+""",
+    )
+    # Mirrors resolve_knob_values' project-layer range check so the GUI
+    # surfaces the same ConfigError it would see from the runner.
+    with pytest.raises(ConfigError, match="outside allowed range"):
+        current_knob_value(m, {"quantus": {"temperature": 999.0}}, "quantus", "temperature")

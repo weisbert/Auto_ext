@@ -168,6 +168,85 @@ def test_apply_project_edits_unknown_nested_child_raises(fixtures_dir: Path) -> 
         apply_project_edits(project.raw, {"runset_versions.typo": "x"})
 
 
+def test_apply_project_edits_templates_set(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(
+        project.raw, {"templates.calibre": "templates/calibre/foo.qci.j2"}
+    )
+    assert project.raw["templates"]["calibre"] == "templates/calibre/foo.qci.j2"
+    dumped = dump_project_yaml(project)
+    assert "templates:" in dumped
+    assert "calibre: templates/calibre/foo.qci.j2" in dumped
+
+
+def test_apply_project_edits_templates_unset_prunes_parent(
+    fixtures_dir: Path,
+) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(
+        project.raw, {"templates.calibre": "templates/calibre/foo.qci.j2"}
+    )
+    apply_project_edits(project.raw, {"templates.calibre": None})
+    assert "templates" not in project.raw
+    dumped = dump_project_yaml(project)
+    assert "templates" not in dumped
+
+
+def test_apply_project_edits_unknown_template_tool_raises(
+    fixtures_dir: Path,
+) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    with pytest.raises(ConfigError, match="unknown nested key"):
+        apply_project_edits(project.raw, {"templates.unknown": "x"})
+
+
+def test_apply_project_edits_knobs_set_creates_intermediate(
+    fixtures_dir: Path,
+) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    assert "knobs" not in project.raw
+    apply_project_edits(project.raw, {"knobs.quantus.temperature": 60.0})
+    assert project.raw["knobs"]["quantus"]["temperature"] == 60.0
+    dumped = dump_project_yaml(project)
+    assert "knobs:" in dumped
+    assert "quantus:" in dumped
+    assert "temperature: 60.0" in dumped
+
+
+def test_apply_project_edits_knobs_unset_prunes_both_levels(
+    fixtures_dir: Path,
+) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(
+        project.raw,
+        {
+            "knobs.quantus.temperature": 60.0,
+            "knobs.quantus.exclude_floating_nets_limit": 100,
+        },
+    )
+    # Removing one of two siblings leaves the stage and parent intact.
+    apply_project_edits(project.raw, {"knobs.quantus.temperature": None})
+    assert project.raw["knobs"]["quantus"]["exclude_floating_nets_limit"] == 100
+    assert "temperature" not in project.raw["knobs"]["quantus"]
+    # Removing the last sibling cascades the prune to both levels.
+    apply_project_edits(
+        project.raw, {"knobs.quantus.exclude_floating_nets_limit": None}
+    )
+    assert "knobs" not in project.raw
+
+
+def test_apply_project_edits_knobs_invalid_stage_raises(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    with pytest.raises(ConfigError, match="unknown knob stage"):
+        apply_project_edits(project.raw, {"knobs.foo.x": 1})
+
+
+def test_apply_project_edits_too_many_segments_raises(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    with pytest.raises(ConfigError, match="too many dotted segments"):
+        apply_project_edits(project.raw, {"a.b.c.d": 1})
+
+
 # ---- load_tasks ------------------------------------------------------------
 
 

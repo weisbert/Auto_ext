@@ -252,6 +252,46 @@ def resolve_knob_values(
     return result
 
 
+def current_knob_value(
+    manifest: TemplateManifest,
+    project_knobs: dict[str, dict[str, Any]],
+    stage: str,
+    knob: str,
+) -> tuple[Any, str]:
+    """Return ``(value, provenance)`` for one knob in the project layer only.
+
+    Provenance is ``"project"`` when ``project_knobs[stage][knob]`` is set,
+    ``"default"`` otherwise (manifest default is used). Coercion + range
+    checks mirror :func:`resolve_knob_values`'s project layer so the GUI
+    never displays a value the runner would later reject. Task and CLI
+    layers are intentionally not consulted — they exist only at run time.
+
+    Raises :class:`ConfigError` if ``knob`` is not declared in ``manifest``,
+    surfacing stale ``project.yaml`` entries that no longer match a knob.
+    """
+    if knob not in manifest.knobs:
+        raise ConfigError(
+            f"knob {knob!r} is not declared in the manifest for "
+            f"{manifest.template}; known knobs: {sorted(manifest.knobs)}"
+        )
+    spec = manifest.knobs[knob]
+    stage_layer = project_knobs.get(stage, {})
+    if knob not in stage_layer:
+        return (spec.default, "default")
+    label = f"project knob {knob}"
+    try:
+        value = _coerce_typed(stage_layer[knob], spec.type, label)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if spec.range is not None:
+        low, high = spec.range
+        if not (low <= value <= high):
+            raise ConfigError(
+                f"{label}={value} is outside allowed range [{low}, {high}]"
+            )
+    return (value, "project")
+
+
 # ---- internals -------------------------------------------------------------
 
 
