@@ -193,21 +193,35 @@ class RunTab(QWidget):
         path = Path(config_dir) if config_dir is not None else None
         self._config_label.setText(str(path) if path else "(no config loaded)")
 
-        # Preserve user's check/uncheck selections across reloads when task
-        # ids are stable.
+        # Preserve user's check/uncheck selections across reloads: task_ids
+        # that appeared before keep their state; task_ids that are brand
+        # new default to Unchecked so the user opts in explicitly (changed
+        # in Phase 5.4 — previously new ids defaulted to Checked, which
+        # surprise-ran cells users had just added mid-edit).
+        previously_checked: set[str] = set()
         previously_unchecked: set[str] = set()
         for i in range(self._task_list.count()):
             item = self._task_list.item(i)
-            if item.checkState() != Qt.Checked:
+            if item.checkState() == Qt.Checked:
+                previously_checked.add(item.text())
+            else:
                 previously_unchecked.add(item.text())
 
         self._task_list.clear()
         for t in self._controller.tasks:
             lw_item = QListWidgetItem(t.task_id, self._task_list)
             lw_item.setFlags(lw_item.flags() | Qt.ItemIsUserCheckable)
-            lw_item.setCheckState(
-                Qt.Unchecked if t.task_id in previously_unchecked else Qt.Checked
-            )
+            if t.task_id in previously_checked:
+                state = Qt.Checked
+            elif t.task_id in previously_unchecked:
+                state = Qt.Unchecked
+            elif not previously_checked and not previously_unchecked:
+                # Very first load — default to Checked so a fresh open
+                # does not leave an empty selection for the user.
+                state = Qt.Checked
+            else:
+                state = Qt.Unchecked
+            lw_item.setCheckState(state)
 
     def _on_config_error(self, message: str) -> None:
         QMessageBox.critical(self, "Config error", message)

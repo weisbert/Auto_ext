@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
         self._run_tab = RunTab(self._controller, tabs)
         self._log_tab = LogTab(tabs)
         self._project_tab = ProjectTab(self._controller, self._run_tab, tabs)
-        self._tasks_tab = TasksTab(tabs)
+        self._tasks_tab = TasksTab(self._controller, self._run_tab, tabs)
         self._templates_tab = TemplatesTab(tabs)
 
         tabs.addTab(self._run_tab, "Run")

@@ -63,3 +63,42 @@ def test_dry_run_populates_status_tree(
     # All stages should have a terminal (non-empty) status after dry-run.
     for i in range(task_item.childCount()):
         assert task_item.child(i).text(1) != ""
+
+
+def test_new_task_id_defaults_unchecked_on_reload(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Phase 5.4 UX: task_ids that weren't in the list before should
+    default to Unchecked after a reload so users opt in explicitly to
+    newly-added cells."""
+    controller = ConfigController()
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+
+    # Seed: initial load — one task, defaults to checked per first-load rule.
+    assert tab._task_list.count() == 1
+    assert tab._task_list.item(0).checkState() == Qt.Checked
+
+    # Now rewrite tasks.yaml to introduce a second, brand-new task_id.
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: WB_PLL_DCO\n"
+        "  cell: inv\n"
+        "  lvs_layout_view: layout\n"
+        "  lvs_source_view: schematic\n"
+        "- library: NEW_LIB\n"
+        "  cell: new_cell\n"
+        "  lvs_layout_view: layout\n"
+        "  lvs_source_view: schematic\n",
+        encoding="utf-8",
+    )
+    controller.reload()
+
+    # Two items now: the original task_id preserves its checked state;
+    # the new one defaults to Unchecked (user must opt in).
+    assert tab._task_list.count() == 2
+    labels = [tab._task_list.item(i).text() for i in range(2)]
+    original_idx = labels.index("WB_PLL_DCO__inv__layout__schematic")
+    new_idx = labels.index("NEW_LIB__new_cell__layout__schematic")
+    assert tab._task_list.item(original_idx).checkState() == Qt.Checked
+    assert tab._task_list.item(new_idx).checkState() == Qt.Unchecked

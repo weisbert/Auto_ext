@@ -164,3 +164,67 @@ def test_pending_overwrite_is_single_signal(
     controller.stage_edits({"tech_name": "HN888"})  # already dirty, no flip
     assert received == [True]
     assert controller.pending_edits == {"tech_name": "HN888"}
+
+
+# ---- Phase 5.4: tasks edits ------------------------------------------
+
+
+def test_stage_tasks_edits_flips_dirty(qtbot, project_tools_config: Path) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    assert controller.is_dirty is False
+
+    with qtbot.waitSignal(controller.dirty_changed, timeout=2000):
+        controller.stage_tasks_edits(
+            [{"library": "L2", "cell": "c2", "lvs_layout_view": "lay"}]
+        )
+    assert controller.is_dirty is True
+    assert controller.pending_task_specs is not None
+
+
+def test_save_writes_both_project_and_tasks(
+    qtbot, project_tools_config: Path
+) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    controller.stage_edits({"tech_name": "HN_DUAL"})
+    controller.stage_tasks_edits(
+        [
+            {
+                "library": "L_DUAL",
+                "cell": "c_dual",
+                "lvs_layout_view": "lay",
+            }
+        ]
+    )
+    assert controller.save() is True
+
+    # Verify both files on disk.
+    project_text = (project_tools_config / "project.yaml").read_text(encoding="utf-8")
+    tasks_text = (project_tools_config / "tasks.yaml").read_text(encoding="utf-8")
+    assert "HN_DUAL" in project_text
+    assert "L_DUAL" in tasks_text
+    assert controller.is_dirty is False
+
+
+def test_revert_clears_tasks_pending(qtbot, project_tools_config: Path) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    controller.stage_tasks_edits(
+        [{"library": "X", "cell": "y", "lvs_layout_view": "lay"}]
+    )
+    assert controller.is_dirty is True
+    controller.revert()
+    assert controller.is_dirty is False
+    assert controller.pending_task_specs is None
+
+
+def test_task_specs_raw_returns_pending_when_staged(
+    qtbot, project_tools_config: Path
+) -> None:
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    staged = [{"library": "X", "cell": "y", "lvs_layout_view": "lay"}]
+    controller.stage_tasks_edits(staged)
+    got = controller.task_specs_raw()
+    assert got == staged

@@ -58,3 +58,8 @@ ENV_SOURCE_COLOR: dict[str, str] = {
     "shell": "#2e8b2e",
     "missing": "#c83232",
 }
+
+#: Foreground color for TasksTab preview rows that have been excluded
+#: via the include checkbox. Grey matches :data:`STATUS_COLOR` for
+#: SKIPPED so excluded combinations read as "intentionally out".
+EXCLUDED_ROW_COLOR: str = "#888888"

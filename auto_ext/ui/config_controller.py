@@ -21,11 +21,22 @@ from auto_ext.core.config import (
     ProjectConfig,
     TaskConfig,
     apply_project_edits,
+    apply_tasks_edits,
     dump_project_yaml,
+    dump_tasks_yaml,
     load_project,
-    load_tasks,
+    load_tasks_with_raw,
 )
 from auto_ext.core.errors import AutoExtError, ConfigError
+
+
+def _to_plain(obj: Any) -> Any:
+    """Coerce ruamel CommentedMap/CommentedSeq to plain dict/list recursively."""
+    if isinstance(obj, dict):
+        return {k: _to_plain(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_plain(v) for v in obj]
+    return obj
 
 
 class ConfigController(QObject):
@@ -59,8 +70,13 @@ class ConfigController(QObject):
         self._config_dir: Path | None = None
         self._project: ProjectConfig | None = None
         self._tasks: list[TaskConfig] = []
+        self._tasks_raw: Any = None
+        self._tasks_path: Path | None = None
         self._pending: dict[str, Any] = {}
+        #: spec-level replacement list; None = no pending tasks edits
+        self._pending_tasks: list[dict[str, Any]] | None = None
         self._load_mtime_ns: int = 0
+        self._tasks_mtime_ns: int = 0
         self._auto_ext_root = auto_ext_root
         self._workarea = workarea
 
@@ -93,11 +109,34 @@ class ConfigController(QObject):
 
     @property
     def is_dirty(self) -> bool:
-        return bool(self._pending)
+        return bool(self._pending) or self._pending_tasks is not None
 
     @property
     def pending_edits(self) -> dict[str, Any]:
         return dict(self._pending)
+
+    @property
+    def pending_task_specs(self) -> list[dict[str, Any]] | None:
+        return None if self._pending_tasks is None else [dict(s) for s in self._pending_tasks]
+
+    def task_specs_raw(self) -> list[dict[str, Any]]:
+        """Current spec dicts: pending edits if staged, else parsed raw.
+
+        Ruamel CommentedMap / CommentedSeq entries are coerced to plain
+        ``dict`` / ``list`` so downstream UI code can compare by equality
+        and round-trip through json.
+        """
+
+        if self._pending_tasks is not None:
+            return [dict(s) for s in self._pending_tasks]
+        raw = self._tasks_raw
+        if raw is None:
+            return []
+        if isinstance(raw, dict):
+            seq = raw.get("tasks", [])
+        else:
+            seq = raw
+        return [_to_plain(entry) for entry in seq]
 
     def effective_env_overrides(self) -> dict[str, str]:
         """``project.env_overrides`` merged with staged ``env_overrides.*`` edits.
@@ -133,7 +172,8 @@ class ConfigController(QObject):
 
         try:
             project = load_project(config_dir / "project.yaml")
-            tasks = load_tasks(config_dir / "tasks.yaml", project=project)
+            tasks_path = config_dir / "tasks.yaml"
+            tasks, tasks_raw = load_tasks_with_raw(tasks_path, project=project)
         except (AutoExtError, OSError) as exc:
             self.config_error.emit(str(exc))
             return
@@ -142,11 +182,17 @@ class ConfigController(QObject):
         self._config_dir = config_dir
         self._project = project
         self._tasks = tasks
+        self._tasks_raw = tasks_raw
+        self._tasks_path = tasks_path
         self._pending.clear()
+        self._pending_tasks = None
         self._load_mtime_ns = (
             project.source_path.stat().st_mtime_ns
             if project.source_path is not None and project.source_path.exists()
             else 0
+        )
+        self._tasks_mtime_ns = (
+            tasks_path.stat().st_mtime_ns if tasks_path.exists() else 0
         )
         if was_dirty:
             self.dirty_changed.emit(False)
@@ -171,32 +217,53 @@ class ConfigController(QObject):
         if not was_dirty and self.is_dirty:
             self.dirty_changed.emit(True)
 
+    def stage_tasks_edits(self, specs: list[dict[str, Any]]) -> None:
+        """Stage a spec-level replacement list for ``tasks.yaml``.
+
+        Unlike :meth:`stage_edits` which accumulates diffs, this stores a
+        complete list of TaskSpec dicts — the TasksTab re-emits the full
+        spec table whenever anything changes. ``None``-equal-to-on-disk
+        is handled by :meth:`save` (no-op when specs round-trip equal).
+        """
+
+        was_dirty = self.is_dirty
+        self._pending_tasks = [dict(s) for s in specs]
+        if not was_dirty and self.is_dirty:
+            self.dirty_changed.emit(True)
+
     def revert(self) -> None:
         """Discard pending edits; keep loaded ``project`` / ``tasks``."""
 
-        if not self._pending:
+        if not self.is_dirty:
             return
         self._pending.clear()
+        self._pending_tasks = None
         self.dirty_changed.emit(False)
 
     def has_external_change(self) -> bool:
-        """Return ``True`` if ``project.yaml``'s mtime moved since load."""
+        """Return ``True`` if ``project.yaml`` or ``tasks.yaml`` moved on disk."""
 
-        if self._project is None or self._project.source_path is None:
-            return False
-        path = self._project.source_path
-        if not path.exists():
-            return self._load_mtime_ns != 0
-        return path.stat().st_mtime_ns != self._load_mtime_ns
+        if self._project is not None and self._project.source_path is not None:
+            path = self._project.source_path
+            current = path.stat().st_mtime_ns if path.exists() else 0
+            if current != self._load_mtime_ns:
+                return True
+        if self._tasks_path is not None:
+            current = (
+                self._tasks_path.stat().st_mtime_ns if self._tasks_path.exists() else 0
+            )
+            if current != self._tasks_mtime_ns:
+                return True
+        return False
 
     def save(self, *, force: bool = False) -> bool:
-        """Apply pending edits, write ``project.yaml``, and reload.
+        """Apply pending edits, write ``project.yaml`` / ``tasks.yaml``, reload.
 
         Returns ``True`` on success, ``False`` if the save was blocked
         (nothing to save, no config loaded, mtime conflict). On blocking
         errors ``config_error`` is emitted with a user-facing message;
-        callers (ProjectTab) handle the mtime-conflict case by prompting
-        and retrying with ``force=True``.
+        callers handle the mtime-conflict case by prompting and retrying
+        with ``force=True``.
         """
 
         if self._project is None or self._config_dir is None:
@@ -205,28 +272,43 @@ class ConfigController(QObject):
         if self._project.source_path is None:
             self.config_error.emit("project has no source_path")
             return False
-        if not self._pending:
+        if not self.is_dirty:
             return False
 
-        path = self._project.source_path
+        project_path = self._project.source_path
+        tasks_path = self._tasks_path
+
         if not force and self.has_external_change():
             self.config_error.emit(
-                f"{path} changed on disk since load. Reload to see external "
+                f"config changed on disk since load. Reload to see external "
                 f"changes, or force-save to overwrite them."
             )
             return False
 
+        # Prepare both yaml texts in memory first so we only start writing
+        # when both are valid.
+        project_text: str | None = None
+        tasks_text: str | None = None
         try:
-            apply_project_edits(self._project.raw, self._pending)
-            yaml_text = dump_project_yaml(self._project)
+            if self._pending:
+                apply_project_edits(self._project.raw, self._pending)
+                project_text = dump_project_yaml(self._project)
+            if self._pending_tasks is not None:
+                if self._tasks_raw is None:
+                    raise ConfigError("tasks.yaml has no raw tree; was it loaded?")
+                apply_tasks_edits(self._tasks_raw, self._pending_tasks)
+                tasks_text = dump_tasks_yaml(self._tasks_raw)
         except ConfigError as exc:
             self.config_error.emit(str(exc))
             return False
 
         try:
-            path.write_text(yaml_text, encoding="utf-8")
+            if project_text is not None:
+                project_path.write_text(project_text, encoding="utf-8")
+            if tasks_text is not None and tasks_path is not None:
+                tasks_path.write_text(tasks_text, encoding="utf-8")
         except OSError as exc:
-            self.config_error.emit(f"write {path} failed: {exc}")
+            self.config_error.emit(f"write failed: {exc}")
             return False
 
         # Re-parse so downstream sees a fresh pydantic model; load()
