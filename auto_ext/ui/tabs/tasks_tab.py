@@ -239,8 +239,28 @@ class TasksTab(QWidget):
         jivaro_form.addRow("error_max:", self._jivaro_err)
         self._editor_layout.addWidget(jivaro_box)
 
-        # Per-cell jivaro override table.
-        override_box = QGroupBox("jivaro_overrides (per-cell)", self._editor_body)
+        # Per-cell jivaro override table — uncommon, fold by default so
+        # casual users don't have to mentally model "what is this".
+        override_box = QGroupBox(
+            "jivaro_overrides (advanced — per-cell tweaks)", self._editor_body
+        )
+        override_box.setCheckable(True)
+        override_box.setChecked(False)
+        override_box.setToolTip(
+            "Per-cell overrides on top of this spec's jivaro defaults.\n"
+            "\n"
+            "Use this when most cells in the cell axis share config but one\n"
+            "or two need different jivaro.enabled / frequency_limit /\n"
+            "error_max — saves splitting one spec into many.\n"
+            "\n"
+            "Example:\n"
+            "  cell: [INV1, AMP2, BUF3]\n"
+            "  jivaro: {enabled: true, frequency_limit: 14}\n"
+            "  jivaro_overrides:\n"
+            "    AMP2: {enabled: false}      # AMP2 crashes jivaro, skip it\n"
+            "\n"
+            "Most projects leave this folded — auto-expands when loaded."
+        )
         ov_layout = QVBoxLayout(override_box)
         self._override_table = QTableWidget(override_box)
         self._override_table.setColumnCount(5)
@@ -257,6 +277,12 @@ class TasksTab(QWidget):
         h.setSectionResizeMode(3, QHeaderView.Stretch)
         h.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         ov_layout.addWidget(self._override_table)
+        # Folding: hide the table when the box is unchecked. Qt's default
+        # behaviour for a checkable QGroupBox only disables children
+        # (still visible) — we want true fold so the editor is compact.
+        self._override_table.setVisible(False)
+        override_box.toggled.connect(self._override_table.setVisible)
+        self._override_box = override_box
         self._editor_layout.addWidget(override_box)
 
         self._editor_layout.addStretch()
@@ -372,6 +398,19 @@ class TasksTab(QWidget):
         if isinstance(cell_axis, str):
             cell_axis = [cell_axis]
         overrides = spec.get("jivaro_overrides") or {}
+        # Auto-track the fold to match the loaded spec: expand when the
+        # spec actually uses overrides (so the data isn't silently
+        # hidden), fold otherwise (so a freshly selected spec without
+        # any overrides doesn't show an empty table inviting confusion).
+        # User toggles after load are honoured until the next spec swap.
+        want_expanded = bool(overrides)
+        if self._override_box.isChecked() != want_expanded:
+            self._override_box.blockSignals(True)
+            try:
+                self._override_box.setChecked(want_expanded)
+                self._override_table.setVisible(want_expanded)
+            finally:
+                self._override_box.blockSignals(False)
         # Union: cells from axis + cells already in overrides (covers
         # stale entries so user can clear them).
         all_cells: list[str] = list(cell_axis)

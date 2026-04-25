@@ -177,3 +177,77 @@ def test_populate_spec_list_summary(qtbot, tmp_path: Path) -> None:
     text = tab._spec_list.item(0).text()
     assert "L" in text
     assert "A" in text
+
+
+# ---- jivaro_overrides fold ------------------------------------------------
+
+
+def test_jivaro_overrides_starts_folded_when_no_overrides(
+    qtbot, tmp_path: Path
+) -> None:
+    # _multi_spec_config writes a spec with no jivaro_overrides; box
+    # should be unchecked + table hidden so the editor stays compact.
+    cfg = _multi_spec_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    assert tab._override_box.isCheckable() is True
+    assert tab._override_box.isChecked() is False
+    assert tab._override_table.isHidden() is True
+
+
+def test_jivaro_overrides_auto_expands_when_spec_has_overrides(
+    qtbot, tmp_path: Path
+) -> None:
+    # A spec with an actual override should load with the box expanded
+    # so the user can see + edit the entry without hunting for the toggle.
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text("employee_id: alice\n", encoding="utf-8")
+    (d / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: [A, B]\n"
+        "  lvs_layout_view: layout\n"
+        "  jivaro: {enabled: true}\n"
+        "  jivaro_overrides:\n"
+        "    A: {enabled: false}\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, d)
+    assert tab._override_box.isChecked() is True
+    assert tab._override_table.isHidden() is False
+
+
+def test_jivaro_overrides_tooltip_explains_use_case(qtbot, tmp_path: Path) -> None:
+    cfg = _multi_spec_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    tip = tab._override_box.toolTip()
+    # Cheap content sanity: tooltip should mention the example shape and
+    # call out that most projects don't need it.
+    assert "jivaro_overrides" in tip
+    assert "Example" in tip
+    assert "folded" in tip
+
+
+def test_jivaro_overrides_refolds_when_switching_to_no_override_spec(
+    qtbot, tmp_path: Path
+) -> None:
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text("employee_id: alice\n", encoding="utf-8")
+    (d / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: [A, B]\n"
+        "  lvs_layout_view: layout\n"
+        "  jivaro_overrides:\n"
+        "    A: {enabled: false}\n"
+        "- library: M\n"
+        "  cell: C\n"
+        "  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, d)
+    # Spec 0 has overrides → expanded.
+    assert tab._override_box.isChecked() is True
+    # Switch to spec 1 (no overrides) → should fold.
+    tab._spec_list.setCurrentRow(1)
+    assert tab._override_box.isChecked() is False
+    assert tab._override_table.isHidden() is True
