@@ -31,6 +31,7 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QCheckBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -63,6 +64,9 @@ class RunTab(QWidget):
     #: Emitted with the absolute path of a stage log file when the user
     #: selects a stage row. Main window wires this into LogTab.
     stage_selected = pyqtSignal(object)
+    #: Emitted when the empty-state banner's "新建项目" button is clicked.
+    #: MainWindow connects this to its ``_open_init_wizard`` slot.
+    request_init_wizard = pyqtSignal()
 
     def __init__(
         self, controller: ConfigController, parent: QWidget | None = None
@@ -84,6 +88,8 @@ class RunTab(QWidget):
 
         if controller.project is not None:
             self._on_config_loaded(controller.config_dir)
+        else:
+            self._empty_banner.setVisible(True)
 
     # ---- public helpers ----------------------------------------------
 
@@ -98,6 +104,26 @@ class RunTab(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
+
+        # Empty-state banner: visible only when no config is loaded.
+        self._empty_banner = QFrame(self)
+        self._empty_banner.setFrameShape(QFrame.StyledPanel)
+        self._empty_banner.setStyleSheet(
+            "QFrame { background: #fffae0; border: 1px solid #d8c060; "
+            "border-radius: 4px; padding: 8px; }"
+        )
+        banner_row = QHBoxLayout(self._empty_banner)
+        banner_label = QLabel(
+            "ⓘ 还没有加载项目。", self._empty_banner
+        )
+        banner_open_btn = QPushButton("打开现有项目…", self._empty_banner)
+        banner_open_btn.clicked.connect(self._browse_config_dir)
+        banner_new_btn = QPushButton("新建项目…", self._empty_banner)
+        banner_new_btn.clicked.connect(self.request_init_wizard.emit)
+        banner_row.addWidget(banner_label, 1)
+        banner_row.addWidget(banner_open_btn)
+        banner_row.addWidget(banner_new_btn)
+        root.addWidget(self._empty_banner)
 
         # Top bar: config dir path + reload + jobs
         top = QHBoxLayout()
@@ -192,6 +218,7 @@ class RunTab(QWidget):
     def _on_config_loaded(self, config_dir: object) -> None:
         path = Path(config_dir) if config_dir is not None else None
         self._config_label.setText(str(path) if path else "(no config loaded)")
+        self._empty_banner.setVisible(path is None)
 
         # Preserve user's check/uncheck selections across reloads: task_ids
         # that appeared before keep their state; task_ids that are brand
