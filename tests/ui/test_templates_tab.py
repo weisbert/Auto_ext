@@ -302,3 +302,72 @@ def test_dirty_flag_clears_after_save(qtbot, tmp_path: Path) -> None:
     assert controller.is_dirty is True
     assert controller.save() is True
     assert controller.is_dirty is False
+
+
+# ---- Phase 5.6 wiring ------------------------------------------------------
+
+
+def test_diff_editor_button_enabled_only_when_bound_template_selected(
+    qtbot, tmp_path: Path
+) -> None:
+    cfg, root = _scaffold_project(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg, root)
+
+    # Select a bound template (calibre or quantus): button enabled.
+    for i in range(tab._list.count()):
+        if "[calibre]" in tab._list.item(i).text():
+            tab._list.setCurrentRow(i)
+            break
+    assert tab._diff_editor_btn.isEnabled() is True
+    assert tab._apply_preset_btn.isEnabled() is True
+
+    # Select the unused/unbound spare template: buttons disabled.
+    for i in range(tab._list.count()):
+        if "[unused]" in tab._list.item(i).text():
+            tab._list.setCurrentRow(i)
+            break
+    assert tab._diff_editor_btn.isEnabled() is False
+    assert tab._apply_preset_btn.isEnabled() is False
+
+
+def test_diff_editor_accept_refreshes_inventory(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    cfg, root = _scaffold_project(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg, root)
+
+    # Select calibre to give the editor something to operate on.
+    for i in range(tab._list.count()):
+        if "[calibre]" in tab._list.item(i).text():
+            tab._list.setCurrentRow(i)
+            break
+
+    # Stub out DiffEditorDialog: make exec_() return Accepted without
+    # touching disk. We just want to assert the refresh hooks fire.
+    from PyQt5.QtWidgets import QDialog
+
+    class _StubDialog:
+        def __init__(self, *a, **kw): ...
+        def exec_(self): return QDialog.Accepted
+
+    monkeypatch.setattr(
+        "auto_ext.ui.tabs.templates_tab.DiffEditorDialog", _StubDialog
+    )
+    refresh_calls = {"list": 0, "inv": 0}
+    real_list = tab._refresh_template_list
+    real_inv = tab._refresh_inventory_and_knobs
+
+    def fake_list():
+        refresh_calls["list"] += 1
+        real_list()
+
+    def fake_inv():
+        refresh_calls["inv"] += 1
+        real_inv()
+
+    monkeypatch.setattr(tab, "_refresh_template_list", fake_list)
+    monkeypatch.setattr(tab, "_refresh_inventory_and_knobs", fake_inv)
+
+    tab._on_open_diff_editor()
+    assert refresh_calls["list"] >= 1
+    assert refresh_calls["inv"] >= 1

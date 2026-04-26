@@ -28,6 +28,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -71,7 +72,9 @@ from auto_ext.ui.templates_view import (
     literal_placeholder_status,
     user_defined_status,
 )
+from auto_ext.ui.widgets.diff_editor import DiffEditorDialog
 from auto_ext.ui.widgets.knob_editor import KnobEditor
+from auto_ext.ui.widgets.preset_picker import PresetPickerDialog
 
 if TYPE_CHECKING:
     from auto_ext.ui.tabs.run_tab import RunTab
@@ -147,6 +150,23 @@ class TemplatesTab(QWidget):
         top.addWidget(self._save_btn)
         top.addWidget(self._revert_btn)
         root.addLayout(top)
+
+        # Phase 5.6 toolbar: diff editor + preset picker buttons.
+        toolbar = QHBoxLayout()
+        self._diff_editor_btn = QPushButton("切换编辑器…", self)
+        self._diff_editor_btn.setToolTip(
+            "用两个 EDA 原始导出文件生成一个 [% if toggle %] 包裹的统一模板"
+        )
+        self._diff_editor_btn.clicked.connect(self._on_open_diff_editor)
+        self._apply_preset_btn = QPushButton("应用 toggle preset…", self)
+        self._apply_preset_btn.setToolTip(
+            "把已有的 toggle preset 套用到当前选中的模板"
+        )
+        self._apply_preset_btn.clicked.connect(self._on_open_preset_picker)
+        toolbar.addWidget(self._diff_editor_btn)
+        toolbar.addWidget(self._apply_preset_btn)
+        toolbar.addStretch(1)
+        root.addLayout(toolbar)
 
         # Path picker for the 4 bound slots.
         paths_box = QGroupBox("project.templates", self)
@@ -304,6 +324,17 @@ class TemplatesTab(QWidget):
             self._selected_path = None
             self.current_template_changed.emit(None)
         self._refresh_timer.start()
+        self._refresh_phase56_buttons()
+
+    def _refresh_phase56_buttons(self) -> None:
+        """Enable the 5.6 toolbar buttons only when a bound template is
+        selected (manifest auto-sync needs to know the stage)."""
+        bound_selected = (
+            self._selected_path is not None
+            and self._stage_for_selected_path() is not None
+        )
+        self._diff_editor_btn.setEnabled(bound_selected)
+        self._apply_preset_btn.setEnabled(bound_selected)
 
     # ---- inventory + knobs refresh -----------------------------------
 
@@ -564,6 +595,60 @@ class TemplatesTab(QWidget):
     def _on_config_error(self, message: str) -> None:
         if self.isVisible():
             QMessageBox.warning(self, "Config error", message)
+
+    # ---- Phase 5.6 slots --------------------------------------------
+
+    def _on_open_diff_editor(self) -> None:
+        if self._selected_path is None:
+            return
+        resolved = self._resolved_selected_path()
+        if resolved is None or not resolved.is_file():
+            QMessageBox.warning(
+                self, "未选择模板", "请先在列表中选择一个 .j2 文件"
+            )
+            return
+        bound_tool = self._stage_for_selected_path()
+        if bound_tool is None:
+            QMessageBox.warning(
+                self, "模板未绑定",
+                "请先在 project.templates 中把这个模板绑定到一个工具槽\n"
+                "(diff 编辑器需要知道 stage 才能写入 manifest knobs)",
+            )
+            return
+        dlg = DiffEditorDialog(
+            resolved, bound_tool, self._controller.auto_ext_root, self
+        )
+        if dlg.exec_() == QDialog.Accepted:
+            self._refresh_template_list()
+            self._refresh_inventory_and_knobs()
+
+    def _on_open_preset_picker(self) -> None:
+        if self._selected_path is None:
+            return
+        resolved = self._resolved_selected_path()
+        if resolved is None or not resolved.is_file():
+            QMessageBox.warning(
+                self, "未选择模板", "请先在列表中选择一个 .j2 文件"
+            )
+            return
+        bound_tool = self._stage_for_selected_path()
+        if bound_tool is None:
+            QMessageBox.warning(
+                self, "模板未绑定",
+                "请先在 project.templates 中把这个模板绑定到一个工具槽",
+            )
+            return
+        root = self._controller.auto_ext_root
+        if root is None:
+            QMessageBox.warning(
+                self, "缺少 root", "auto_ext_root 未配置，无法定位 presets 目录"
+            )
+            return
+        presets_dir = root / "templates" / "presets"
+        dlg = PresetPickerDialog(resolved, bound_tool, presets_dir, self)
+        if dlg.exec_() == QDialog.Accepted:
+            self._refresh_template_list()
+            self._refresh_inventory_and_knobs()
 
 
 def _mono_font() -> QFont:
