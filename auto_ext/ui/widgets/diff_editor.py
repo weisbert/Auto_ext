@@ -160,7 +160,7 @@ class DiffEditorDialog(QDialog):
             self._current_template_text = current_template_path.read_text(
                 encoding="utf-8"
             )
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             self._current_template_text = ""
 
         self._on_path: Path | None = None
@@ -350,23 +350,29 @@ class DiffEditorDialog(QDialog):
 
     def _set_on_path(self, path: Path) -> None:
         self._on_path = path
-        try:
-            self._on_text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            self._on_text = ""
-            QMessageBox.warning(self, "读取失败", f"无法读取 {path}: {exc}")
+        self._on_text = self._read_raw_or_warn(path)
         self._on_path_label.setText(str(path))
         self._refresh_state()
 
     def _set_off_path(self, path: Path) -> None:
         self._off_path = path
-        try:
-            self._off_text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            self._off_text = ""
-            QMessageBox.warning(self, "读取失败", f"无法读取 {path}: {exc}")
+        self._off_text = self._read_raw_or_warn(path)
         self._off_path_label.setText(str(path))
         self._refresh_state()
+
+    def _read_raw_or_warn(self, path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "读取失败", f"无法读取 {path}:\n{exc}")
+        except UnicodeDecodeError as exc:
+            QMessageBox.warning(
+                self, "编码错误",
+                f"{path} 不是 UTF-8 文本（在字节 {exc.start} 处遇到 "
+                f"{exc.reason}）。\n模板文件应是纯文本配置；请确认拖入的"
+                f"是模板而不是二进制 / 输出文件。",
+            )
+        return ""
 
     def _refresh_state(self) -> None:
         self._default_label.setText("ON" if self._on_value else "OFF")
