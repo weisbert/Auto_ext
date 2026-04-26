@@ -130,6 +130,74 @@ def manifest_path_for(template_path: Path) -> Path:
     return template_path.with_name(template_path.name + ".manifest.yaml")
 
 
+def append_knob_to_manifest_yaml(
+    template_path: Path,
+    knob_name: str,
+    knob_spec: KnobSpec,
+    *,
+    description: str | None = None,
+) -> Path:
+    """Append a knob to the template's manifest sidecar (ruamel round-trip).
+
+    Idempotent: if the knob already exists with an identical spec, no
+    write happens and the path is returned. If it exists with a
+    different spec, raises :class:`ConfigError` rather than silently
+    clobbering hand-authored knob metadata.
+
+    When the sidecar does not exist this creates one with the minimal
+    ``{template: <basename>, knobs: {<name>: <spec>}}`` form. When it
+    exists, the new knob is appended to the existing ``knobs`` mapping,
+    preserving comments and key order via ruamel round-trip mode.
+
+    Returns the path of the manifest file (created or updated).
+    """
+    sidecar = manifest_path_for(template_path)
+    spec_dict = knob_spec.model_dump(exclude_none=True)
+    if description is not None and "description" not in spec_dict:
+        spec_dict["description"] = description
+
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+
+    if not sidecar.exists():
+        data: dict[str, Any] = {
+            "template": template_path.name,
+            "knobs": {knob_name: spec_dict},
+        }
+        with sidecar.open("w", encoding="utf-8") as fh:
+            yaml.dump(data, fh)
+        return sidecar
+
+    try:
+        with sidecar.open("r", encoding="utf-8") as fh:
+            data = yaml.load(fh)
+    except YAMLError as exc:
+        raise ConfigError(f"{sidecar}: YAML parse error: {exc}") from exc
+    if data is None or not isinstance(data, dict):
+        raise ConfigError(
+            f"{sidecar}: cannot append knob to a malformed manifest"
+        )
+
+    knobs = data.get("knobs")
+    if knobs is None:
+        data["knobs"] = {knob_name: spec_dict}
+    elif knob_name in knobs:
+        existing = _plain(knobs[knob_name])
+        if existing == spec_dict:
+            return sidecar
+        raise ConfigError(
+            f"{sidecar}: knob {knob_name!r} already declared with a "
+            f"different spec; refusing to overwrite (existing={existing!r}, "
+            f"new={spec_dict!r})"
+        )
+    else:
+        knobs[knob_name] = spec_dict
+
+    with sidecar.open("w", encoding="utf-8") as fh:
+        yaml.dump(data, fh)
+    return sidecar
+
+
 def load_manifest(template_path: Path) -> TemplateManifest | None:
     """Load the sidecar manifest for ``template_path``.
 

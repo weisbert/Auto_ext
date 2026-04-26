@@ -11,6 +11,7 @@ from auto_ext.core.manifest import (
     KnobSpec,
     SourceRef,
     TemplateManifest,
+    append_knob_to_manifest_yaml,
     current_knob_value,
     load_manifest,
     manifest_path_for,
@@ -597,3 +598,79 @@ knobs:
     # surfaces the same ConfigError it would see from the runner.
     with pytest.raises(ConfigError, match="outside allowed range"):
         current_knob_value(m, {"quantus": {"temperature": 999.0}}, "quantus", "temperature")
+
+
+# ---- append_knob_to_manifest_yaml ------------------------------------------
+
+
+def test_append_knob_creates_sidecar_when_absent(tmp_path: Path) -> None:
+    tpl = tmp_path / "ext.cmd.j2"
+    tpl.write_text("body\n", encoding="utf-8")
+    sidecar = manifest_path_for(tpl)
+    assert not sidecar.exists()
+
+    spec = KnobSpec(type="bool", default=True, description="toggle me")
+    out_path = append_knob_to_manifest_yaml(tpl, "my_toggle", spec)
+    assert out_path == sidecar
+    assert sidecar.is_file()
+
+    m = load_manifest(tpl)
+    assert m is not None
+    assert m.template == "ext.cmd.j2"
+    assert "my_toggle" in m.knobs
+    assert m.knobs["my_toggle"].type == "bool"
+    assert m.knobs["my_toggle"].default is True
+    assert m.knobs["my_toggle"].description == "toggle me"
+
+
+def test_append_knob_appends_to_existing_sidecar_preserving_comments(
+    tmp_path: Path,
+) -> None:
+    tpl = _write_pair(
+        tmp_path,
+        "ext.cmd.j2",
+        """\
+# Hand-authored manifest with a leading comment.
+template: ext.cmd.j2
+knobs:
+  temperature:  # in degrees C
+    type: float
+    default: 55.0
+""",
+    )
+    spec = KnobSpec(type="bool", default=False)
+    append_knob_to_manifest_yaml(tpl, "verbose", spec)
+
+    sidecar_text = manifest_path_for(tpl).read_text(encoding="utf-8")
+    # ruamel round-trip preserves leading comment + inline comment.
+    assert "# Hand-authored manifest" in sidecar_text
+    assert "# in degrees C" in sidecar_text
+
+    m = load_manifest(tpl)
+    assert m is not None
+    assert set(m.knobs) == {"temperature", "verbose"}
+    assert m.knobs["verbose"].default is False
+
+
+def test_append_knob_idempotent_same_spec(tmp_path: Path) -> None:
+    tpl = tmp_path / "ext.cmd.j2"
+    tpl.write_text("body\n", encoding="utf-8")
+    spec = KnobSpec(type="bool", default=True, description="d")
+    append_knob_to_manifest_yaml(tpl, "k", spec)
+    mtime_before = manifest_path_for(tpl).stat().st_mtime_ns
+    # Second call with the same spec is a no-op (no rewrite).
+    append_knob_to_manifest_yaml(tpl, "k", spec)
+    mtime_after = manifest_path_for(tpl).stat().st_mtime_ns
+    assert mtime_before == mtime_after
+
+
+def test_append_knob_refuses_conflicting_spec(tmp_path: Path) -> None:
+    tpl = tmp_path / "ext.cmd.j2"
+    tpl.write_text("body\n", encoding="utf-8")
+    append_knob_to_manifest_yaml(
+        tpl, "k", KnobSpec(type="bool", default=True)
+    )
+    with pytest.raises(ConfigError, match="different spec"):
+        append_knob_to_manifest_yaml(
+            tpl, "k", KnobSpec(type="bool", default=False)
+        )
