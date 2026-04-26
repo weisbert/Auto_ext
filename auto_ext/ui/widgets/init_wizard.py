@@ -448,11 +448,12 @@ class CommitPage(QWizardPage):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setTitle("写入项目文件")
-        self.setSubTitle("点击 完成 / Finish 开始写盘。")
+        self.setSubTitle("点击下一步开始写盘")
 
         self.setFinalPage(False)
 
         self._succeeded = False
+        self._committing = False
 
         layout = QVBoxLayout(self)
         self._info_label = QLabel("", self)
@@ -471,6 +472,7 @@ class CommitPage(QWizardPage):
 
     def initializePage(self) -> None:  # noqa: N802 — Qt API
         self._succeeded = False
+        self._committing = False
         self._banner.setVisible(False)
         self._banner.clear()
         self._log.clear()
@@ -492,20 +494,38 @@ class CommitPage(QWizardPage):
     def validatePage(self) -> bool:  # noqa: N802 — Qt API
         if self._succeeded:
             return True
-        preview: InitPreview | None = getattr(self.wizard(), "_preview", None)
-        if preview is None:
-            self._banner.setText("无 preview 状态可写盘。")
-            self._banner.setVisible(True)
+        # Re-entrancy guard: commit() pumps the Qt event loop via
+        # QApplication.processEvents() in _on_progress, which lets a
+        # queued double-click on Next dispatch a second validatePage()
+        # call while the first commit is mid-flight. That second call
+        # would re-enter commit() and corrupt freshly-written files
+        # (write twice, .bak the new copy as "stale"). Reject reentry.
+        if self._committing:
             return False
+        self._committing = True
+        wiz = self.wizard()
+        next_btn = wiz.button(QWizard.NextButton) if wiz is not None else None
+        if next_btn is not None:
+            next_btn.setEnabled(False)
         try:
-            commit(preview, progress=self._on_progress)
-        except OSError as exc:
-            self._banner.setText(f"写盘失败: {exc}")
-            self._banner.setVisible(True)
-            return False
-        self._succeeded = True
-        self._on_progress(f"✓ 完成，共写入 {len(preview.files)} 个文件")
-        return True
+            preview: InitPreview | None = getattr(wiz, "_preview", None)
+            if preview is None:
+                self._banner.setText("无 preview 状态可写盘。")
+                self._banner.setVisible(True)
+                return False
+            try:
+                commit(preview, progress=self._on_progress)
+            except OSError as exc:
+                self._banner.setText(f"写盘失败: {exc}")
+                self._banner.setVisible(True)
+                return False
+            self._succeeded = True
+            self._on_progress(f"✓ 完成，共写入 {len(preview.files)} 个文件")
+            return True
+        finally:
+            self._committing = False
+            if next_btn is not None:
+                next_btn.setEnabled(True)
 
     def isComplete(self) -> bool:  # noqa: N802 — Qt API
         return True

@@ -199,20 +199,20 @@ def build_tasks_yaml(
         "# lvs_layout_view/lvs_source_view) auto-expand to per-cell tasks.",
         "",
     ]
-    lines.append(f"- library: {_yaml_scalar(identity.library) or 'TODO_LIBRARY'}")
-    lines.append(f"  cell: {_yaml_scalar(identity.cell) or 'TODO_CELL'}")
+    lines.append(f"- library: {yaml_scalar(identity.library) or 'TODO_LIBRARY'}")
+    lines.append(f"  cell: {yaml_scalar(identity.cell) or 'TODO_CELL'}")
     lines.append(
         f"  lvs_layout_view: "
-        f"{_yaml_scalar(identity.lvs_layout_view) or 'layout'}"
+        f"{yaml_scalar(identity.lvs_layout_view) or 'layout'}"
     )
     lines.append(
         f"  lvs_source_view: "
-        f"{_yaml_scalar(identity.lvs_source_view) or 'schematic'}"
+        f"{yaml_scalar(identity.lvs_source_view) or 'schematic'}"
     )
     if identity.ground_net is not None:
-        lines.append(f"  ground_net: {_yaml_scalar(identity.ground_net)}")
+        lines.append(f"  ground_net: {yaml_scalar(identity.ground_net)}")
     if identity.out_file is not None:
-        lines.append(f"  out_file: {_yaml_scalar(identity.out_file)}")
+        lines.append(f"  out_file: {yaml_scalar(identity.out_file)}")
     if jivaro_imported:
         lines.append("  jivaro:")
         lines.append("    enabled: true")
@@ -370,7 +370,13 @@ def _build_overrides(inputs: InitInputs) -> Identity | None:
     return Identity(**{name: value for name, value in fields})
 
 
-def _yaml_scalar(value: Optional[str]) -> Optional[str]:
+def yaml_scalar(value: Optional[str]) -> Optional[str]:
+    """Quote ``value`` if it contains any YAML-special character.
+
+    Returns ``None`` unchanged. Single home — both ``build_tasks_yaml``
+    and any future emitter share this exact policy. Used by
+    :func:`build_tasks_yaml`; do not duplicate elsewhere in the codebase.
+    """
     if value is None:
         return None
     if any(c in value for c in ":#{}[]&*!|>'\"%@`,\n\r\t "):
@@ -390,4 +396,5 @@ __all__ = [
     "commit",
     "cross_validate_identities",
     "dry_run",
+    "yaml_scalar",
 ]

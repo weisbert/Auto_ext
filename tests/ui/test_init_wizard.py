@@ -296,3 +296,58 @@ def test_result_page_auto_load_unchecked_skips_signal(
     wiz.accepted_with_load.connect(lambda p: received.append(Path(p)))
     wiz.accept()
     assert received == []
+
+
+# ---- 12. CommitPage rejects re-entrant validatePage ----------------------
+
+
+def test_commit_page_rejects_reentrant_validation(
+    qtbot, raw_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Simulate a queued double-click landing during a sync commit.
+
+    ``commit()`` is monkey-patched to spin processEvents for ~100 ms
+    and re-enter ``validatePage`` from within. The re-entrancy guard
+    must reject the second call so ``commit`` runs exactly once.
+    """
+    out_root = tmp_path / "out"
+    wiz = _make_wizard(qtbot)
+    _drive_to_preview(wiz, raw_dir, out_root)
+    wiz.next()  # advance to CommitPage
+    commit_page = wiz._commit_page
+
+    import time
+
+    from PyQt5.QtWidgets import QApplication
+
+    import auto_ext.ui.widgets.init_wizard as wizard_mod
+    from auto_ext.core import init_project as ip
+
+    real_commit = ip.commit
+    call_count = {"n": 0}
+    reentrant_results: list[bool] = []
+
+    def spinning_commit(preview, *, progress=None):
+        call_count["n"] += 1
+        # First entry: spin processEvents and trigger a recursive
+        # validatePage() call — the guard should make it return False.
+        if call_count["n"] == 1:
+            deadline = time.monotonic() + 0.1
+            tried = False
+            while time.monotonic() < deadline:
+                QApplication.processEvents()
+                if not tried:
+                    reentrant_results.append(commit_page.validatePage())
+                    tried = True
+        return real_commit(preview, progress=progress)
+
+    # The wizard imports `commit` by name into its module namespace, so
+    # patch the binding the page actually calls.
+    monkeypatch.setattr(wizard_mod, "commit", spinning_commit)
+
+    assert commit_page.validatePage() is True
+    # Second (re-entrant) attempt rejected by the guard.
+    assert reentrant_results == [False], reentrant_results
+    # commit() ran exactly once.
+    assert call_count["n"] == 1
+    assert commit_page._succeeded is True
