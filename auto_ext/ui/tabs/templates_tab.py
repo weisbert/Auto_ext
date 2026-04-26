@@ -148,6 +148,17 @@ class TemplatesTab(QWidget):
         top.addWidget(self._revert_btn)
         root.addLayout(top)
 
+        # Toolbar: free-standing tools that don't depend on any selection.
+        toolbar = QHBoxLayout()
+        self._diff_viewer_btn = QPushButton("模板对比…", self)
+        self._diff_viewer_btn.setToolTip(
+            "打开模板对比工具：拖两个 .j2 文件并排查看差异"
+        )
+        self._diff_viewer_btn.clicked.connect(self._on_open_diff_viewer)
+        toolbar.addWidget(self._diff_viewer_btn)
+        toolbar.addStretch(1)
+        root.addLayout(toolbar)
+
         # Path picker for the 4 bound slots.
         paths_box = QGroupBox("project.templates", self)
         form = QFormLayout(paths_box)
@@ -564,6 +575,21 @@ class TemplatesTab(QWidget):
     def _on_config_error(self, message: str) -> None:
         if self.isVisible():
             QMessageBox.warning(self, "Config error", message)
+
+    # ---- toolbar slots ----------------------------------------------
+
+    def _on_open_diff_viewer(self) -> None:
+        # Imported lazily so the heavyweight diff widgets aren't pulled
+        # in until the user actually opens the viewer.
+        from auto_ext.ui.widgets.template_diff_viewer import (
+            TemplateDiffViewerDialog,
+        )
+
+        dlg = TemplateDiffViewerDialog(parent=self)
+        # Keep a reference so the non-modal dialog isn't garbage-collected
+        # the moment this method returns.
+        self._diff_viewer_dlg = dlg
+        dlg.show()
 
 
 def _mono_font() -> QFont:

@@ -302,3 +302,15 @@ def test_dirty_flag_clears_after_save(qtbot, tmp_path: Path) -> None:
     assert controller.is_dirty is True
     assert controller.save() is True
     assert controller.is_dirty is False
+
+
+def test_template_diff_viewer_button_opens_dialog(qtbot, tmp_path: Path) -> None:
+    cfg, root = _scaffold_project(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg, root)
+    # Always-enabled, free-standing tool — no template selection required.
+    assert tab._diff_viewer_btn.isEnabled() is True
+    tab._diff_viewer_btn.click()
+    from auto_ext.ui.widgets.template_diff_viewer import TemplateDiffViewerDialog
+    assert isinstance(tab._diff_viewer_dlg, TemplateDiffViewerDialog)
+    assert tab._diff_viewer_dlg.isVisible() is True
+    tab._diff_viewer_dlg.close()

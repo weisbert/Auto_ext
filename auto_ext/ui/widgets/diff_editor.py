@@ -12,10 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import (
-    QDragEnterEvent,
-    QDropEvent,
     QFont,
     QRegExpValidator,
 )
@@ -24,7 +22,6 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QDialog,
     QFileDialog,
-    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -54,6 +51,7 @@ from auto_ext.core.manifest import (
     manifest_path_for,
 )
 from auto_ext.core.preset import save_preset
+from auto_ext.ui.widgets.drop_zone import DropZone
 from auto_ext.ui.widgets.jinja_highlighter import JinjaHighlighter
 
 
@@ -65,63 +63,6 @@ def _mono_font() -> QFont:
     f.setFamily("Consolas")
     f.setStyleHint(QFont.TypeWriter)
     return f
-
-
-# ---- drop zone --------------------------------------------------------------
-
-
-class _DropZone(QFrame):
-    """Bordered drop area that emits ``path_dropped(Path)`` on a single
-    local-file drop. Doubles as a click target opening the file dialog
-    via the ``[…]`` button next to it (handled by the parent dialog —
-    this widget itself is just the drop affordance)."""
-
-    path_dropped = pyqtSignal(object)  # Path
-
-    def __init__(self, label: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self.setFrameShape(QFrame.StyledPanel)
-        self._normal_style = (
-            "QFrame { border: 2px dashed #888; min-height: 40px; "
-            "background: #f8f8f8; }"
-        )
-        self._active_style = (
-            "QFrame { border: 2px dashed #2080d0; min-height: 40px; "
-            "background: #e8f0fa; }"
-        )
-        self.setStyleSheet(self._normal_style)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
-        self._label = QLabel(label, self)
-        self._label.setAlignment(Qt.AlignCenter)
-        self._label.setStyleSheet("color: #666;")
-        layout.addWidget(self._label)
-
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
-        urls = event.mimeData().urls() if event.mimeData() else []
-        if len(urls) == 1 and urls[0].isLocalFile():
-            event.acceptProposedAction()
-            self.setStyleSheet(self._active_style)
-        else:
-            event.ignore()
-
-    def dragLeaveEvent(self, event) -> None:  # noqa: N802 — Qt API
-        self.setStyleSheet(self._normal_style)
-        super().dragLeaveEvent(event)
-
-    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
-        self.setStyleSheet(self._normal_style)
-        urls = event.mimeData().urls() if event.mimeData() else []
-        if len(urls) == 1 and urls[0].isLocalFile():
-            event.acceptProposedAction()
-            self.path_dropped.emit(Path(urls[0].toLocalFile()))
-        else:
-            event.ignore()
-
-    def set_caption(self, text: str) -> None:
-        self._label.setText(text)
 
 
 # ---- main dialog ------------------------------------------------------------
@@ -208,7 +149,7 @@ class DiffEditorDialog(QDialog):
 
         # Drop zones.
         zones = QHBoxLayout()
-        self._on_zone = _DropZone("On (true) — drop file here", self)
+        self._on_zone = DropZone("On (true) — drop file here", self)
         self._on_zone.path_dropped.connect(self._on_zone_dropped)
         self._on_path_label = QLabel("(no file)", self)
         self._on_path_label.setStyleSheet("color: #888; font-family: monospace;")
@@ -228,7 +169,7 @@ class DiffEditorDialog(QDialog):
         self._swap_btn.setMaximumWidth(40)
         self._swap_btn.clicked.connect(self._on_swap)
 
-        self._off_zone = _DropZone("Off (false) — drop file here", self)
+        self._off_zone = DropZone("Off (false) — drop file here", self)
         self._off_zone.path_dropped.connect(self._off_zone_dropped)
         self._off_path_label = QLabel("(no file)", self)
         self._off_path_label.setStyleSheet("color: #888; font-family: monospace;")
