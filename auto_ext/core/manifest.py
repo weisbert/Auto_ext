@@ -130,6 +130,31 @@ def manifest_path_for(template_path: Path) -> Path:
     return template_path.with_name(template_path.name + ".manifest.yaml")
 
 
+def dump_manifest_yaml(manifest: TemplateManifest) -> str:
+    """Serialize a :class:`TemplateManifest` as a YAML string.
+
+    Used by ``init-project`` to write the empty-knob sidecar that pairs
+    each freshly-imported template, and by ``import`` / ``knob promote``
+    when re-emitting an updated manifest. Round-trip mode preserves the
+    user's mapping order on subsequent edits.
+    """
+    from io import StringIO
+
+    data: dict[str, Any] = {"template": manifest.template}
+    if manifest.description is not None:
+        data["description"] = manifest.description
+    data["knobs"] = {
+        name: spec.model_dump(exclude_none=True)
+        for name, spec in manifest.knobs.items()
+    }
+
+    yaml = YAML(typ="rt")
+    yaml.default_flow_style = False
+    buf = StringIO()
+    yaml.dump(data, buf)
+    return buf.getvalue()
+
+
 def append_knob_to_manifest_yaml(
     template_path: Path,
     knob_name: str,
