@@ -259,6 +259,15 @@ class DiffEditorDialog(QDialog):
         self._right_preview = QPlainTextEdit(self)
         self._right_preview.setReadOnly(True)
         self._right_preview.setFont(_mono_font())
+        self._right_preview.setPlaceholderText(
+            "右侧将显示套上 toggle 后的模板预览。需要先完成：\n"
+            "  1. 在上方 [On (true)] 区域拖入 on 侧 raw 文件\n"
+            "  2. 在上方 [Off (false)] 区域拖入 off 侧 raw 文件\n"
+            "  3. 在最上方 [Toggle name] 输入框填入 toggle 名称\n"
+            "     (合法：[a-z][a-z0-9_]*，例如 connect_by_net_name)\n\n"
+            "完成后预览自动出现。如有错误（找不到 anchor / 编码错误等），\n"
+            "见下方的状态行。"
+        )
         self._right_highlighter = JinjaHighlighter(self._right_preview.document())
 
         splitter.addWidget(_with_caption("Current .j2", self._left_preview, self))
