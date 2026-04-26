@@ -14,6 +14,7 @@ any matching entry.
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -158,6 +159,13 @@ class TasksTab(QWidget):
         self._add_spec_btn = QPushButton("+", left)
         self._add_spec_btn.setToolTip("Add a new TaskSpec")
         self._add_spec_btn.clicked.connect(self._on_add_spec)
+        self._copy_spec_btn = QPushButton("copy", left)
+        self._copy_spec_btn.setToolTip(
+            "Duplicate the selected TaskSpec — handy for running the same "
+            "cell with different knobs (use {task_id} in extraction_output_dir "
+            "so each copy lands in its own dir)."
+        )
+        self._copy_spec_btn.clicked.connect(self._on_copy_spec)
         self._remove_spec_btn = QPushButton("−", left)
         self._remove_spec_btn.setToolTip("Remove the selected TaskSpec")
         self._remove_spec_btn.clicked.connect(self._on_remove_spec)
@@ -167,11 +175,12 @@ class TasksTab(QWidget):
         self._down_spec_btn.clicked.connect(lambda: self._move_spec(1))
         for b in (
             self._add_spec_btn,
+            self._copy_spec_btn,
             self._remove_spec_btn,
             self._up_spec_btn,
             self._down_spec_btn,
         ):
-            b.setFixedWidth(32)
+            b.setFixedWidth(40)
             btn_row.addWidget(b)
         btn_row.addStretch()
         left_layout.addLayout(btn_row)
@@ -811,6 +820,25 @@ class TasksTab(QWidget):
         self._specs.append(new_spec)
         self._populate_spec_list()
         self._spec_list.setCurrentRow(len(self._specs) - 1)
+        self._stage_and_schedule_refresh()
+
+    def _on_copy_spec(self) -> None:
+        """Duplicate the selected spec right after it.
+
+        Common workflow: same cell × different knobs for parallel runs.
+        Phase 5.5.1 made ``extraction_output_dir`` accept ``{task_id}`` etc.
+        so the duplicate's output won't clobber the original's.
+        """
+        if self._current_index < 0 or self._current_index >= len(self._specs):
+            return
+        # deepcopy: TaskSpec dicts contain nested jivaro / jivaro_overrides /
+        # exclude / knobs structures that must not share refs with the
+        # original — otherwise edits on the copy would mutate the source.
+        clone = copy.deepcopy(self._specs[self._current_index])
+        new_index = self._current_index + 1
+        self._specs.insert(new_index, clone)
+        self._populate_spec_list()
+        self._spec_list.setCurrentRow(new_index)
         self._stage_and_schedule_refresh()
 
     def _on_remove_spec(self) -> None:

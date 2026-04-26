@@ -120,6 +120,74 @@ def test_add_spec_creates_new_list_entry(qtbot, tmp_path: Path) -> None:
     assert controller.is_dirty is True
 
 
+def test_copy_spec_inserts_deep_clone_after_selection(
+    qtbot, tmp_path: Path
+) -> None:
+    """Phase 5.5.2: 'copy' button duplicates the selected spec right
+    after it, auto-selects the copy, and stages the change. Nested
+    structures (jivaro etc.) must not share refs with the original —
+    editing the copy must leave the source untouched.
+    """
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text("employee_id: alice\n", encoding="utf-8")
+    (d / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  jivaro: {enabled: true, frequency_limit: 14}\n"
+        "  jivaro_overrides:\n"
+        "    A: {enabled: false}\n"
+        "- library: M\n"
+        "  cell: B\n"
+        "  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    tab, controller = _make_tab(qtbot, d)
+    assert len(tab._specs) == 2
+
+    # Select spec 0 (the one with nested jivaro_overrides) and copy it.
+    tab._spec_list.setCurrentRow(0)
+    tab._on_copy_spec()
+
+    # Inserted right after index 0.
+    assert len(tab._specs) == 3
+    assert tab._specs[0]["library"] == "L"
+    assert tab._specs[1]["library"] == "L"  # the copy
+    assert tab._specs[2]["library"] == "M"  # unchanged
+
+    # Auto-selected the new copy.
+    assert tab._spec_list.currentRow() == 1
+    assert tab._current_index == 1
+
+    # Dirty flag staged.
+    assert controller.is_dirty is True
+    pending = controller.pending_task_specs
+    assert pending is not None
+    assert len(pending) == 3
+
+    # Deep copy: mutating the copy's nested dict must not touch source.
+    tab._specs[1]["jivaro"]["frequency_limit"] = 99
+    tab._specs[1]["jivaro_overrides"]["A"]["enabled"] = True
+    assert tab._specs[0]["jivaro"]["frequency_limit"] == 14
+    assert tab._specs[0]["jivaro_overrides"]["A"]["enabled"] is False
+
+
+def test_copy_spec_no_op_when_nothing_selected(qtbot, tmp_path: Path) -> None:
+    """When the list has no selection, the copy slot is a safe no-op
+    (mirrors how _on_remove_spec / _move_spec early-return).
+    """
+    cfg = _multi_spec_config(tmp_path)
+    tab, controller = _make_tab(qtbot, cfg)
+    # Force "no selection" state.
+    tab._spec_list.setCurrentRow(-1)
+    tab._current_index = -1
+    before = len(tab._specs)
+    tab._on_copy_spec()
+    assert len(tab._specs) == before
+    assert controller.is_dirty is False
+
+
 def test_remove_spec_forbidden_when_one_left(qtbot, tmp_path: Path, monkeypatch) -> None:
     cfg = _multi_spec_config(tmp_path)
     tab, controller = _make_tab(qtbot, cfg)
