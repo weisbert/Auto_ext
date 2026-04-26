@@ -15,6 +15,11 @@ knobs:
     type: float
     default: 0.001
     description: Minimum coupling capacitance to keep (ratio).
+  min_res:
+    type: float
+    default: 0.001
+    unit: ohm
+    description: Minimum resistance kept after filter_res; smaller values dropped.
   temperature:
     type: float
     default: 55.0

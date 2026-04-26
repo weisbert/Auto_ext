@@ -26,7 +26,7 @@ filter_coupling_cap \
               -coupling_cap_threshold_relative [[coupling_cap_threshold_relative]]
 filter_res \
               -merge_parallel_res true \
-              -min_res 0.001 \
+              -min_res [[min_res]] \
               -remove_dangling_res true
 input_db -type calibre \
               -device_property_value 7 \
