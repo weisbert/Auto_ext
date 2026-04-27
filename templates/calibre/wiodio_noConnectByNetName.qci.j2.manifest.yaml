@@ -1,3 +1,0 @@
-template: wiodio_noConnectByNetName.qci.j2
-description: Calibre LVS runset (connect-by-net-name off variant).
-knobs: {}

@@ -78,6 +78,8 @@ class KnobSpec(BaseModel):
     """One knob declaration inside a :class:`TemplateManifest`.
 
     ``range`` is inclusive on both ends and applies only to numeric types.
+    ``choices`` constrains a ``str`` knob to a closed set (rendered as a
+    QComboBox in the GUI); mutually exclusive with ``range``.
     ``unit`` is display-only (kept for future GUI use).
     ``source`` links a knob back to the importer's raw-file key so smart
     re-import can re-substitute it; left ``None`` for hand-authored knobs.
@@ -89,6 +91,7 @@ class KnobSpec(BaseModel):
     default: Any
     description: str | None = None
     range: tuple[Any, Any] | None = None
+    choices: list[Any] | None = None
     unit: str | None = None
     source: SourceRef | None = None
 
@@ -108,6 +111,24 @@ class KnobSpec(BaseModel):
             if not (low <= self.default <= high):
                 raise ValueError(
                     f"default {self.default} is outside range [{low}, {high}]"
+                )
+        if self.choices is not None:
+            if self.type != "str":
+                raise ValueError(
+                    f"choices is only valid for str knobs (got type={self.type!r})"
+                )
+            if self.range is not None:
+                raise ValueError("choices and range are mutually exclusive")
+            if len(self.choices) == 0:
+                raise ValueError("choices must contain at least one value")
+            coerced = [_coerce_typed(c, self.type, f"choices[{i}]")
+                       for i, c in enumerate(self.choices)]
+            if len(set(coerced)) != len(coerced):
+                raise ValueError(f"choices contains duplicates: {coerced!r}")
+            self.choices = coerced
+            if self.default not in coerced:
+                raise ValueError(
+                    f"default {self.default!r} is not in choices {coerced!r}"
                 )
         return self
 
@@ -340,6 +361,10 @@ def resolve_knob_values(
                     raise ConfigError(
                         f"{label}={value} is outside allowed range [{low}, {high}]"
                     )
+            if spec.choices is not None and value not in spec.choices:
+                raise ConfigError(
+                    f"{label}={value!r} is not in allowed choices {spec.choices!r}"
+                )
             result[knob_name] = value
 
     return result
@@ -382,6 +407,10 @@ def current_knob_value(
             raise ConfigError(
                 f"{label}={value} is outside allowed range [{low}, {high}]"
             )
+    if spec.choices is not None and value not in spec.choices:
+        raise ConfigError(
+            f"{label}={value!r} is not in allowed choices {spec.choices!r}"
+        )
     return (value, "project")
 
 

@@ -1,4 +1,4 @@
-*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/[[lvs_runset_version]]/[[pdk_subdir]]/[[pdk_subdir]].wodio.qcilvs
+*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/[[lvs_runset_version]]/[[pdk_subdir]]/[[pdk_subdir]].[[lvs_variant]].qcilvs
 *lvsRunDir: [[output_dir]]
 *lvsLayoutPaths: [[cell]].calibre.db
 *lvsLayoutPrimary: [[cell]]
@@ -28,7 +28,8 @@
 *cmnWarnLayoutOverwrite: 0
 *cmnWarnSourceOverwrite: 0
 *cmnShowOptions: 1
-*cmnSpecifyLicenseWaitTime: 1
+[% if connect_by_name %]*cmnVConnectNamesState: ALL
+[% endif %]*cmnSpecifyLicenseWaitTime: 1
 *cmnLicenseWaitTime: 10
 *cmnReleaseLicense: 1
 *cmnNumTurbo: 2

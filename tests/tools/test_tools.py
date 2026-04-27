@@ -212,7 +212,7 @@ def test_calibre_parse_missing_qci_passes_result_through(tmp_path: Path) -> None
     "subpath",
     [
         "si/default.env.j2",
-        "calibre/wiodio_noConnectByNetName.qci.j2",
+        "calibre/calibre_lvs.qci.j2",
         "quantus/ext.cmd.j2",
         "quantus/dspf.cmd.j2",
         "jivaro/default.xml.j2",

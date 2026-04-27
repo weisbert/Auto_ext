@@ -197,7 +197,7 @@ Auto_ext_pro/
     │   ├── si.env                                  # 并行模式特有
     │   └── rendered/
     │       ├── default.env
-    │       ├── wiodio_noConnectByNetName.qci
+    │       ├── calibre_lvs.qci
     │       ├── ext.cmd
     │       └── default.xml
     └── task_<lib>__<cellB>__...

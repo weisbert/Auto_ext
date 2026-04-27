@@ -41,7 +41,7 @@ python3.11 -c "import jinja2, ruamel.yaml, pydantic, typer, rich; print('deps ok
 python3.11 -m pytest tests/ -v
 ```
 
-预期：**Phase 3.5 后应有 303 全绿**（Windows 上 294 绿 + 9 个 symlink 测试 skip；Linux 上 303 全绿，symlink 测试在 Linux 能跑起来）。
+预期：当前 main（Phase 5.7 起）在 Windows 上为 **547 绿 + 10 skip**，Linux 上 symlink 测试能跑起来，会再多 9 个绿。
 
 全绿数量随 phase 增长 —— 如果当前数量偏离太多**停下来**先查再往下走，后面出问题排查不清楚是 real-env 的锅还是代码的锅。
 
@@ -224,7 +224,7 @@ source <你平时 source 的项目 setup 脚本>
 
 ```bash
 ls runs/task_*/rendered/
-cat runs/task_*/rendered/wiodio_noConnectByNetName.qci
+cat runs/task_*/rendered/calibre_lvs.qci
 cat runs/task_*/rendered/default.env
 cat runs/task_*/rendered/ext.cmd
 ```
@@ -339,7 +339,7 @@ LVS 过了之后：
 
 ### 6.2 仓库自带的老模板
 
-仓库 `templates/` 下历史遗留的 5 个 Phase 3 模板（`wiodio_noConnectByNetName.qci.j2` / `ext.cmd.j2` / `dspf.cmd.j2` / `default.env.j2` 等）**已经**把 PDK 硬编码全部抽象成了 `[[tech_name]]` / `[[pdk_subdir]]` / `[[lvs_runset_version]]` / `[[qrc_runset_version]]` 占位符（Phase 4b3 起），所以直接用这些模板、让 `project.yaml` 填那几个字段就能跑。
+仓库 `templates/` 下自带的 5 个模板（`calibre_lvs.qci.j2` / `ext.cmd.j2` / `dspf.cmd.j2` / `default.env.j2` 等）已经把 PDK 硬编码全部抽象成了 `[[tech_name]]` / `[[pdk_subdir]]` / `[[lvs_runset_version]]` / `[[qrc_runset_version]]` 占位符，所以直接用这些模板、让 `project.yaml` 填那几个字段就能跑。Calibre 模板还接受 `lvs_variant`（`wodio` / `widio`，默认 `wodio`）和 `connect_by_name`（默认 `false`） 两个 knob，可在 `project.yaml.knobs.calibre.*` 或 `tasks.yaml[i].knobs.calibre.*` 里覆盖。
 
 `tech_name` 还支持**自动推导**：`project.yaml` 里不设 `tech_name` 时，runner 会依次从 `$PDK_TECH_FILE` / `$PDK_LAYER_MAP_FILE` / `$PDK_DISPLAY_FILE` 的父目录名推出来（第一个有值的 env var 生效）。默认候选列表也可以通过 `project.yaml.tech_name_env_vars` 覆盖。推不出来时 `check-env` 会给黄色警告。
 
@@ -425,7 +425,7 @@ runs/
 └── task_<id>/
     └── rendered/
         ├── default.env          (si 用的 si.env)
-        ├── wiodio_noConnectByNetName.qci
+        ├── calibre_lvs.qci
         ├── ext.cmd
         └── default.xml
 ```

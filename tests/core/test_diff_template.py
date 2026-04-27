@@ -144,11 +144,22 @@ def test_render_preserves_other_jinja_placeholders() -> None:
 
 
 def test_compute_toggle_handles_calibre_qci_brace_literals() -> None:
-    """Real-world fixture: the shipped wiodio_noConnectByNetName.qci.j2
-    contains literal Tcl ``{{...}}`` braces; wrapping must not break
-    Jinja parsing."""
-    off = (_REPO_ROOT / "templates" / "calibre" /
-           "wiodio_noConnectByNetName.qci.j2").read_text(encoding="utf-8")
+    """Real-world fixture: the shipped calibre_lvs.qci.j2 contains literal
+    Tcl ``{{...}}`` braces; wrapping must not break Jinja parsing.
+
+    The shipped template now also carries its own ``[% if connect_by_name %]``
+    block (Phase 5.6.3); strip that out first so the test exercises a
+    clean baseline as compute_toggle expects.
+    """
+    raw = (_REPO_ROOT / "templates" / "calibre" /
+           "calibre_lvs.qci.j2").read_text(encoding="utf-8")
+    off_lines = [
+        ln for ln in raw.splitlines(keepends=True)
+        if not ln.startswith("[% if ")
+        and not ln.startswith("[% endif")
+        and "*cmnVConnectNamesState" not in ln
+    ]
+    off = "".join(off_lines)
     # Synthesize an "on" version by adding a connect-by-net-name line.
     lines = off.splitlines(keepends=True)
     insert_idx = None

@@ -15,6 +15,6 @@ env_overrides:
 
 templates:
   si: templates/si/default.env.j2
-  calibre: templates/calibre/wiodio_noConnectByNetName.qci.j2
+  calibre: templates/calibre/calibre_lvs.qci.j2
   quantus: templates/quantus/ext.cmd.j2
   jivaro: templates/jivaro/default.xml.j2

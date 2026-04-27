@@ -1,10 +1,11 @@
 """One-knob editor row for the Templates tab's Knobs page.
 
 Picks a typed widget per :class:`auto_ext.core.manifest.KnobSpec`:
-``QCheckBox`` for bool, ``QLineEdit`` with a numeric validator for
-int/float, plain ``QLineEdit`` for str. A ``[reset]`` button next to
-the widget clears the project-level override so the manifest default
-takes back over; emitting ``None`` is the contract for "no override".
+``QCheckBox`` for bool, ``QComboBox`` when the spec declares ``choices``,
+``QLineEdit`` with a numeric validator for int/float, plain ``QLineEdit``
+for str. A ``[reset]`` button next to the widget clears the project-level
+override so the manifest default takes back over; emitting ``None`` is
+the contract for "no override".
 
 The tab owns the controller stage/save plumbing — this widget only
 emits :pyattr:`value_changed(name, value)` and lets the tab decide
@@ -20,6 +21,7 @@ from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QDoubleValidator, QIntValidator
 from PyQt5.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -50,11 +52,18 @@ class KnobEditor(QWidget):
 
         self._checkbox: QCheckBox | None = None
         self._line: QLineEdit | None = None
+        self._combo: QComboBox | None = None
 
         if spec.type == "bool":
             self._checkbox = QCheckBox(self)
             self._checkbox.toggled.connect(self._on_bool_toggled)
             layout.addWidget(self._checkbox)
+        elif spec.choices is not None:
+            self._combo = QComboBox(self)
+            for choice in spec.choices:
+                self._combo.addItem(str(choice), choice)
+            self._combo.currentIndexChanged.connect(self._on_combo_changed)
+            layout.addWidget(self._combo, stretch=1)
         else:
             self._line = QLineEdit(self)
             self._line.setPlaceholderText("(default)")
@@ -116,6 +125,11 @@ class KnobEditor(QWidget):
         try:
             if self._checkbox is not None:
                 self._checkbox.setChecked(bool(value))
+            elif self._combo is not None:
+                idx = self._combo.findData(value)
+                if idx < 0:
+                    idx = 0
+                self._combo.setCurrentIndex(idx)
             elif self._line is not None:
                 self._line.setText(_fmt(value))
             self._reset_btn.setEnabled(not is_default)
@@ -140,6 +154,11 @@ class KnobEditor(QWidget):
         if self._silent:
             return
         self.value_changed.emit(self._name, bool(checked))
+
+    def _on_combo_changed(self, _index: int) -> None:
+        if self._silent or self._combo is None:
+            return
+        self.value_changed.emit(self._name, self._combo.currentData())
 
     def _on_line_finished(self) -> None:
         if self._silent or self._line is None:

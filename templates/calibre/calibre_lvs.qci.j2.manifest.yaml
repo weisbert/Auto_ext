@@ -1,0 +1,15 @@
+template: calibre_lvs.qci.j2
+description: Calibre LVS runset. lvs_variant picks the rules-file suffix
+  (wodio / widio); connect_by_name toggles *cmnVConnectNamesState ALL.
+knobs:
+  lvs_variant:
+    type: str
+    default: wodio
+    choices: [wodio, widio]
+    description: Calibre LVS rules-file suffix; both variants live under
+      $VERIFY_ROOT/runset/Calibre_QRC/LVS/<lvs_runset_version>/<pdk_subdir>/.
+  connect_by_name:
+    type: bool
+    default: false
+    description: When true, emits *cmnVConnectNamesState ALL so Calibre
+      LVS connects nets by name across the layout.

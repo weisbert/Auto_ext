@@ -190,7 +190,7 @@ extraction_output_dir: "${{WORK_ROOT}}/cds/verify/QCI_PATH_{{cell}}"
 intermediate_dir: "${{WORK_ROOT2}}"
 templates:
   si: {(templates_root / 'si' / 'default.env.j2').as_posix()}
-  calibre: {(templates_root / 'calibre' / 'wiodio_noConnectByNetName.qci.j2').as_posix()}
+  calibre: {(templates_root / 'calibre' / 'calibre_lvs.qci.j2').as_posix()}
   quantus: {(templates_root / 'quantus' / 'ext.cmd.j2').as_posix()}
   jivaro: {(templates_root / 'jivaro' / 'default.xml.j2').as_posix()}
 """,

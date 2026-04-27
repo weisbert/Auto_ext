@@ -51,7 +51,7 @@ def test_happy_path_all_stages_pass(
     # Rendered inputs should exist per task.
     rendered_dir = tmp_path / "project_root" / "runs" / f"task_{tasks[0].task_id}" / "rendered"
     assert (rendered_dir / "default.env").is_file()
-    assert (rendered_dir / "wiodio_noConnectByNetName.qci").is_file()
+    assert (rendered_dir / "calibre_lvs.qci").is_file()
     assert (rendered_dir / "ext.cmd").is_file()
     assert (rendered_dir / "default.xml").is_file()
     # Logs should exist per stage.
@@ -192,7 +192,60 @@ def test_dry_run_renders_but_skips_subprocesses(
     # Renders still happened so templates are exercised without needing bash.
     rendered_dir = tmp_path / "project_root" / "runs" / f"task_{tasks[0].task_id}" / "rendered"
     assert (rendered_dir / "default.env").is_file()
-    assert (rendered_dir / "wiodio_noConnectByNetName.qci").is_file()
+    assert (rendered_dir / "calibre_lvs.qci").is_file()
+
+
+def test_calibre_lvs_default_knobs_render(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+) -> None:
+    """Default knobs: lvs_variant=wodio, connect_by_name=false.
+
+    The rendered .qci must contain the wodio rules-file path and must NOT
+    contain the *cmnVConnectNamesState line.
+    """
+    project, tasks = _load(project_tools_config)
+    run_tasks(
+        project,
+        tasks,
+        stages=["calibre"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        dry_run=True,
+    )
+    rendered = (
+        tmp_path / "project_root" / "runs" / f"task_{tasks[0].task_id}"
+        / "rendered" / "calibre_lvs.qci"
+    ).read_text(encoding="utf-8")
+    assert ".wodio.qcilvs" in rendered
+    assert ".widio.qcilvs" not in rendered
+    assert "*cmnVConnectNamesState" not in rendered
+
+
+def test_calibre_lvs_knob_overrides_flip_render(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+) -> None:
+    """CLI overrides flip both knobs; both effects visible in render."""
+    project, tasks = _load(project_tools_config)
+    run_tasks(
+        project,
+        tasks,
+        stages=["calibre"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        dry_run=True,
+        cli_knobs={"calibre": {"lvs_variant": "widio", "connect_by_name": "true"}},
+    )
+    rendered = (
+        tmp_path / "project_root" / "runs" / f"task_{tasks[0].task_id}"
+        / "rendered" / "calibre_lvs.qci"
+    ).read_text(encoding="utf-8")
+    assert ".widio.qcilvs" in rendered
+    assert ".wodio.qcilvs" not in rendered
+    assert "*cmnVConnectNamesState: ALL" in rendered
 
 
 def test_build_context_surfaces_pdk_fields(project_config) -> None:
