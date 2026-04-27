@@ -239,6 +239,15 @@ def gui(
         "--workarea",
         help="EDA cwd. Defaults to --auto-ext-root parent.",
     ),
+    remember_config: bool = typer.Option(
+        True,
+        "--remember-config/--no-remember-config",
+        help=(
+            "When --config-dir is omitted, auto-load the last config_dir "
+            "from QSettings and persist on every successful load. "
+            "Pass --no-remember-config for one-shot launches."
+        ),
+    ),
 ) -> None:
     """Launch the PyQt5 GUI.
 
@@ -263,6 +272,7 @@ def gui(
         config_dir=config_dir,
         auto_ext_root=auto_ext_root,
         workarea=workarea,
+        remember_config=remember_config,
     )
 
 
