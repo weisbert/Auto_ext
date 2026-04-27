@@ -611,8 +611,20 @@ def _detect_candidates(tool: TOOL, body: str) -> list[Candidate]:
 #                       was *not* rewritten to ``[[employee_id]]`` by the
 #                       quantus pre-pass (e.g. raw si paths).
 _PDK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("pdk_subdir", re.compile(r"\bCF[A-Z0-9]+\b")),
-    ("tech_name", re.compile(r"\bHN[A-Z0-9]+\b")),
+    # pdk_subdir / tech_name use the same shape as runset_version: anchor
+    # the start with a negative lookbehind for word chars, then match
+    # mixed-case alnum + underscore + dot until a path / whitespace /
+    # quote terminator. The earlier `\bCF[A-Z0-9]+\b` form failed on
+    # real-world subdir names like CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9
+    # because `_` is a word char so `\b` could never anchor the right end.
+    (
+        "pdk_subdir",
+        re.compile(r"(?<![A-Za-z0-9_])CF[A-Za-z0-9_.]+?(?=[/\s\"]|$)"),
+    ),
+    (
+        "tech_name",
+        re.compile(r"(?<![A-Za-z0-9_])HN[A-Za-z0-9_.]+?(?=[/\s\"]|$)"),
+    ),
     (
         "runset_version",
         re.compile(r"(?<![A-Za-z0-9_])Ver_[A-Za-z0-9_.]+?(?=[/\s\"]|$)"),

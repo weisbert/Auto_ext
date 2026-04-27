@@ -591,6 +591,40 @@ def test_aggregate_pdk_subdir_requires_multi_tool_agreement(raw_dir: Path) -> No
     assert constants.pdk_subdir == "CFXXX"
 
 
+def test_detect_pdk_tokens_handles_underscored_subdir_name() -> None:
+    """Regression: real-world PDK subdir names contain mixed case + `_` +
+    `.` (e.g. CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9). The earlier
+    `\\bCF[A-Z0-9]+\\b` pattern matched only `CF710` because `_` is a
+    word char so `\\b` could never anchor the right end. The new pattern
+    extends until a path separator / whitespace / quote terminator.
+    """
+    from auto_ext.core.importer import _detect_pdk_tokens
+
+    body = (
+        "*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/"
+        "Ver_Plus_1.0l_0.9/CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9/"
+        "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9.wodio.qcilvs\n"
+    )
+    tokens = _detect_pdk_tokens(body)
+    pdk_values = [t.value for t in tokens if t.category == "pdk_subdir"]
+    assert "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9" in pdk_values
+    # And the runset version still matches as before.
+    runset_values = [t.value for t in tokens if t.category == "runset_version"]
+    assert "Ver_Plus_1.0l_0.9" in runset_values
+
+
+def test_detect_pdk_tokens_handles_underscored_tech_name() -> None:
+    """Same fix applied to tech_name: HN001_v2 should now match in full
+    instead of being truncated to HN001 (or missed entirely when followed
+    by `_`)."""
+    from auto_ext.core.importer import _detect_pdk_tokens
+
+    body = "set tech HN001_v2/CFXXX\n"
+    tokens = _detect_pdk_tokens(body)
+    tech_values = [t.value for t in tokens if t.category == "tech_name"]
+    assert "HN001_v2" in tech_values
+
+
 def test_aggregate_runset_version_split_by_tool_group(raw_dir: Path) -> None:
     from auto_ext.core.importer import aggregate_pdk_tokens
 
