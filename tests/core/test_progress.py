@@ -210,9 +210,13 @@ def test_parallel_per_task_event_sequence_is_ordered(
         pytest.skip("parallel mode requires symlink support")
 
     project, task = _load(project_tools_config)
-    # Build a second task with a different cell so they don't collide.
+    # Build a second task with a different cell so the resolved output_dir
+    # does not collide (default extraction_output_dir keys on {cell}; same
+    # cell with different library would still trip _validate_task_outputs).
     t0 = task[0]
-    t1 = t0.model_copy(update={"task_id": "lib2__inv__layout__schematic", "library": "lib2"})
+    t1 = t0.model_copy(
+        update={"task_id": "WB_PLL_DCO__buf__layout__schematic", "cell": "buf"}
+    )
     tasks = [t0, t1]
     reporter = SpyReporter()
 
