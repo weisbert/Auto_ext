@@ -30,7 +30,8 @@ paths:
   # Directory holding the QRC deck (query_cmd / preserveCellList.txt).
   # No standard env-var convention; replace the literal segments with
   # whichever runset-version + pdk subdir your project uses.
-  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/<runset>/<pdk_subdir>/QCI_deck
+  qrc_deck_dir: 
+    $VERIFY_ROOT/runset/Calibre_QRC/QRC/<runset>/<pdk_subdir>/QCI_deck
 
 # Uncomment and fill in only if ``check-env`` reports a var as "missing":
 # env_overrides:

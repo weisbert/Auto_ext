@@ -20,11 +20,15 @@
 
 - library: TODO_LIBRARY_NAME
   cell: TODO_CELL_NAME
-  lvs_layout_view: layout            # or [layout, layout_test] for both
+  lvs_layout_view: layout
   lvs_source_view: schematic
   ground_net: vss
   out_file: av_ext
   jivaro:
-    enabled: false                   # flip to true once si/calibre/qrc are green
+    enabled: false
     frequency_limit: 14
     error_max: 2
+  continue_on_lvs_fail: false
+  knobs:
+    quantus:
+      exclude_floating_nets_limit: 200
