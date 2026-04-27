@@ -71,6 +71,41 @@ def test_render_jinja_undefined_raises(fixtures_dir: Path) -> None:
         )
 
 
+def test_render_none_value_for_referenced_var_raises(tmp_path: Path) -> None:
+    """A None value for a [[X]] referenced var would silently render
+    as the literal string 'None' (StrictUndefined only catches missing
+    keys, not present-but-None). Catch + raise with a hint pointing at
+    the project.yaml fields users typically forget to set."""
+    tpl = tmp_path / "lvs.qci.j2"
+    tpl.write_text(
+        "*lvsRulesFile: $VERIFY_ROOT/runset/[[lvs_runset_version]]/[[pdk_subdir]]/x.qcilvs\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(TemplateError, match="references.*None.*pdk_subdir"):
+        render_template(
+            tpl,
+            context={"lvs_runset_version": "Ver_Plus_1.0l_0.9", "pdk_subdir": None},
+            env={"VERIFY_ROOT": "/v"},
+        )
+
+
+def test_render_none_value_for_unreferenced_var_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    """None values for vars NOT referenced in the template must not
+    trip the guard — projects can leave optional fields unset without
+    every template needing to reference them."""
+    tpl = tmp_path / "lvs.qci.j2"
+    tpl.write_text("*lvsRulesFile: $VERIFY_ROOT/[[pdk_subdir]]/x\n", encoding="utf-8")
+    out = render_template(
+        tpl,
+        context={"pdk_subdir": "CFXXX", "project_subdir": None, "tech_name": None},
+        env={"VERIFY_ROOT": "/v"},
+    )
+    assert "CFXXX" in out
+    assert "None" not in out
+
+
 def test_render_missing_file(tmp_path: Path) -> None:
     with pytest.raises(TemplateError, match="template not found"):
         render_template(tmp_path / "nope.j2", context={}, env={})

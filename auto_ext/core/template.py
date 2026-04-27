@@ -170,6 +170,22 @@ def render_template(
             )
         merged_context.update(knobs)
 
+    # Catch the silent "None stringifies to 'None'" trap before Jinja
+    # paints "None.None.qcilvs" into a path. StrictUndefined only catches
+    # missing keys; a present-but-None value falls through.
+    referenced = _referenced_jinja_vars(substituted)
+    none_keys = sorted(
+        name for name in referenced
+        if name in merged_context and merged_context[name] is None
+    )
+    if none_keys:
+        raise TemplateError(
+            f"template {template_path} references {none_keys} but the "
+            f"resolved value is None; set the corresponding field(s) in "
+            f"project.yaml (e.g. pdk_subdir, runset_versions.lvs/qrc, "
+            f"tech_name) or task spec before running"
+        )
+
     jenv = _make_jinja_env()
     try:
         template = jenv.from_string(substituted)
@@ -178,6 +194,22 @@ def render_template(
         raise TemplateError(f"undefined Jinja variable in {template_path}: {exc}") from exc
     except TemplateSyntaxError as exc:
         raise TemplateError(f"Jinja syntax error in {template_path}: {exc}") from exc
+
+
+_JINJA_VAR_RE = re.compile(r"\[\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\]")
+
+
+def _referenced_jinja_vars(source: str) -> set[str]:
+    """Names appearing as ``[[name]]`` in template source.
+
+    Catches simple identifier references; ignores filter pipelines and
+    expressions (``[[name|default(...)]]``) since those handle None
+    themselves via the filter. The conservative scope is fine for the
+    None-check guard — false positives would be expressions that
+    deliberately handle None, and they're rare in this project's
+    templates.
+    """
+    return set(_JINJA_VAR_RE.findall(source))
 
 
 def scan_placeholders(template_path: Path) -> PlaceholderInventory:

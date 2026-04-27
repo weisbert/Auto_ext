@@ -558,6 +558,15 @@ def apply_project_edits(raw: Any, edits: dict[str, Any]) -> None:
         raise ConfigError("apply_project_edits: raw CommentedMap is None")
 
     for key, value in edits.items():
+        # Normalize Windows backslashes in template path strings so the
+        # YAML on disk stays POSIX-style regardless of the OS the GUI
+        # was saved on. Mirrors the load-side TemplatePaths validator.
+        if (
+            key.startswith("templates.")
+            and isinstance(value, str)
+            and "\\" in value
+        ):
+            value = value.replace("\\", "/")
         parts = key.split(".")
         if len(parts) == 1:
             if key not in _EDIT_SCALAR_KEYS:

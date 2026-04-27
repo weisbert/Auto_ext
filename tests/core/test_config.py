@@ -194,6 +194,21 @@ def test_apply_project_edits_templates_set(fixtures_dir: Path) -> None:
     assert "calibre: templates/calibre/foo.qci.j2" in dumped
 
 
+def test_apply_project_edits_templates_normalizes_backslashes(
+    fixtures_dir: Path,
+) -> None:
+    """A GUI Save on Windows hands str(Path("templates/si/x.j2")) ==
+    "templates\\si\\x.j2" to apply_project_edits. Force POSIX separators
+    on the YAML side so cross-OS git diffs do not flap and Linux loads
+    cleanly without relying on the load-side validator.
+    """
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(
+        project.raw, {"templates.si": "templates\\si\\default.env.j2"}
+    )
+    assert project.raw["templates"]["si"] == "templates/si/default.env.j2"
+
+
 def test_apply_project_edits_templates_unset_prunes_parent(
     fixtures_dir: Path,
 ) -> None:
