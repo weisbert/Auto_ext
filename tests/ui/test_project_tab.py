@@ -249,10 +249,17 @@ def test_hint_tech_name_no_candidate(monkeypatch) -> None:
     assert "no candidate" in hint
 
 
-def test_hint_pdk_subdir_falls_back_to_no_candidate_message() -> None:
+def test_hint_pdk_subdir_falls_back_to_no_candidate_message(monkeypatch) -> None:
     """pdk_subdir has a default env var chain (calibre_source_added_place);
     when the env is empty, hint surfaces the unresolved-candidates list
-    instead of the legacy "no fallback" string."""
+    instead of the legacy "no fallback" string.
+
+    Scrub shell env explicitly: on developer machines that have already
+    sourced the project setup script, ``$calibre_source_added_place``
+    leaks through resolve_env -> os.environ and the fallback succeeds,
+    masking the assertion.
+    """
+    monkeypatch.delenv("calibre_source_added_place", raising=False)
     hint = _hint_for_field("pdk_subdir", _bare_project(), {})
     assert "no candidate resolved" in hint
     assert "calibre_source_added_place" in hint
@@ -279,10 +286,15 @@ def test_hint_runset_versions_lvs_auto_derived() -> None:
     assert "auto-derived: Ver_Plus_1.0l_0.9" in hint
 
 
-def test_hint_runset_versions_qrc_no_default_env_chain() -> None:
+def test_hint_runset_versions_qrc_no_default_env_chain(monkeypatch) -> None:
     """qrc_runset_version_env_vars defaults to empty (no industry
     convention); hint preserves the legacy "no fallback" message so
-    users know they must fill it manually or extend the chain."""
+    users know they must fill it manually or extend the chain.
+
+    Defensive monkeypatch: even though the chain is empty by default,
+    a future user-customised default would leak shell env without this.
+    """
+    monkeypatch.delenv("calibre_source_added_place", raising=False)
     hint = _hint_for_field("runset_versions.qrc", _bare_project(), {})
     assert "no fallback" in hint
     assert "[[qrc_runset_version]]" in hint
