@@ -54,23 +54,26 @@ def _default_output_dir(controller: ConfigController | None, sub: str) -> Path:
 class IntroPage(QWizardPage):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setTitle("新建 Auto_ext 项目")
+        self.setTitle("New Auto_ext project")
         self.setSubTitle(
-            "本向导基于 auto-ext init-project 命令，从 4 份 raw EDA 导出文件 "
-            "生成 project.yaml + tasks.yaml + 4 个 imported 模板。"
+            "This wizard wraps the auto-ext init-project command: it takes "
+            "4 raw EDA exports and generates project.yaml + tasks.yaml + "
+            "4 imported templates."
         )
 
         layout = QVBoxLayout(self)
         body = QLabel(
-            "<p>开始之前，请准备好以下原始导出：</p>"
+            "<p>Before you start, have the following raw exports ready:</p>"
             "<ul>"
-            "<li><b>Calibre</b> — <code>.qci</code> 文件</li>"
-            "<li><b>si</b> — <code>si.env</code> 文件</li>"
-            "<li><b>Quantus</b> — <code>.cmd</code> 文件</li>"
-            "<li><b>Jivaro</b> — <code>.xml</code> 文件 (可选)</li>"
+            "<li><b>Calibre</b> - <code>.qci</code> file</li>"
+            "<li><b>si</b> - <code>si.env</code> file</li>"
+            "<li><b>Quantus</b> - <code>.cmd</code> file</li>"
+            "<li><b>Jivaro</b> - <code>.xml</code> file (optional)</li>"
             "</ul>"
-            "<p>向导将依次让你选择输出目录、原始文件，预览要生成的内容，"
-            "最后写盘。中途可随时返回上一步修改。</p>"
+            "<p>The wizard will walk you through picking output directories, "
+            "selecting the raw files, previewing what will be generated, and "
+            "finally writing to disk. You can go back to a previous step at "
+            "any point.</p>"
         )
         body.setWordWrap(True)
         layout.addWidget(body)
@@ -84,8 +87,10 @@ class DestinationPage(QWizardPage):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setTitle("选择输出目录")
-        self.setSubTitle("project.yaml + tasks.yaml 与 imported 模板的写盘位置。")
+        self.setTitle("Choose output directories")
+        self.setSubTitle(
+            "Where to write project.yaml + tasks.yaml and the imported templates."
+        )
 
         self._controller = controller
 
@@ -116,7 +121,7 @@ class DestinationPage(QWizardPage):
         form.addRow("output_templates_dir:", tpl_wrap)
 
         self._force_check = QCheckBox(
-            "覆盖已有文件 (.bak 备份)", self
+            "Overwrite existing files (.bak backups)", self
         )
         form.addRow("", self._force_check)
 
@@ -130,7 +135,7 @@ class DestinationPage(QWizardPage):
     def _pick_dir(self, edit: QLineEdit) -> None:
         start = edit.text() or str(Path.home())
         path = QFileDialog.getExistingDirectory(
-            self, "选择目录", start, QFileDialog.ShowDirsOnly
+            self, "Select directory", start, QFileDialog.ShowDirsOnly
         )
         if path:
             edit.setText(path)
@@ -144,8 +149,8 @@ class DestinationPage(QWizardPage):
 class RawFilesPage(QWizardPage):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setTitle("选择原始 EDA 导出")
-        self.setSubTitle("拖放或点击 […] 选择，每个工具一个文件。")
+        self.setTitle("Select raw EDA exports")
+        self.setSubTitle("Drag and drop or click [...] to select; one file per tool.")
 
         root = QVBoxLayout(self)
 
@@ -155,10 +160,10 @@ class RawFilesPage(QWizardPage):
             root, "Quantus (*.cmd)", required=True
         )
         self._jivaro_edit = self._build_row(
-            root, "Jivaro (*.xml, 可选)", required=False
+            root, "Jivaro (*.xml, optional)", required=False
         )
 
-        adv = QGroupBox("Advanced — 身份覆盖 (可选)", self)
+        adv = QGroupBox("Advanced - identity overrides (optional)", self)
         adv.setCheckable(True)
         adv.setChecked(False)
         adv_form = QFormLayout(adv)
@@ -208,7 +213,7 @@ class RawFilesPage(QWizardPage):
         cap = QLabel(label, self)
         cap.setMinimumWidth(140)
         edit = QLineEdit(self)
-        zone = DropZone("拖入文件", self)
+        zone = DropZone("Drop file", self)
         zone.setMaximumHeight(48)
         zone.setMaximumWidth(160)
         zone.path_dropped.connect(lambda p, e=edit: e.setText(str(p)))
@@ -232,7 +237,7 @@ class RawFilesPage(QWizardPage):
     def _pick_file(self, edit: QLineEdit, label: str) -> None:
         start = edit.text() or str(Path.home())
         path, _ = QFileDialog.getOpenFileName(
-            self, f"选择 {label}", start
+            self, f"Select {label}", start
         )
         if path:
             edit.setText(path)
@@ -251,11 +256,11 @@ class RawFilesPage(QWizardPage):
             try:
                 Path(text).read_text(encoding="utf-8")
             except UnicodeDecodeError as exc:
-                self._banner.setText(f"{Path(text).name}: 不是 UTF-8 文件 — {exc}")
+                self._banner.setText(f"{Path(text).name}: not a UTF-8 file - {exc}")
                 self._banner.setVisible(True)
                 return
             except OSError as exc:
-                self._banner.setText(f"{Path(text).name}: 无法读取 — {exc}")
+                self._banner.setText(f"{Path(text).name}: cannot read - {exc}")
                 self._banner.setVisible(True)
                 return
         self._banner.clear()
@@ -279,8 +284,11 @@ class RawFilesPage(QWizardPage):
 class PreviewPage(QWizardPage):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setTitle("预览")
-        self.setSubTitle("检查检测到的身份与即将生成的内容；点击下一步以写盘。")
+        self.setTitle("Preview")
+        self.setSubTitle(
+            "Review the detected identity and the files about to be "
+            "generated; click Next to write to disk."
+        )
 
         self._preview: InitPreview | None = None
         self._error: str | None = None
@@ -295,11 +303,11 @@ class PreviewPage(QWizardPage):
 
         self._tabs = QTabWidget(self)
 
-        # --- Tab 1: 概要 ---
+        # --- Tab 1: Summary ---
         summary_widget = QWidget(self._tabs)
         summary_layout = QVBoxLayout(summary_widget)
 
-        summary_layout.addWidget(QLabel("身份 (跨工具一致):", summary_widget))
+        summary_layout.addWidget(QLabel("Identity (consistent across tools):", summary_widget))
         self._identity_view = QPlainTextEdit(summary_widget)
         self._identity_view.setReadOnly(True)
         self._identity_view.setMaximumHeight(120)
@@ -317,17 +325,17 @@ class PreviewPage(QWizardPage):
         self._unclassified_view.setMaximumHeight(100)
         summary_layout.addWidget(self._unclassified_view)
 
-        summary_layout.addWidget(QLabel("将要写入的文件:", summary_widget))
+        summary_layout.addWidget(QLabel("Files to be written:", summary_widget))
         self._files_tree = QTreeWidget(summary_widget)
-        self._files_tree.setHeaderLabels(["路径", "覆盖?"])
+        self._files_tree.setHeaderLabels(["path", "overwrite?"])
         summary_layout.addWidget(self._files_tree, 1)
 
-        self._tabs.addTab(summary_widget, "概要")
+        self._tabs.addTab(summary_widget, "Summary")
 
-        # --- Tab 2: 生成的 yaml ---
+        # --- Tab 2: Generated YAML ---
         self._yaml_view = QPlainTextEdit(self._tabs)
         self._yaml_view.setReadOnly(True)
-        self._tabs.addTab(self._yaml_view, "生成的 yaml")
+        self._tabs.addTab(self._yaml_view, "Generated YAML")
 
         layout.addWidget(self._tabs, 1)
 
@@ -343,19 +351,19 @@ class PreviewPage(QWizardPage):
         try:
             preview = dry_run(inputs)
         except UnicodeDecodeError as exc:
-            self._error = f"原始文件不是 UTF-8: {exc}"
+            self._error = f"Raw file is not UTF-8: {exc}"
             self._banner.setText(self._error)
             self._banner.setVisible(True)
             self.completeChanged.emit()
             return
         except OSError as exc:
-            self._error = f"无法读取原始文件: {exc}"
+            self._error = f"Could not read raw file: {exc}"
             self._banner.setText(self._error)
             self._banner.setVisible(True)
             self.completeChanged.emit()
             return
         except CoreImportError as exc:
-            self._error = f"导入失败: {exc}"
+            self._error = f"Import failed: {exc}"
             self._banner.setText(self._error)
             self._banner.setVisible(True)
             self.completeChanged.emit()
@@ -365,7 +373,9 @@ class PreviewPage(QWizardPage):
         wiz._preview = preview  # type: ignore[attr-defined]
 
         if preview.conflicts:
-            lines = ["身份冲突 — 请返回上一步用 Advanced overrides 解决:"]
+            lines = [
+                "Identity conflicts - go back and resolve via the Advanced overrides:"
+            ]
             lines.extend(f"  {c}" for c in preview.conflicts)
             self._banner.setText("\n".join(lines))
             self._banner.setVisible(True)
@@ -377,7 +387,7 @@ class PreviewPage(QWizardPage):
     def _render_summary(self, preview: InitPreview) -> None:
         ident = preview.merged_identity
         ident_text = "\n".join(
-            f"{name:>16}: {getattr(ident, name) or '(未检测)'}"
+            f"{name:>16}: {getattr(ident, name) or '(not detected)'}"
             for name in (
                 "cell",
                 "library",
@@ -391,14 +401,14 @@ class PreviewPage(QWizardPage):
 
         c = preview.constants
         const_lines: list[str] = [
-            f"{'tech_name':>20}: {c.tech_name or '(未检测)'}"
+            f"{'tech_name':>20}: {c.tech_name or '(not detected)'}"
         ]
         if c.paths:
             const_lines.append(f"{'paths':>20}:")
             for key in sorted(c.paths):
                 const_lines.append(f"{'':>22}{key}: {c.paths[key]}")
         else:
-            const_lines.append(f"{'paths':>20}: (未检测)")
+            const_lines.append(f"{'paths':>20}: (not detected)")
         self._constants_view.setPlainText("\n".join(const_lines))
 
         if preview.constants.unclassified:
@@ -414,7 +424,7 @@ class PreviewPage(QWizardPage):
         self._files_tree.clear()
         for f in preview.files:
             item = QTreeWidgetItem(
-                [str(f.path), "覆盖 → .bak" if f.will_overwrite else ""]
+                [str(f.path), "overwrite -> .bak" if f.will_overwrite else ""]
             )
             self._files_tree.addTopLevelItem(item)
 
@@ -446,8 +456,8 @@ class PreviewPage(QWizardPage):
 class CommitPage(QWizardPage):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setTitle("写入项目文件")
-        self.setSubTitle("点击下一步开始写盘")
+        self.setTitle("Write project files")
+        self.setSubTitle("Click Next to start writing to disk.")
 
         self.setFinalPage(False)
 
@@ -483,10 +493,10 @@ class CommitPage(QWizardPage):
         cfg = preview.inputs.output_config_dir
         tpl = preview.inputs.output_templates_dir
         self._info_label.setText(
-            f"即将写入 {len(preview.files)} 个文件到:\n"
+            f"About to write {len(preview.files)} files to:\n"
             f"  config: {cfg}\n"
             f"  templates: {tpl}\n\n"
-            f"点击下一步开始。"
+            f"Click Next to begin."
         )
         self.completeChanged.emit()
 
@@ -509,17 +519,17 @@ class CommitPage(QWizardPage):
         try:
             preview: InitPreview | None = getattr(wiz, "_preview", None)
             if preview is None:
-                self._banner.setText("无 preview 状态可写盘。")
+                self._banner.setText("No preview state to write.")
                 self._banner.setVisible(True)
                 return False
             try:
                 commit(preview, progress=self._on_progress)
             except OSError as exc:
-                self._banner.setText(f"写盘失败: {exc}")
+                self._banner.setText(f"Write failed: {exc}")
                 self._banner.setVisible(True)
                 return False
             self._succeeded = True
-            self._on_progress(f"✓ 完成，共写入 {len(preview.files)} 个文件")
+            self._on_progress(f"✓ Done, wrote {len(preview.files)} files")
             return True
         finally:
             self._committing = False
@@ -537,8 +547,8 @@ class CommitPage(QWizardPage):
 class ResultPage(QWizardPage):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setTitle("项目已就绪")
-        self.setSubTitle("生成完成。")
+        self.setTitle("Project ready")
+        self.setSubTitle("Generation complete.")
         self.setFinalPage(True)
 
         layout = QVBoxLayout(self)
@@ -548,18 +558,18 @@ class ResultPage(QWizardPage):
         layout.addWidget(self._summary_label)
 
         self._auto_load_check = QCheckBox(
-            "在主窗口中加载这个新项目", self
+            "Load this new project in the main window", self
         )
         self._auto_load_check.setChecked(True)
         layout.addWidget(self._auto_load_check)
         self.registerField("auto_load", self._auto_load_check)
 
-        layout.addWidget(QLabel("已写入文件:", self))
+        layout.addWidget(QLabel("Files written:", self))
         self._written_view = QPlainTextEdit(self)
         self._written_view.setReadOnly(True)
         layout.addWidget(self._written_view, 1)
 
-        layout.addWidget(QLabel("Unclassified tokens (建议手动复核):", self))
+        layout.addWidget(QLabel("Unclassified tokens (review manually):", self))
         self._unclassified_view = QPlainTextEdit(self)
         self._unclassified_view.setReadOnly(True)
         self._unclassified_view.setMaximumHeight(120)
@@ -571,10 +581,10 @@ class ResultPage(QWizardPage):
             self._summary_label.setText("(no preview)")
             return
         self._summary_label.setText(
-            f"✓ 项目骨架生成成功 — "
-            f"{len(preview.files)} 个文件已写入到 "
-            f"{preview.inputs.output_config_dir} 与 "
-            f"{preview.inputs.output_templates_dir}。"
+            f"✓ Project skeleton generated successfully - "
+            f"{len(preview.files)} files written to "
+            f"{preview.inputs.output_config_dir} and "
+            f"{preview.inputs.output_templates_dir}."
         )
         self._written_view.setPlainText(
             "\n".join(str(f.path) for f in preview.files)
@@ -611,7 +621,7 @@ class InitProjectWizard(QWizard):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("新建 Auto_ext 项目")
+        self.setWindowTitle("New Auto_ext project")
         self.setModal(True)
         self.resize(900, 720)
         self.setOption(QWizard.IndependentPages, False)

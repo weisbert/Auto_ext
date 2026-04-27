@@ -59,7 +59,7 @@ def test_dialog_constructs(qtbot) -> None:
     assert dlg._right_pane.toPlainText() == ""
     assert dlg._left_path is None
     assert dlg._right_path is None
-    assert "拖入" in dlg._status_label.text()
+    assert "Drop two files" in dlg._status_label.text()
 
 
 def test_drop_two_files_shows_side_by_side(qtbot, tmp_path: Path) -> None:
@@ -181,7 +181,7 @@ def test_status_banner_shows_hunk_count(qtbot, tmp_path: Path) -> None:
     _drop_file(dlg._left_zone, a)
     _drop_file(dlg._right_zone, b)
     text = dlg._status_label.text()
-    assert "3 个差异块" in text
+    assert "3 diff blocks" in text
 
 
 def test_non_utf8_file_shows_warning(qtbot, tmp_path: Path, monkeypatch) -> None:
@@ -203,7 +203,7 @@ def test_non_utf8_file_shows_warning(qtbot, tmp_path: Path, monkeypatch) -> None
     assert dlg._left_text == ""
     assert warnings, "expected a QMessageBox.warning to have fired"
     title, body = warnings[-1]
-    assert "编码错误" in title or "UTF-8" in body
+    assert "Encoding error" in title or "UTF-8" in body
 
 
 def test_close_button_closes_dialog(qtbot) -> None:

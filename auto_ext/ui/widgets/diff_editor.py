@@ -88,7 +88,7 @@ class DiffEditorDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(
-            f"Diff toggle 编辑器 — {current_template_path.name}"
+            f"Diff toggle editor - {current_template_path.name}"
         )
         self.setModal(True)
         self.resize(1100, 720)
@@ -201,13 +201,14 @@ class DiffEditorDialog(QDialog):
         self._right_preview.setReadOnly(True)
         self._right_preview.setFont(_mono_font())
         self._right_preview.setPlaceholderText(
-            "右侧将显示套上 toggle 后的模板预览。需要先完成：\n"
-            "  1. 在上方 [On (true)] 区域拖入 on 侧 raw 文件\n"
-            "  2. 在上方 [Off (false)] 区域拖入 off 侧 raw 文件\n"
-            "  3. 在最上方 [Toggle name] 输入框填入 toggle 名称\n"
-            "     (合法：[a-z][a-z0-9_]*，例如 connect_by_net_name)\n\n"
-            "完成后预览自动出现。如有错误（找不到 anchor / 编码错误等），\n"
-            "见下方的状态行。"
+            "Preview of the template after applying the toggle. To populate:\n"
+            "  1. Drop the on-side raw file in the [On (true)] zone above\n"
+            "  2. Drop the off-side raw file in the [Off (false)] zone above\n"
+            "  3. Type a toggle name in the [Toggle name] field\n"
+            "     (must match [a-z][a-z0-9_]*, e.g. connect_by_net_name)\n\n"
+            "The preview appears automatically once the inputs are valid. "
+            "Any errors (anchor not found, encoding error, etc.) show up "
+            "in the status line below."
         )
         self._right_highlighter = JinjaHighlighter(self._right_preview.document())
 
@@ -225,7 +226,7 @@ class DiffEditorDialog(QDialog):
 
         # Allow-existing-toggles checkbox (decision-2-vs-4 relaxed default).
         self._allow_existing_toggles_check = QCheckBox(
-            "允许在已有 [% if %] 块之外插入 (推荐勾选)", self
+            "Allow inserts outside existing [% if %] blocks (recommended)", self
         )
         self._allow_existing_toggles_check.setChecked(True)
         self._allow_existing_toggles_check.toggled.connect(self._recompute)
@@ -241,13 +242,13 @@ class DiffEditorDialog(QDialog):
 
         # Buttons.
         btn_row = QHBoxLayout()
-        self._save_overwrite_btn = QPushButton("覆盖原模板", self)
+        self._save_overwrite_btn = QPushButton("Overwrite template", self)
         self._save_overwrite_btn.clicked.connect(self._on_save_overwrite)
-        self._save_as_btn = QPushButton("另存为…", self)
+        self._save_as_btn = QPushButton("Save as...", self)
         self._save_as_btn.clicked.connect(self._on_save_as)
-        self._save_preset_btn = QPushButton("+ 保存为 preset", self)
+        self._save_preset_btn = QPushButton("+ Save as preset", self)
         self._save_preset_btn.clicked.connect(self._on_save_preset)
-        self._cancel_btn = QPushButton("取消", self)
+        self._cancel_btn = QPushButton("Cancel", self)
         self._cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self._save_overwrite_btn)
         btn_row.addWidget(self._save_as_btn)
@@ -314,13 +315,13 @@ class DiffEditorDialog(QDialog):
         try:
             return path.read_text(encoding="utf-8")
         except OSError as exc:
-            QMessageBox.warning(self, "读取失败", f"无法读取 {path}:\n{exc}")
+            QMessageBox.warning(self, "Read failed", f"Could not read {path}:\n{exc}")
         except UnicodeDecodeError as exc:
             QMessageBox.warning(
-                self, "编码错误",
-                f"{path} 不是 UTF-8 文本（在字节 {exc.start} 处遇到 "
-                f"{exc.reason}）。\n模板文件应是纯文本配置；请确认拖入的"
-                f"是模板而不是二进制 / 输出文件。",
+                self, "Encoding error",
+                f"{path} is not UTF-8 text (byte {exc.start}: {exc.reason}).\n"
+                f"Template files should be plain text; make sure the "
+                f"dropped file is a template, not a binary / output file.",
             )
         return ""
 
@@ -334,11 +335,11 @@ class DiffEditorDialog(QDialog):
         self._update_button_state(error=None)
 
         if not self._on_text or not self._off_text:
-            self._status_label.setText("⓵ 请拖入两个 raw 文件")
+            self._status_label.setText("⓵ Drop two raw files")
             self._status_label.setStyleSheet("color: #888;")
             return
         if not self._toggle_name_edit.text().strip():
-            self._status_label.setText("⓶ 请输入 toggle 名称 ([a-z][a-z0-9_]*)")
+            self._status_label.setText("⓶ Enter a toggle name ([a-z][a-z0-9_]*)")
             self._status_label.setStyleSheet("color: #888;")
             return
         self._recompute()
@@ -385,13 +386,13 @@ class DiffEditorDialog(QDialog):
         self._tint_right_preview(merged, toggle)
 
         existing = detect_existing_toggle_blocks(self._current_template_text)
-        parts = [f"✓ 检测到 {len(toggle.hunks)} 个 hunk(s)"]
+        parts = [f"✓ Detected {len(toggle.hunks)} hunk(s)"]
         if existing:
-            parts.append(f"已有 [% if %] 块: {len(existing)} 个")
+            parts.append(f"Existing [% if %] blocks: {len(existing)}")
         for w in toggle.warnings:
             if isinstance(w, LargeDiffWarning):
                 parts.append(
-                    f"⚠ 差异过大 ({w.change_ratio:.0%}). {w.message}"
+                    f"⚠ Large diff ({w.change_ratio:.0%}). {w.message}"
                 )
             else:
                 parts.append(f"⚠ {w.message}")
@@ -456,17 +457,17 @@ class DiffEditorDialog(QDialog):
             existing = load_manifest(self._current_template_path)
         except ConfigError as exc:
             self._manifest_preview_label.setText(
-                f"manifest 解析失败: {exc}"
+                f"Manifest parse failed: {exc}"
             )
             return
         existing_marker = (
-            "(已存在)" if existing is not None else "(将新建)"
+            "(exists)" if existing is not None else "(will create)"
         )
         default_str = "true" if toggle.on_value else "false"
         desc = self._description_edit.text().strip()
         desc_part = f", description: {desc!r}" if desc else ""
         self._manifest_preview_label.setText(
-            f"Manifest 同步: {sidecar.name} {existing_marker}\n"
+            f"Manifest sync: {sidecar.name} {existing_marker}\n"
             f"  + {toggle.toggle_name}: "
             f"{{type: bool, default: {default_str}{desc_part}}}"
         )
@@ -489,8 +490,9 @@ class DiffEditorDialog(QDialog):
         target = self._current_template_path
         choice = QMessageBox.question(
             self,
-            "覆盖原模板",
-            f"将覆盖 {target.name}（备份保存为 {target.name}.bak）。继续?",
+            "Overwrite template",
+            f"This will overwrite {target.name} (a backup will be saved "
+            f"as {target.name}.bak). Continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -502,7 +504,7 @@ class DiffEditorDialog(QDialog):
                 bak.write_text(self._current_template_text, encoding="utf-8")
             target.write_text(self._merged_for_target, encoding="utf-8")
         except OSError as exc:
-            QMessageBox.critical(self, "保存失败", f"写入 {target} 失败: {exc}")
+            QMessageBox.critical(self, "Save failed", f"Writing {target} failed: {exc}")
             return
         manifest_path, manifest_error = self._sync_manifest(target)
         self._last_outcome = _SaveOutcome(
@@ -513,9 +515,9 @@ class DiffEditorDialog(QDialog):
         )
         if manifest_error:
             QMessageBox.warning(
-                self, "Manifest 同步失败",
-                f"模板已写入 {target}\n但 manifest 更新失败: {manifest_error}\n"
-                f"请手动编辑 {manifest_path_for(target)}",
+                self, "Manifest sync failed",
+                f"Template written to {target}\nbut manifest update failed: {manifest_error}\n"
+                f"Please edit {manifest_path_for(target)} manually.",
             )
         self.accept()
 
@@ -529,7 +531,7 @@ class DiffEditorDialog(QDialog):
             )
         )
         path_str, _ = QFileDialog.getSaveFileName(
-            self, "另存为", str(default_name),
+            self, "Save as", str(default_name),
             "Jinja templates (*.j2);;All files (*.*)",
         )
         if not path_str:
@@ -538,7 +540,7 @@ class DiffEditorDialog(QDialog):
         try:
             target.write_text(self._merged_for_target, encoding="utf-8")
         except OSError as exc:
-            QMessageBox.critical(self, "保存失败", f"写入 {target} 失败: {exc}")
+            QMessageBox.critical(self, "Save failed", f"Writing {target} failed: {exc}")
             return
         manifest_path, manifest_error = self._sync_manifest(target)
         self._last_outcome = _SaveOutcome(
@@ -549,8 +551,8 @@ class DiffEditorDialog(QDialog):
         )
         if manifest_error:
             QMessageBox.warning(
-                self, "Manifest 同步失败",
-                f"模板已写入 {target}\n但 manifest 更新失败: {manifest_error}",
+                self, "Manifest sync failed",
+                f"Template written to {target}\nbut manifest update failed: {manifest_error}",
             )
         self.accept()
 
@@ -559,7 +561,8 @@ class DiffEditorDialog(QDialog):
             return
         if self._auto_ext_root is None:
             QMessageBox.warning(
-                self, "缺少 root", "auto_ext_root 未配置，无法定位 presets 目录"
+                self, "Missing root",
+                "auto_ext_root is not configured; cannot locate presets directory."
             )
             return
         slug, ok = self._prompt_for_preset_slug()
@@ -574,17 +577,17 @@ class DiffEditorDialog(QDialog):
                 applicable_tool=self._bound_tool,
             )
         except (FileExistsError, ValueError) as exc:
-            QMessageBox.warning(self, "Preset 保存失败", str(exc))
+            QMessageBox.warning(self, "Preset save failed", str(exc))
             return
         QMessageBox.information(
-            self, "Preset 已保存",
-            f"已写入 {presets_dir / slug}/",
+            self, "Preset saved",
+            f"Written to {presets_dir / slug}/",
         )
 
     def _prompt_for_preset_slug(self) -> tuple[str, bool]:
         default = (self._toggle.toggle_name if self._toggle else "")
         text, ok = QInputDialog.getText(
-            self, "保存 Preset",
+            self, "Save preset",
             "Slug ([a-z0-9_-]+):", QLineEdit.Normal, default,
         )
         return text.strip(), ok

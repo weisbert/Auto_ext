@@ -120,11 +120,11 @@ class RunTab(QWidget):
         )
         banner_row = QHBoxLayout(self._empty_banner)
         banner_label = QLabel(
-            "ⓘ 还没有加载项目。", self._empty_banner
+            "ⓘ No project loaded yet.", self._empty_banner
         )
-        banner_open_btn = QPushButton("打开现有项目…", self._empty_banner)
+        banner_open_btn = QPushButton("Open existing project...", self._empty_banner)
         banner_open_btn.clicked.connect(self._browse_config_dir)
-        banner_new_btn = QPushButton("新建项目…", self._empty_banner)
+        banner_new_btn = QPushButton("New project...", self._empty_banner)
         banner_new_btn.clicked.connect(self.request_init_wizard.emit)
         banner_row.addWidget(banner_label, 1)
         banner_row.addWidget(banner_open_btn)

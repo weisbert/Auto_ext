@@ -64,7 +64,7 @@ class PresetPickerDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(
-            f"应用 toggle preset — {current_template_path.name}"
+            f"Apply toggle preset - {current_template_path.name}"
         )
         self.setModal(True)
         self.resize(900, 640)
@@ -119,7 +119,7 @@ class PresetPickerDialog(QDialog):
         self._result_view.setFont(_mono_font())
         self._result_view.setMaximumHeight(220)
         self._result_highlighter = JinjaHighlighter(self._result_view.document())
-        root.addWidget(QLabel("套用后预览:", self))
+        root.addWidget(QLabel("Preview after applying:", self))
         root.addWidget(self._result_view)
 
         self._status_label = QLabel("", self)
@@ -128,11 +128,11 @@ class PresetPickerDialog(QDialog):
         root.addWidget(self._status_label)
 
         btn_row = QHBoxLayout()
-        self._save_overwrite_btn = QPushButton("覆盖原模板", self)
+        self._save_overwrite_btn = QPushButton("Overwrite template", self)
         self._save_overwrite_btn.clicked.connect(self._on_save_overwrite)
-        self._save_as_btn = QPushButton("另存为…", self)
+        self._save_as_btn = QPushButton("Save as...", self)
         self._save_as_btn.clicked.connect(self._on_save_as)
-        self._cancel_btn = QPushButton("取消", self)
+        self._cancel_btn = QPushButton("Cancel", self)
         self._cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(self._save_overwrite_btn)
         btn_row.addWidget(self._save_as_btn)
@@ -192,7 +192,7 @@ class PresetPickerDialog(QDialog):
             return
         self._merged_text = merged
         self._result_view.setPlainText(merged)
-        self._status_label.setText("✓ 锚点匹配，可写入")
+        self._status_label.setText("✓ Anchors matched, ready to write")
         self._status_label.setStyleSheet("color: #208020;")
         self._save_overwrite_btn.setEnabled(True)
         self._save_as_btn.setEnabled(True)
@@ -204,8 +204,9 @@ class PresetPickerDialog(QDialog):
             return
         choice = QMessageBox.question(
             self,
-            "覆盖原模板",
-            f"将覆盖 {self._current_template_path.name}（备份 .bak）。继续?",
+            "Overwrite template",
+            f"This will overwrite {self._current_template_path.name} "
+            f"(a .bak backup will be saved). Continue?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -222,8 +223,8 @@ class PresetPickerDialog(QDialog):
             )
         except OSError as exc:
             QMessageBox.critical(
-                self, "保存失败",
-                f"写入 {self._current_template_path} 失败: {exc}",
+                self, "Save failed",
+                f"Writing {self._current_template_path} failed: {exc}",
             )
             return
         manifest_path, manifest_error = self._sync_manifest(
@@ -236,8 +237,8 @@ class PresetPickerDialog(QDialog):
         )
         if manifest_error:
             QMessageBox.warning(
-                self, "Manifest 同步失败",
-                f"模板已写入\n但 manifest 更新失败: {manifest_error}",
+                self, "Manifest sync failed",
+                f"Template was written\nbut manifest update failed: {manifest_error}",
             )
         self.accept()
 
@@ -249,7 +250,7 @@ class PresetPickerDialog(QDialog):
             f"{self._current_preset.name}.j2"
         )
         path_str, _ = QFileDialog.getSaveFileName(
-            self, "另存为", str(default_name),
+            self, "Save as", str(default_name),
             "Jinja templates (*.j2);;All files (*.*)",
         )
         if not path_str:
@@ -258,7 +259,7 @@ class PresetPickerDialog(QDialog):
         try:
             target.write_text(self._merged_text, encoding="utf-8")
         except OSError as exc:
-            QMessageBox.critical(self, "保存失败", f"写入 {target} 失败: {exc}")
+            QMessageBox.critical(self, "Save failed", f"Writing {target} failed: {exc}")
             return
         manifest_path, manifest_error = self._sync_manifest(target)
         self._last_outcome = _ApplyOutcome(
@@ -268,8 +269,8 @@ class PresetPickerDialog(QDialog):
         )
         if manifest_error:
             QMessageBox.warning(
-                self, "Manifest 同步失败",
-                f"模板已写入 {target}\n但 manifest 更新失败: {manifest_error}",
+                self, "Manifest sync failed",
+                f"Template written to {target}\nbut manifest update failed: {manifest_error}",
             )
         self.accept()
 

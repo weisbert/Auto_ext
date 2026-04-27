@@ -83,10 +83,10 @@ def test_main_window_run_tab_banner_button_opens_wizard(
     assert not run_tab._empty_banner.isHidden()
     new_btn = None
     for btn in run_tab._empty_banner.findChildren(QPushButton):
-        if "新建" in btn.text():
+        if "New project" in btn.text():
             new_btn = btn
             break
-    assert new_btn is not None, "新建项目 button missing in empty-state banner"
+    assert new_btn is not None, "New project button missing in empty-state banner"
     new_btn.click()
 
     assert len(opened) == 1

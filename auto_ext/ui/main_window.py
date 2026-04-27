@@ -79,8 +79,8 @@ class MainWindow(QMainWindow):
         if self._controller.is_dirty:
             choice = QMessageBox.question(
                 self,
-                "未保存的修改",
-                "当前项目有未保存的修改，是否先保存？",
+                "Unsaved changes",
+                "The current project has unsaved changes. Save them first?",
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
                 QMessageBox.Save,
             )

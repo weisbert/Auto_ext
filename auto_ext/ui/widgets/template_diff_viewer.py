@@ -48,7 +48,7 @@ class TemplateDiffViewerDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("模板对比 — Template Diff Viewer")
+        self.setWindowTitle("Template Diff Viewer")
         self.setModal(False)
         self.resize(1200, 720)
 
@@ -72,22 +72,22 @@ class TemplateDiffViewerDialog(QDialog):
         zones_row = QHBoxLayout()
 
         left_col = QVBoxLayout()
-        self._left_zone = DropZone("左侧 — 拖入文件", self)
+        self._left_zone = DropZone("Left - drop file here", self)
         self._left_zone.path_dropped.connect(self._on_left_dropped)
-        self._left_path_label = QLabel("(未选择文件)", self)
+        self._left_path_label = QLabel("(no file selected)", self)
         self._left_path_label.setStyleSheet("color: #888; font-family: monospace;")
         left_col.addWidget(self._left_zone)
         left_col.addWidget(self._left_path_label)
 
         self._swap_btn = QPushButton("⇄", self)
-        self._swap_btn.setToolTip("交换左右两侧")
+        self._swap_btn.setToolTip("Swap the left and right sides")
         self._swap_btn.setMaximumWidth(40)
         self._swap_btn.clicked.connect(self._on_swap)
 
         right_col = QVBoxLayout()
-        self._right_zone = DropZone("右侧 — 拖入文件", self)
+        self._right_zone = DropZone("Right - drop file here", self)
         self._right_zone.path_dropped.connect(self._on_right_dropped)
-        self._right_path_label = QLabel("(未选择文件)", self)
+        self._right_path_label = QLabel("(no file selected)", self)
         self._right_path_label.setStyleSheet("color: #888; font-family: monospace;")
         right_col.addWidget(self._right_zone)
         right_col.addWidget(self._right_path_label)
@@ -123,7 +123,7 @@ class TemplateDiffViewerDialog(QDialog):
         self._status_label.setWordWrap(True)
         bottom_row.addWidget(self._status_label, 1)
 
-        self._close_btn = QPushButton("关闭", self)
+        self._close_btn = QPushButton("Close", self)
         self._close_btn.clicked.connect(self.close)
         bottom_row.addWidget(self._close_btn)
         root.addLayout(bottom_row)
@@ -165,13 +165,13 @@ class TemplateDiffViewerDialog(QDialog):
         try:
             return path.read_text(encoding="utf-8")
         except OSError as exc:
-            QMessageBox.warning(self, "读取失败", f"无法读取 {path}:\n{exc}")
+            QMessageBox.warning(self, "Read failed", f"Could not read {path}:\n{exc}")
         except UnicodeDecodeError as exc:
             QMessageBox.warning(
-                self, "编码错误",
-                f"{path} 不是 UTF-8 文本（在字节 {exc.start} 处遇到 "
-                f"{exc.reason}）。\n本工具只支持 UTF-8 文本文件；请确认拖入的"
-                f"是模板而不是二进制文件。",
+                self, "Encoding error",
+                f"{path} is not UTF-8 text (byte {exc.start}: {exc.reason}).\n"
+                f"This tool only supports UTF-8 text files; make sure the "
+                f"dropped file is a template, not a binary.",
             )
         return None
 
@@ -181,10 +181,10 @@ class TemplateDiffViewerDialog(QDialog):
         self._left_path, self._right_path = self._right_path, self._left_path
         self._left_text, self._right_text = self._right_text, self._left_text
         self._left_path_label.setText(
-            str(self._left_path) if self._left_path else "(未选择文件)"
+            str(self._left_path) if self._left_path else "(no file selected)"
         )
         self._right_path_label.setText(
-            str(self._right_path) if self._right_path else "(未选择文件)"
+            str(self._right_path) if self._right_path else "(no file selected)"
         )
         self._refresh_diff()
 
@@ -243,15 +243,15 @@ class TemplateDiffViewerDialog(QDialog):
         self._render_pane(self._right_pane, right_rows)
 
         if not self._left_text and not self._right_text:
-            self._status_label.setText("⓵ 拖入两个文件以查看差异")
+            self._status_label.setText("⓵ Drop two files to view the diff")
         elif not self._left_text or not self._right_text:
-            self._status_label.setText("⓶ 等待另一侧文件...")
+            self._status_label.setText("⓶ Waiting for the other file...")
         elif hunk_count == 0:
-            self._status_label.setText("✓ 两侧内容一致 (0 个差异块)")
+            self._status_label.setText("✓ Both sides identical (0 diff blocks)")
             self._status_label.setStyleSheet("color: #208020; font-size: 12px;")
         else:
             self._status_label.setText(
-                f"ⓘ {diff_lines} 行不同 ({hunk_count} 个差异块)"
+                f"ⓘ {diff_lines} lines differ ({hunk_count} diff blocks)"
             )
             self._status_label.setStyleSheet("color: #555; font-size: 12px;")
 

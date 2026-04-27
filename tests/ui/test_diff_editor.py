@@ -286,7 +286,7 @@ def test_large_diff_warning_surfaces_in_status(qtbot, tmp_path: Path) -> None:
     dlg._toggle_name_edit.setText("k")
     dlg.set_on_text_for_tests(scaf["on"])
     dlg.set_off_text_for_tests(scaf["off"])
-    assert "差异过大" in dlg._status_label.text()
+    assert "Large diff" in dlg._status_label.text()
     # Save buttons stay enabled — large diff is non-fatal.
     assert dlg._save_overwrite_btn.isEnabled() is True
 
@@ -322,4 +322,4 @@ def test_set_off_path_handles_non_utf8_file_gracefully(
     assert dlg._save_overwrite_btn.isEnabled() is False
     assert warnings, "expected a QMessageBox.warning to have fired"
     title, body = warnings[-1]
-    assert "编码错误" in title or "UTF-8" in body
+    assert "Encoding error" in title or "UTF-8" in body

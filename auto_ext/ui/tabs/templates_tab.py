@@ -150,12 +150,22 @@ class TemplatesTab(QWidget):
 
         # Toolbar: free-standing tools that don't depend on any selection.
         toolbar = QHBoxLayout()
-        self._diff_viewer_btn = QPushButton("模板对比…", self)
+        self._diff_viewer_btn = QPushButton("Template Diff Viewer...", self)
         self._diff_viewer_btn.setToolTip(
-            "打开模板对比工具：拖两个 .j2 文件并排查看差异"
+            "Open the template diff tool: drop two .j2 files to view "
+            "them side-by-side"
         )
         self._diff_viewer_btn.clicked.connect(self._on_open_diff_viewer)
         toolbar.addWidget(self._diff_viewer_btn)
+        self._template_generator_btn = QPushButton("Generate Template from Raw...", self)
+        self._template_generator_btn.setToolTip(
+            "Drop one raw EDA export (.qci / si.env / .cmd / .xml) "
+            "and see the parameterized template body"
+        )
+        self._template_generator_btn.clicked.connect(
+            self._on_open_template_generator
+        )
+        toolbar.addWidget(self._template_generator_btn)
         toolbar.addStretch(1)
         root.addLayout(toolbar)
 
@@ -589,6 +599,17 @@ class TemplatesTab(QWidget):
         # Keep a reference so the non-modal dialog isn't garbage-collected
         # the moment this method returns.
         self._diff_viewer_dlg = dlg
+        dlg.show()
+
+    def _on_open_template_generator(self) -> None:
+        # Lazy import for the same reason as the diff viewer above.
+        from auto_ext.ui.widgets.template_generator import (
+            TemplateGeneratorDialog,
+        )
+
+        dlg = TemplateGeneratorDialog(parent=self)
+        # Hold a reference so the non-modal dialog survives this method.
+        self._template_generator_dlg = dlg
         dlg.show()
 
 
