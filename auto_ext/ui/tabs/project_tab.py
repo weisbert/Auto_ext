@@ -259,12 +259,22 @@ class ProjectTab(QWidget):
         # editingFinished from feeding spurious edits back into the
         # controller.
         self._populating = False
+        # Auto-save edits as soon as a field commits (focus-out / Enter /
+        # button click). The explicit Save button stays around for force-
+        # save during run / external-conflict resolution. Tests that want
+        # to inspect the staged-but-unsaved state flip this to False.
+        self._autosave_enabled = True
 
         self._build_ui()
 
         controller.config_loaded.connect(self._on_config_loaded)
         controller.config_error.connect(self._on_config_error)
         controller.dirty_changed.connect(self._on_dirty_changed)
+        # When a run starts/ends, re-evaluate the Save button: dirty
+        # edits made while a run was in flight latched Save in the
+        # disabled state because _on_dirty_changed read is_worker_active()
+        # at toggle time and nobody re-fired the signal afterwards.
+        run_tab.worker_state_changed.connect(self._on_worker_state_changed)
 
         if controller.project is not None:
             self._on_config_loaded(controller.config_dir)
@@ -546,6 +556,7 @@ class ProjectTab(QWidget):
         text = self._fields[key].text().strip()
         value: Any = None if text == "" else text
         self._controller.stage_edits({key: value})
+        self._maybe_autosave()
 
     def _on_path_field_edited(self, key: str) -> None:
         if self._populating:
@@ -559,6 +570,7 @@ class ProjectTab(QWidget):
         # Refresh resolved preview after staging.
         used_by_index = self._collect_used_by_index(self._controller.project)
         self._refresh_path_row(key, used_by_index.get(key, []))
+        self._maybe_autosave()
 
     def _on_add_path_clicked(self) -> None:
         if self._controller.project is None:
@@ -578,6 +590,9 @@ class ProjectTab(QWidget):
                 f"paths.{name} already exists. Edit it directly above.",
             )
             return
+        # Stage the new key with an empty value but DO NOT autosave: an
+        # empty path expression isn't useful on disk, and the row's
+        # editingFinished will autosave once the user actually fills it.
         self._controller.stage_edits({f"paths.{name}": ""})
         used_by_index = self._collect_used_by_index(self._controller.project)
         self._add_path_row(name, "", used_by_index.get(name, []))
@@ -596,6 +611,7 @@ class ProjectTab(QWidget):
                 if isinstance(lbl, QLabel) and lbl.text() == f"{key}:":
                     self._paths_form.removeRow(r)
                     break
+        self._maybe_autosave()
 
     def _browse_path(self, key: str) -> None:
         line = self._fields[key]
@@ -693,11 +709,13 @@ class ProjectTab(QWidget):
         self._controller.stage_edits({f"env_overrides.{name}": text})
         self._refresh_env_table()
         self._refresh_hints()
+        self._maybe_autosave()
 
     def _on_clear_override(self, name: str) -> None:
         self._controller.stage_edits({f"env_overrides.{name}": None})
         self._refresh_env_table()
         self._refresh_hints()
+        self._maybe_autosave()
 
     # ---- save / dirty ------------------------------------------------
 
@@ -731,6 +749,41 @@ class ProjectTab(QWidget):
         running = self._run_tab.is_worker_active()
         self._save_btn.setEnabled(dirty and not running)
         self._revert_btn.setEnabled(dirty)
+
+    def _on_worker_state_changed(self, _running: bool) -> None:
+        """Run started or finished — recompute Save button state.
+
+        Edits staged while a run was in flight left Save disabled (because
+        the worker_active gate). Without this hook the button would stay
+        disabled forever after the run ended (until something else nudged
+        ``dirty_changed``).
+        """
+        self._on_dirty_changed(self._controller.is_dirty)
+
+    def _maybe_autosave(self) -> None:
+        """Auto-save the staged edit if conditions allow.
+
+        Triggered after every staging point (field edit, env-override
+        toggle, paths add/remove). Skips when:
+          - autosave disabled (test-only override via ``_autosave_enabled``)
+          - no edits actually staged (e.g. value unchanged)
+          - a run is in flight (Save would clobber YAML during a run
+            that may be reading templates/output paths from it)
+          - project.yaml changed on disk since load (let the user
+            consciously force-save through the warning dialog)
+
+        The explicit Save button stays around for these skip cases and
+        for users who prefer a keystroke-free workflow.
+        """
+        if not self._autosave_enabled:
+            return
+        if not self._controller.is_dirty:
+            return
+        if self._run_tab.is_worker_active():
+            return
+        if self._controller.has_external_change():
+            return
+        self._controller.save()
 
     def _on_config_error(self, message: str) -> None:
         if self.isVisible():

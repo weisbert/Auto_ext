@@ -67,6 +67,12 @@ class RunTab(QWidget):
     #: Emitted when the empty-state banner's "新建项目" button is clicked.
     #: MainWindow connects this to its ``_open_init_wizard`` slot.
     request_init_wizard = pyqtSignal()
+    #: Emitted whenever a worker is spawned or finishes. Payload is the
+    #: new ``is_worker_active()`` value. ProjectTab listens on this so
+    #: its Save button can re-evaluate its enabled state when the run
+    #: ends — staging an edit while a run is in flight latched Save in
+    #: the disabled state until something else nudged dirty_changed.
+    worker_state_changed = pyqtSignal(bool)
 
     def __init__(
         self, controller: ConfigController, parent: QWidget | None = None
@@ -343,6 +349,7 @@ class RunTab(QWidget):
         self._cancel_btn.setEnabled(True)
         self._reset_status_tree(tasks, stages)
         self._worker.start()
+        self.worker_state_changed.emit(True)
 
     def _cancel_run(self) -> None:
         if self._worker is not None:
@@ -421,6 +428,7 @@ class RunTab(QWidget):
         self._run_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.setText("✕ Cancel")
+        self.worker_state_changed.emit(False)
 
     # ---- stage row click → log switch --------------------------------
 

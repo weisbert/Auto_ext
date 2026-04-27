@@ -20,10 +20,19 @@ from auto_ext.ui.tabs.project_tab import ProjectTab, _hint_for_field  # noqa: E4
 from auto_ext.ui.tabs.run_tab import RunTab  # noqa: E402
 
 
-def _make_tab(qtbot, project_tools_config: Path) -> tuple[ProjectTab, ConfigController]:
+def _make_tab(
+    qtbot, project_tools_config: Path, *, autosave: bool = False
+) -> tuple[ProjectTab, ConfigController]:
+    """Build a ProjectTab + ConfigController for testing.
+
+    ``autosave`` defaults to False so staging-only assertions
+    (``pending_edits == {...}``) keep their pre-autosave semantics.
+    Pass ``autosave=True`` for tests that exercise the auto-save flow.
+    """
     controller = ConfigController()
     run_tab = RunTab(controller)
     tab = ProjectTab(controller, run_tab)
+    tab._autosave_enabled = autosave
     qtbot.addWidget(run_tab)
     qtbot.addWidget(tab)
     controller.load(project_tools_config)
@@ -311,6 +320,121 @@ def test_paths_group_clear_field_stages_none(
     tab._path_fields["calibre_lvs_dir"].setText("")
     tab._on_path_field_edited("calibre_lvs_dir")
     assert controller.pending_edits == {"paths.calibre_lvs_dir": None}
+
+
+# ---- Save button bug fix + auto-save (Phase 5.6.6 / 5.9) -----------------
+
+
+def test_save_button_recovers_after_run_finishes(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Edits staged while a run is in flight latched Save in the disabled
+    state because _on_dirty_changed read is_worker_active() at toggle
+    time and nobody re-fired the signal afterwards. RunTab now emits
+    worker_state_changed; ProjectTab re-evaluates its Save button on
+    that signal."""
+    tab, controller = _make_tab(qtbot, project_tools_config, autosave=False)
+
+    # Pretend a run is in flight: monkey-patch is_worker_active to True
+    # for the duration of the edit, then flip it False and emit the
+    # signal as RunTab._on_worker_done would.
+    run_tab = tab._run_tab
+
+    worker_active = {"value": True}
+    run_tab.is_worker_active = lambda: worker_active["value"]  # type: ignore[method-assign]
+
+    tab._fields["tech_name"].setText("HN_DURING_RUN")
+    tab._on_field_edited("tech_name")
+    assert controller.is_dirty is True
+    # During run: Save grey because of the gate.
+    assert tab._save_btn.isEnabled() is False
+
+    # Run finishes: worker active flips False, RunTab emits the signal.
+    worker_active["value"] = False
+    run_tab.worker_state_changed.emit(False)
+
+    # Save button should now be enabled — this is the bug fix.
+    assert tab._save_btn.isEnabled() is True
+
+
+def test_field_edit_autosaves_when_no_run(
+    qtbot, project_tools_config: Path
+) -> None:
+    tab, controller = _make_tab(qtbot, project_tools_config, autosave=True)
+    tab._fields["tech_name"].setText("HN_AUTOSAVED")
+    tab._on_field_edited("tech_name")
+    # Auto-save flushed the edit through controller.save() → load()
+    # cycle, so dirty is back to False and pending_edits is empty.
+    assert controller.is_dirty is False
+    assert controller.pending_edits == {}
+    # Project model + on-disk file both reflect the new value.
+    assert controller.project.tech_name == "HN_AUTOSAVED"
+    on_disk = (project_tools_config / "project.yaml").read_text(encoding="utf-8")
+    assert "tech_name: HN_AUTOSAVED" in on_disk
+
+
+def test_path_edit_autosaves(qtbot, project_tools_config: Path) -> None:
+    tab, controller = _make_tab(qtbot, project_tools_config, autosave=True)
+    tab._path_fields["calibre_lvs_dir"].setText(
+        "$calibre_source_added_place|parent|parent"
+    )
+    tab._on_path_field_edited("calibre_lvs_dir")
+    assert controller.is_dirty is False
+    assert (
+        controller.project.paths["calibre_lvs_dir"]
+        == "$calibre_source_added_place|parent|parent"
+    )
+
+
+def test_remove_path_autosaves(qtbot, project_tools_config: Path) -> None:
+    tab, controller = _make_tab(qtbot, project_tools_config, autosave=True)
+    assert "qrc_deck_dir" in controller.project.paths
+    tab._on_remove_path_clicked("qrc_deck_dir")
+    assert controller.is_dirty is False
+    assert "qrc_deck_dir" not in controller.project.paths
+
+
+def test_env_override_autosaves(qtbot, project_tools_config: Path) -> None:
+    tab, controller = _make_tab(qtbot, project_tools_config, autosave=True)
+    tab._controller.stage_edits({})  # no-op, just to mirror real flow
+    # Simulate the override path manually since it goes through QInputDialog;
+    # call _on_clear_override which is the simpler entry point.
+    assert "WORK_ROOT" in controller.project.env_overrides
+    tab._on_clear_override("WORK_ROOT")
+    assert controller.is_dirty is False
+    assert "WORK_ROOT" not in controller.project.env_overrides
+
+
+def test_field_edit_does_not_autosave_during_run(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Auto-save respects the worker_active gate — staged edits during
+    a run accumulate in pending_edits instead of triggering save()."""
+    tab, controller = _make_tab(qtbot, project_tools_config, autosave=True)
+    tab._run_tab.is_worker_active = lambda: True  # type: ignore[method-assign]
+
+    tab._fields["tech_name"].setText("HN_DURING_RUN")
+    tab._on_field_edited("tech_name")
+    # Edit was staged but not flushed.
+    assert controller.is_dirty is True
+    assert controller.pending_edits == {"tech_name": "HN_DURING_RUN"}
+
+
+def test_field_edit_does_not_autosave_on_external_conflict(
+    qtbot, project_tools_config: Path
+) -> None:
+    """If project.yaml has changed on disk since load, auto-save bails
+    out so the user has to consciously force-save through the warning
+    dialog (no silent overwrite)."""
+    tab, controller = _make_tab(qtbot, project_tools_config, autosave=True)
+    # Simulate external mtime drift.
+    tab._controller.has_external_change = lambda: True  # type: ignore[method-assign]
+
+    tab._fields["tech_name"].setText("HN_NEW")
+    tab._on_field_edited("tech_name")
+    # Edit was staged but not flushed.
+    assert controller.is_dirty is True
+    assert controller.pending_edits == {"tech_name": "HN_NEW"}
 
 
 def test_placeholder_updates_after_env_override(
