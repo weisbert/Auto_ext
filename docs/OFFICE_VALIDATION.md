@@ -16,10 +16,18 @@
 ```bash
 cd /data/RFIC3/<Project>/<Employee ID>/workarea/Auto_ext_pro
 git pull
-python3.11 -m pytest tests/ -q
+./run.sh test                       # 跑 tests/ 全集
+./run.sh test tests/core -k progress  # 也接受 pytest 任意参数
 ```
 
-**预期**：当前 main 是 **564 绿 + 10 skip**（Linux 上 symlink 测试能跑，会再多 9 个绿 → 573 绿）。
+**预期**：当前 main 是 **574 绿**（Linux 上 symlink 测试能跑、UI 测试也能跑，没有 skip）。
+
+`./run.sh test` 自动做了：
+- `cd workarea`
+- 把 PyQt5 自带的 Qt5/lib 塞到 `LD_LIBRARY_PATH` 最前（绕开 CentOS 7 libstdc++ 太旧导致 `_ZdaPvm` 缺失的问题，否则 pytest-qt plugin 在启动阶段就 INTERNALERROR）
+- `exec python -m pytest` + 透传你给的参数
+
+不走 `./run.sh test` 而直接 `python3.11 -m pytest tests/`，会被 pytest-qt 的 PyQt5 import 卡死在 `pytest_configure` 阶段。
 
 如果数字明显偏低 → **停下来**先查哪条失败，不要带着失败的测试去碰真 EDA。
 

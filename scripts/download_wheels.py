@@ -121,9 +121,17 @@ def _run_pip_download(requirements: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
+#: Files this script generates (or that are otherwise expected to live
+#: alongside wheels) and must NOT be flagged by the sdist-fallback audit.
+_AUDIT_IGNORE_NAMES: frozenset[str] = frozenset({"MANIFEST.txt", ".gitkeep"})
+
+
 def _audit_wheels_dir() -> list[Path]:
     artifacts = sorted(p for p in WHEELS_DIR.iterdir() if p.is_file())
-    non_wheel = [p for p in artifacts if p.suffix != ".whl"]
+    non_wheel = [
+        p for p in artifacts
+        if p.suffix != ".whl" and p.name not in _AUDIT_IGNORE_NAMES
+    ]
     if non_wheel:
         joined = ", ".join(p.name for p in non_wheel)
         raise SystemExit(
