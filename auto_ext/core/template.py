@@ -218,6 +218,27 @@ class VarReference:
 _VAR_REFERENCE_LINE_RE = re.compile(r"\[\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\]")
 
 
+def enumerate_stage_templates(
+    auto_ext_root: Path | None, stage: str
+) -> list[Path]:
+    """Return all ``*.j2`` files under ``<auto_ext_root>/templates/<stage>/``.
+
+    Used by the Project / Tasks tab template pickers. Returns absolute
+    paths, sorted lexicographically. Empty when ``auto_ext_root`` is
+    ``None`` or the stage subdirectory doesn't exist — callers fall
+    back to "no choices" gracefully.
+
+    Manifest sidecars (``*.j2.manifest.yaml``) are filtered out by the
+    glob; only ``.j2`` template files come back.
+    """
+    if auto_ext_root is None:
+        return []
+    stage_dir = auto_ext_root / "templates" / stage
+    if not stage_dir.is_dir():
+        return []
+    return sorted(p for p in stage_dir.glob("*.j2") if p.is_file())
+
+
 def collect_var_references(
     template_paths: list[Path], *, excerpt_max: int = 80
 ) -> list[VarReference]:

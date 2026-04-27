@@ -12,6 +12,7 @@ from auto_ext.core.template import (
     PlaceholderInventory,
     VarReference,
     collect_var_references,
+    enumerate_stage_templates,
     render_template,
     resolve_template_path,
     scan_placeholders,
@@ -380,3 +381,40 @@ def test_collect_var_references_handles_whitespace_inside_brackets(
     refs = collect_var_references([tpl])
     assert len(refs) == 1
     assert refs[0].var_name == "name"
+
+
+# ---- enumerate_stage_templates --------------------------------------------
+
+
+def test_enumerate_stage_templates_returns_j2_files(tmp_path: Path) -> None:
+    stage_dir = tmp_path / "templates" / "quantus"
+    stage_dir.mkdir(parents=True)
+    (stage_dir / "ext.cmd.j2").write_text("a", encoding="utf-8")
+    (stage_dir / "dspf.cmd.j2").write_text("b", encoding="utf-8")
+    # Manifest sidecar must NOT be returned.
+    (stage_dir / "ext.cmd.j2.manifest.yaml").write_text("knobs: {}\n", encoding="utf-8")
+    out = enumerate_stage_templates(tmp_path, "quantus")
+    names = [p.name for p in out]
+    assert names == ["dspf.cmd.j2", "ext.cmd.j2"]  # sorted
+
+
+def test_enumerate_stage_templates_missing_dir_returns_empty(tmp_path: Path) -> None:
+    assert enumerate_stage_templates(tmp_path, "stage_that_does_not_exist") == []
+
+
+def test_enumerate_stage_templates_none_root_returns_empty() -> None:
+    assert enumerate_stage_templates(None, "quantus") == []
+
+
+def test_enumerate_stage_templates_skips_subdirs(tmp_path: Path) -> None:
+    """Sub-folders under templates/<stage>/ aren't recursed; only direct
+    .j2 files at the top level."""
+    stage_dir = tmp_path / "templates" / "calibre"
+    stage_dir.mkdir(parents=True)
+    (stage_dir / "top.j2").write_text("x", encoding="utf-8")
+    nested = stage_dir / "subdir"
+    nested.mkdir()
+    (nested / "nested.j2").write_text("y", encoding="utf-8")
+    out = enumerate_stage_templates(tmp_path, "calibre")
+    names = [p.name for p in out]
+    assert names == ["top.j2"]

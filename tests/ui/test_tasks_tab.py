@@ -18,8 +18,10 @@ from auto_ext.ui.tabs.run_tab import RunTab  # noqa: E402
 from auto_ext.ui.tabs.tasks_tab import TasksTab  # noqa: E402
 
 
-def _make_tab(qtbot, config_dir: Path) -> tuple[TasksTab, ConfigController]:
-    controller = ConfigController()
+def _make_tab(
+    qtbot, config_dir: Path, *, auto_ext_root: Path | None = None
+) -> tuple[TasksTab, ConfigController]:
+    controller = ConfigController(auto_ext_root=auto_ext_root)
     run_tab = RunTab(controller)
     tab = TasksTab(controller, run_tab)
     qtbot.addWidget(run_tab)
@@ -484,3 +486,110 @@ def test_per_task_knobs_isolation_across_specs(qtbot, tmp_path: Path) -> None:
     # Switch to spec 1 (no task knobs) → fold.
     tab._spec_list.setCurrentRow(1)
     assert tab._knobs_box.isChecked() is False
+
+
+# ---- Per-task Templates ComboBox (Phase 5.x — A half) --------------------
+
+
+def _templates_config(tmp_path: Path) -> tuple[Path, Path]:
+    """Build a config_dir + auto_ext_root with two quantus templates so
+    the per-stage ComboBox has a real choice to switch between."""
+    root = tmp_path
+    templates = root / "templates" / "quantus"
+    templates.mkdir(parents=True)
+    (templates / "ext.cmd.j2").write_text("ext placeholder\n", encoding="utf-8")
+    (templates / "ext.cmd.j2.manifest.yaml").write_text(
+        "template: ext.cmd.j2\nknobs: {}\n", encoding="utf-8"
+    )
+    (templates / "dspf.cmd.j2").write_text("dspf placeholder\n", encoding="utf-8")
+    (templates / "dspf.cmd.j2.manifest.yaml").write_text(
+        "template: dspf.cmd.j2\nknobs: {}\n", encoding="utf-8"
+    )
+
+    cfg = root / "config"
+    cfg.mkdir()
+    (cfg / "project.yaml").write_text(
+        "templates:\n  quantus: templates/quantus/ext.cmd.j2\n",
+        encoding="utf-8",
+    )
+    (cfg / "tasks.yaml").write_text(
+        "- library: L\n  cell: A\n  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    return cfg, root
+
+
+def test_per_task_templates_combo_lists_both(qtbot, tmp_path: Path) -> None:
+    cfg, root = _templates_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg, auto_ext_root=root)
+    quantus = tab._template_combos["quantus"]
+    items = [quantus.itemText(i) for i in range(quantus.count())]
+    # Index 0 is the "(default: <project value>)" sentinel.
+    assert items[0].startswith("(default:")
+    assert "templates/quantus/ext.cmd.j2" in items[0]
+    assert "ext.cmd.j2" in items
+    assert "dspf.cmd.j2" in items
+
+
+def test_per_task_template_override_mutates_spec(qtbot, tmp_path: Path) -> None:
+    cfg, root = _templates_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg, auto_ext_root=root)
+    quantus = tab._template_combos["quantus"]
+    idx = quantus.findData("templates/quantus/dspf.cmd.j2")
+    assert idx >= 0
+    quantus.setCurrentIndex(idx)
+    spec = tab._current_spec()
+    assert spec is not None
+    assert spec["templates"]["quantus"] == "templates/quantus/dspf.cmd.j2"
+
+
+def test_per_task_template_clear_falls_back_to_project(
+    qtbot, tmp_path: Path
+) -> None:
+    cfg, root = _templates_config(tmp_path)
+    # Pre-seed a per-task override in tasks.yaml, then clear via the GUI.
+    (cfg / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  templates:\n"
+        "    quantus: templates/quantus/dspf.cmd.j2\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, cfg, auto_ext_root=root)
+    # Verify the override was loaded.
+    assert tab._current_spec()["templates"]["quantus"] == (
+        "templates/quantus/dspf.cmd.j2"
+    )
+    # Clear button → fall back to project default.
+    tab._on_task_template_clear("quantus")
+    spec = tab._current_spec()
+    # 'templates' key gets pruned when no overrides remain.
+    assert "templates" not in spec or spec["templates"].get("quantus") is None
+
+
+def test_per_task_template_auto_expands_when_override_exists(
+    qtbot, tmp_path: Path
+) -> None:
+    """A spec carrying a templates.<stage> override should land with
+    the Templates collapsible group already expanded so the user sees
+    the override without hunting for the toggle."""
+    cfg, root = _templates_config(tmp_path)
+    (cfg / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  templates:\n"
+        "    quantus: templates/quantus/dspf.cmd.j2\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, cfg, auto_ext_root=root)
+    assert tab._templates_box.isChecked() is True
+
+
+def test_per_task_template_starts_folded_when_no_overrides(
+    qtbot, tmp_path: Path
+) -> None:
+    cfg, root = _templates_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg, auto_ext_root=root)
+    assert tab._templates_box.isChecked() is False

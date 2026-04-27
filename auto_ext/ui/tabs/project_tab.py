@@ -25,8 +25,10 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QBrush, QColor, QFont
 from PyQt5.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -54,6 +56,7 @@ from auto_ext.core.runner import _discover_env_vars
 from auto_ext.core.template import (
     VarReference,
     collect_var_references,
+    enumerate_stage_templates,
     resolve_template_path,
 )
 from auto_ext.ui.config_controller import ConfigController
@@ -77,6 +80,10 @@ _FIELDS: list[tuple[str, str, str]] = [
 
 _DIR_FIELDS = {"work_root", "verify_root", "setup_root"}
 _FILE_FIELDS = {"layer_map"}
+
+#: Stages whose ``templates.<stage>`` slot is editable in the Templates
+#: ComboBox group. Mirrors :class:`TemplatePaths` fields.
+_TEMPLATE_STAGES: tuple[str, ...] = ("si", "calibre", "quantus", "jivaro")
 
 #: form_key → shell env-var the field shadows. Identity fields fall through
 #: to ``$<VAR>`` from the resolved env (overrides → shell) at runtime.
@@ -344,11 +351,34 @@ class ProjectTab(QWidget):
         self._paths_form.addRow(paths_btn_row)
         root.addWidget(paths_box)
 
-        templates_box = QGroupBox("Templates (read-only; editor lands in 5.5)", self)
+        # Templates group: per-stage ComboBox listing all *.j2 files
+        # under <auto_ext_root>/templates/<stage>/. Selection-change
+        # stages templates.<stage> and triggers autosave (same model
+        # as the other Project fields).
+        templates_box = QGroupBox("Templates", self)
         tform = QFormLayout(templates_box)
-        self._templates_summary = QLabel("(no config)", self)
-        self._templates_summary.setStyleSheet("font-family: monospace; color: #666;")
-        tform.addRow("templates:", self._templates_summary)
+        self._template_combos: dict[str, QComboBox] = {}
+        for stage in _TEMPLATE_STAGES:
+            row_widget = QWidget(self)
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            combo = QComboBox(row_widget)
+            combo.setMinimumContentsLength(40)
+            combo.currentIndexChanged.connect(
+                lambda _idx, s=stage: self._on_template_combo_changed(s)
+            )
+            self._template_combos[stage] = combo
+            row_layout.addWidget(combo, stretch=1)
+            clear_btn = QPushButton("×", row_widget)
+            clear_btn.setMaximumWidth(28)
+            clear_btn.setToolTip(
+                f"Clear project default for {stage} (template will be unset)"
+            )
+            clear_btn.clicked.connect(
+                lambda _=False, s=stage: self._on_template_clear_clicked(s)
+            )
+            row_layout.addWidget(clear_btn)
+            tform.addRow(QLabel(f"{stage}:", self), row_widget)
         root.addWidget(templates_box)
 
         env_box = QGroupBox("Environment resolution", self)
@@ -394,17 +424,7 @@ class ProjectTab(QWidget):
                 self._original_values[key] = value
 
             self._rebuild_paths_rows(project)
-
-            if project is None:
-                self._templates_summary.setText("(no config)")
-            else:
-                t = project.templates
-                self._templates_summary.setText(
-                    "\n".join(
-                        f"{name}={getattr(t, name) or '—'}"
-                        for name in ("si", "calibre", "quantus", "jivaro")
-                    )
-                )
+            self._rebuild_template_combos(project)
 
             self._refresh_env_table()
             self._refresh_hints()
@@ -413,6 +433,73 @@ class ProjectTab(QWidget):
             self._on_dirty_changed(self._controller.is_dirty)
         finally:
             self._populating = False
+
+    def _rebuild_template_combos(self, project: ProjectConfig | None) -> None:
+        """Populate each per-stage ComboBox with the available
+        ``templates/<stage>/*.j2`` files plus a blank "(unset)" option.
+
+        Selection is set to the project's current value if it exists in
+        the enumerated list. If the current value is a path outside the
+        standard layout (absolute, custom location, etc.) it's added as
+        a synthetic "[custom] <path>" entry so the user can see what's
+        bound today and switch back deliberately.
+
+        Items store the canonical relative path string in ``userData``
+        — that's what gets staged into ``templates.<stage>``.
+        """
+        auto_ext_root = self._controller.auto_ext_root
+        for stage in _TEMPLATE_STAGES:
+            combo = self._template_combos[stage]
+            combo.blockSignals(True)
+            try:
+                combo.clear()
+                # Index 0 = "(unset)" — clearing the field via combo, in
+                # addition to the explicit × button.
+                combo.addItem("(unset)", userData=None)
+                if project is None:
+                    combo.setCurrentIndex(0)
+                    continue
+                current = getattr(project.templates, stage, None)
+                current_str = (
+                    str(current).replace("\\", "/") if current is not None else None
+                )
+                seen_canonical: set[str] = set()
+                for tpl_path in enumerate_stage_templates(auto_ext_root, stage):
+                    rel = tpl_path
+                    if auto_ext_root is not None:
+                        try:
+                            rel = tpl_path.relative_to(auto_ext_root)
+                        except ValueError:
+                            pass
+                    canonical = str(rel).replace("\\", "/")
+                    combo.addItem(tpl_path.name, userData=canonical)
+                    seen_canonical.add(canonical)
+                    combo.setItemData(
+                        combo.count() - 1, str(tpl_path), Qt.ToolTipRole
+                    )
+                # Current value not in standard dir → synthetic [custom] entry.
+                if current_str is not None and current_str not in seen_canonical:
+                    combo.addItem(f"[custom] {current_str}", userData=current_str)
+                # Select the current value, defaulting to (unset).
+                idx = combo.findData(current_str) if current_str else 0
+                combo.setCurrentIndex(idx if idx >= 0 else 0)
+            finally:
+                combo.blockSignals(False)
+
+    def _on_template_combo_changed(self, stage: str) -> None:
+        if self._populating:
+            return
+        combo = self._template_combos[stage]
+        value = combo.currentData()
+        # value is None for the "(unset)" sentinel; empty string would be
+        # invalid here, treat both as a delete.
+        edit: Any = None if not value else value
+        self._controller.stage_edits({f"templates.{stage}": edit})
+        self._maybe_autosave()
+
+    def _on_template_clear_clicked(self, stage: str) -> None:
+        combo = self._template_combos[stage]
+        combo.setCurrentIndex(0)  # triggers _on_template_combo_changed → stage None
 
     def _rebuild_paths_rows(self, project: ProjectConfig | None) -> None:
         """Tear down any existing per-path widgets and rebuild from

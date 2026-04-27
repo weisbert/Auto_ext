@@ -54,7 +54,7 @@ from auto_ext.core.manifest import (
     current_knob_value,
     load_manifest,
 )
-from auto_ext.core.template import resolve_template_path
+from auto_ext.core.template import enumerate_stage_templates, resolve_template_path
 from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import EXCLUDED_ROW_COLOR
 from auto_ext.ui.widgets.knob_editor import KnobEditor
@@ -257,6 +257,53 @@ class TasksTab(QWidget):
         jivaro_form.addRow("error_max:", self._jivaro_err)
         self._editor_layout.addWidget(jivaro_box)
 
+        # Per-task template overrides. The project layer's
+        # ``templates.<stage>`` is the default; setting one here makes
+        # this spec render that stage with a different .j2. Common use:
+        # one task needs the ``dspf.cmd.j2`` post-layout SPICE flow
+        # while the rest of the project uses ``ext.cmd.j2``.
+        templates_box = QGroupBox(
+            "templates (per-task overrides)", self._editor_body
+        )
+        templates_box.setCheckable(True)
+        templates_box.setChecked(False)
+        templates_box.setToolTip(
+            "Per-stage template path overrides on top of the project default.\n"
+            "Pick a different *.j2 from <auto_ext_root>/templates/<stage>/\n"
+            "to switch this task off the project default. Clear back to\n"
+            "(default: …) to fall back."
+        )
+        tb_outer = QVBoxLayout(templates_box)
+        self._templates_form_host = QWidget(templates_box)
+        templates_form = QFormLayout(self._templates_form_host)
+        self._template_combos: dict[str, QComboBox] = {}
+        for stage in _KNOB_STAGES:
+            row_widget = QWidget(self._templates_form_host)
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            combo = QComboBox(row_widget)
+            combo.setMinimumContentsLength(40)
+            combo.currentIndexChanged.connect(
+                lambda _idx, s=stage: self._on_task_template_changed(s)
+            )
+            self._template_combos[stage] = combo
+            row_layout.addWidget(combo, stretch=1)
+            clear_btn = QPushButton("×", row_widget)
+            clear_btn.setMaximumWidth(28)
+            clear_btn.setToolTip(
+                f"Clear per-task override for {stage} (fall back to project default)"
+            )
+            clear_btn.clicked.connect(
+                lambda _=False, s=stage: self._on_task_template_clear(s)
+            )
+            row_layout.addWidget(clear_btn)
+            templates_form.addRow(QLabel(f"{stage}:", self._templates_form_host), row_widget)
+        tb_outer.addWidget(self._templates_form_host)
+        self._templates_form_host.setVisible(False)
+        templates_box.toggled.connect(self._templates_form_host.setVisible)
+        self._templates_box = templates_box
+        self._editor_layout.addWidget(templates_box)
+
         # Per-task knob overrides — fold by default. Knobs are usually
         # tuned at the project layer; this section is for "this task
         # needs different values than the rest of the project".
@@ -429,6 +476,7 @@ class TasksTab(QWidget):
             self._jivaro_err.setText(_fmt_num(j.get("error_max")))
 
             self._rebuild_override_table(spec)
+            self._rebuild_template_combos(spec)
             self._rebuild_knobs_form(spec)
         finally:
             self._populating = False
@@ -445,6 +493,12 @@ class TasksTab(QWidget):
             self._jivaro_freq.setText("")
             self._jivaro_err.setText("")
             self._override_table.setRowCount(0)
+            for combo in self._template_combos.values():
+                combo.blockSignals(True)
+                try:
+                    combo.clear()
+                finally:
+                    combo.blockSignals(False)
             self._clear_knobs_form()
         finally:
             self._populating = False
@@ -530,6 +584,109 @@ class TasksTab(QWidget):
             if w is not None:
                 w.deleteLater()
         self._task_knob_editors.clear()
+
+    def _rebuild_template_combos(self, spec: dict[str, Any]) -> None:
+        """Populate each per-stage ComboBox with the standard templates
+        plus the project's effective default and any custom override.
+
+        Item 0 is always ``(default: <project_value>)`` storing
+        ``userData=None`` — selecting it stages a delete on the spec's
+        per-task override so this stage falls back to the project layer.
+        Other items list the available *.j2 files in
+        ``<auto_ext_root>/templates/<stage>/``. The current selection is
+        whichever matches the spec's existing override (if any) or
+        index 0 (project default).
+        """
+        project = self._controller.project
+        spec_tp = spec.get("templates") or {}
+        # Auto-fold: any per-task override → expand the section.
+        has_overrides = any(spec_tp.get(s) for s in _KNOB_STAGES)
+        if self._templates_box.isChecked() != has_overrides:
+            self._templates_box.blockSignals(True)
+            try:
+                self._templates_box.setChecked(has_overrides)
+                self._templates_form_host.setVisible(has_overrides)
+            finally:
+                self._templates_box.blockSignals(False)
+
+        auto_ext_root = self._controller.auto_ext_root
+        for stage in _KNOB_STAGES:
+            combo = self._template_combos[stage]
+            combo.blockSignals(True)
+            try:
+                combo.clear()
+                project_default = (
+                    getattr(project.templates, stage, None)
+                    if project is not None
+                    else None
+                )
+                # Display POSIX style — matches what's stored in
+                # project.yaml + what the user wrote, regardless of host
+                # OS Path separator.
+                default_label = (
+                    f"(default: {str(project_default).replace(chr(92), '/')})"
+                    if project_default
+                    else "(default: <unset>)"
+                )
+                combo.addItem(default_label, userData=None)
+                seen_canonical: set[str] = set()
+                for tpl_path in enumerate_stage_templates(auto_ext_root, stage):
+                    rel = tpl_path
+                    if auto_ext_root is not None:
+                        try:
+                            rel = tpl_path.relative_to(auto_ext_root)
+                        except ValueError:
+                            pass
+                    canonical = str(rel).replace("\\", "/")
+                    combo.addItem(tpl_path.name, userData=canonical)
+                    seen_canonical.add(canonical)
+                    combo.setItemData(
+                        combo.count() - 1, str(tpl_path), Qt.ToolTipRole
+                    )
+                spec_value = spec_tp.get(stage)
+                spec_value_str = (
+                    str(spec_value).replace("\\", "/") if spec_value else None
+                )
+                if spec_value_str and spec_value_str not in seen_canonical:
+                    combo.addItem(
+                        f"[custom] {spec_value_str}", userData=spec_value_str
+                    )
+                if spec_value_str:
+                    idx = combo.findData(spec_value_str)
+                    combo.setCurrentIndex(idx if idx >= 0 else 0)
+                else:
+                    combo.setCurrentIndex(0)
+            finally:
+                combo.blockSignals(False)
+
+    def _on_task_template_changed(self, stage: str) -> None:
+        if self._populating:
+            return
+        combo = self._template_combos[stage]
+        value = combo.currentData()
+
+        def mutate(spec: dict[str, Any]) -> None:
+            tp = dict(spec.get("templates") or {})
+            if value is None or value == "":
+                tp.pop(stage, None)
+            else:
+                tp[stage] = value
+            if tp:
+                spec["templates"] = tp
+            else:
+                spec.pop("templates", None)
+
+        self._mutate_current_spec(mutate)
+        # Switching template can change which knobs are declared (each
+        # template has its own manifest). Re-render the knobs form so
+        # the right editors show.
+        spec = self._current_spec()
+        if spec is not None:
+            self._rebuild_knobs_form(spec)
+
+    def _on_task_template_clear(self, stage: str) -> None:
+        combo = self._template_combos[stage]
+        combo.setCurrentIndex(0)
 
     def _rebuild_knobs_form(self, spec: dict[str, Any]) -> None:
         """Re-render KnobEditor rows for the loaded spec.

@@ -21,15 +21,24 @@ from auto_ext.ui.tabs.run_tab import RunTab  # noqa: E402
 
 
 def _make_tab(
-    qtbot, project_tools_config: Path, *, autosave: bool = False
+    qtbot,
+    project_tools_config: Path,
+    *,
+    autosave: bool = False,
+    auto_ext_root: Path | None = None,
 ) -> tuple[ProjectTab, ConfigController]:
     """Build a ProjectTab + ConfigController for testing.
 
     ``autosave`` defaults to False so staging-only assertions
     (``pending_edits == {...}``) keep their pre-autosave semantics.
     Pass ``autosave=True`` for tests that exercise the auto-save flow.
+
+    ``auto_ext_root`` (optional) lets tests aim the controller at the
+    real repo root so the Templates ComboBox can enumerate the bundled
+    ``templates/<stage>/*.j2``. When ``None`` the controller falls
+    back to ``config_dir.parent`` (tmp dir, no templates).
     """
-    controller = ConfigController()
+    controller = ConfigController(auto_ext_root=auto_ext_root)
     run_tab = RunTab(controller)
     tab = ProjectTab(controller, run_tab)
     tab._autosave_enabled = autosave
@@ -435,6 +444,75 @@ def test_field_edit_does_not_autosave_on_external_conflict(
     # Edit was staged but not flushed.
     assert controller.is_dirty is True
     assert controller.pending_edits == {"tech_name": "HN_NEW"}
+
+
+# ---- Templates ComboBox (Project tab — B half) ---------------------------
+
+
+def test_templates_combo_lists_available_j2_files(
+    qtbot, project_tools_config: Path, templates_root: Path
+) -> None:
+    """Each per-stage ComboBox enumerates *.j2 files under
+    <auto_ext_root>/templates/<stage>/. Aim auto_ext_root at the real
+    repo root so the bundled production templates show up."""
+    tab, _ = _make_tab(
+        qtbot, project_tools_config, auto_ext_root=templates_root.parent
+    )
+    quantus_combo = tab._template_combos["quantus"]
+    items = [quantus_combo.itemText(i) for i in range(quantus_combo.count())]
+    assert items[0] == "(unset)"
+    assert "ext.cmd.j2" in items
+    assert "dspf.cmd.j2" in items
+
+
+def test_templates_combo_set_stages_dotted_key(
+    qtbot, project_tools_config: Path, templates_root: Path
+) -> None:
+    tab, controller = _make_tab(
+        qtbot,
+        project_tools_config,
+        autosave=False,
+        auto_ext_root=templates_root.parent,
+    )
+    quantus_combo = tab._template_combos["quantus"]
+    idx = quantus_combo.findData("templates/quantus/dspf.cmd.j2")
+    assert idx >= 0
+    quantus_combo.setCurrentIndex(idx)
+    assert controller.pending_edits == {
+        "templates.quantus": "templates/quantus/dspf.cmd.j2"
+    }
+
+
+def test_templates_combo_clear_stages_none(
+    qtbot, project_tools_config: Path, templates_root: Path
+) -> None:
+    tab, controller = _make_tab(
+        qtbot,
+        project_tools_config,
+        autosave=False,
+        auto_ext_root=templates_root.parent,
+    )
+    tab._on_template_clear_clicked("quantus")
+    assert controller.pending_edits == {"templates.quantus": None}
+
+
+def test_templates_combo_autosaves_when_enabled(
+    qtbot, project_tools_config: Path, templates_root: Path
+) -> None:
+    tab, controller = _make_tab(
+        qtbot,
+        project_tools_config,
+        autosave=True,
+        auto_ext_root=templates_root.parent,
+    )
+    quantus_combo = tab._template_combos["quantus"]
+    idx = quantus_combo.findData("templates/quantus/dspf.cmd.j2")
+    quantus_combo.setCurrentIndex(idx)
+    assert controller.is_dirty is False
+    assert (
+        str(controller.project.templates.quantus).replace("\\", "/")
+        == "templates/quantus/dspf.cmd.j2"
+    )
 
 
 def test_placeholder_updates_after_env_override(
