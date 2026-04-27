@@ -72,7 +72,7 @@ def test_save_writes_edits_to_disk(qtbot, project_tools_config: Path) -> None:
     on_disk = (project_tools_config / "project.yaml").read_text(encoding="utf-8")
     assert "tech_name: HN999" in on_disk
     # Other original fields untouched.
-    assert "pdk_subdir: CFXXX" in on_disk
+    assert "calibre_lvs_dir: $calibre_source_added_place|parent" in on_disk
     assert controller.project is not None
     assert controller.project.tech_name == "HN999"
 

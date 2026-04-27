@@ -440,10 +440,11 @@ def _print_init_project_summary(
     typer.echo("")
     typer.echo("[init-project] Detected project constants:")
     _print_kv("  tech_name          ", constants.tech_name)
-    _print_kv("  pdk_subdir         ", constants.pdk_subdir)
-    _print_kv("  project_subdir     ", constants.project_subdir)
-    _print_kv("  lvs_runset_version ", constants.lvs_runset_version)
-    _print_kv("  qrc_runset_version ", constants.qrc_runset_version)
+    if constants.paths:
+        for key in sorted(constants.paths):
+            _print_kv(f"  paths.{key:<13}", constants.paths[key])
+    else:
+        _print_kv("  paths              ", None)
 
     if constants.unclassified:
         typer.echo("")

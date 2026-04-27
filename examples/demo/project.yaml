@@ -12,6 +12,13 @@ env_overrides:
   VERIFY_ROOT: /tmp/demo/verify
   SETUP_ROOT: /tmp/demo/setup
   PDK_LAYER_MAP_FILE: /tmp/demo/pdk/layers.map
+  calibre_source_added_place: /tmp/demo/verify/runset/Calibre_QRC/LVS/Ver_Demo/CFXXX/empty.cdl
+
+paths:
+  calibre_lvs_dir: $calibre_source_added_place|parent
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Demo/CFXXX/QCI_deck
+
+tech_name: HN001
 
 templates:
   si: templates/si/default.env.j2

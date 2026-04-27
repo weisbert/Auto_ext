@@ -33,9 +33,14 @@ def _make_tab(qtbot, project_tools_config: Path) -> tuple[ProjectTab, ConfigCont
 def test_populate_reflects_project_yaml(qtbot, project_tools_config: Path) -> None:
     tab, _ = _make_tab(qtbot, project_tools_config)
     assert tab._fields["tech_name"].text() == "HN001"
-    assert tab._fields["pdk_subdir"].text() == "CFXXX"
-    assert tab._fields["runset_versions.lvs"].text() == "Ver_Plus_1.0l_0.9"
     assert tab._fields["employee_id"].text() == "alice"
+    # Phase 5.6.5: paths replaces pdk_subdir / runset_versions form fields.
+    assert "calibre_lvs_dir" in tab._path_fields
+    assert "qrc_deck_dir" in tab._path_fields
+    assert (
+        tab._path_fields["calibre_lvs_dir"].text()
+        == "$calibre_source_added_place|parent"
+    )
 
 
 def test_field_edit_marks_dirty_and_enables_save(
@@ -249,63 +254,63 @@ def test_hint_tech_name_no_candidate(monkeypatch) -> None:
     assert "no candidate" in hint
 
 
-def test_hint_pdk_subdir_falls_back_to_no_candidate_message(monkeypatch) -> None:
-    """pdk_subdir has a default env var chain (calibre_source_added_place);
-    when the env is empty, hint surfaces the unresolved-candidates list
-    instead of the legacy "no fallback" string.
-
-    Scrub shell env explicitly: on developer machines that have already
-    sourced the project setup script, ``$calibre_source_added_place``
-    leaks through resolve_env -> os.environ and the fallback succeeds,
-    masking the assertion.
-    """
-    monkeypatch.delenv("calibre_source_added_place", raising=False)
-    hint = _hint_for_field("pdk_subdir", _bare_project(), {})
-    assert "no candidate resolved" in hint
-    assert "calibre_source_added_place" in hint
-
-
-def test_hint_pdk_subdir_auto_derived_when_env_resolves() -> None:
-    """When pdk_subdir_env_vars resolve, hint shows the derived value —
-    same UX shape as tech_name's existing (auto-derived: HN001)."""
-    hint = _hint_for_field(
-        "pdk_subdir",
-        _bare_project(),
-        {"calibre_source_added_place": "/v/runset/x/Ver_1.0/CFXXX/empty.cdl"},
-    )
-    assert "auto-derived: CFXXX" in hint
-
-
-def test_hint_runset_versions_lvs_auto_derived() -> None:
-    """lvs_runset_version derives from grandparent of the env var path."""
-    hint = _hint_for_field(
-        "runset_versions.lvs",
-        _bare_project(),
-        {"calibre_source_added_place": "/v/runset/x/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"},
-    )
-    assert "auto-derived: Ver_Plus_1.0l_0.9" in hint
-
-
-def test_hint_runset_versions_qrc_no_default_env_chain(monkeypatch) -> None:
-    """qrc_runset_version_env_vars defaults to empty (no industry
-    convention); hint preserves the legacy "no fallback" message so
-    users know they must fill it manually or extend the chain.
-
-    Defensive monkeypatch: even though the chain is empty by default,
-    a future user-customised default would leak shell env without this.
-    """
-    monkeypatch.delenv("calibre_source_added_place", raising=False)
-    hint = _hint_for_field("runset_versions.qrc", _bare_project(), {})
-    assert "no fallback" in hint
-    assert "[[qrc_runset_version]]" in hint
-
-
 def test_hint_layer_map_default() -> None:
     hint = _hint_for_field("layer_map", _bare_project(), {})
     assert "${PDK_LAYER_MAP_FILE}" in hint
 
 
 # ---- placeholder integration ----------------------------------------------
+
+
+# ---- Paths group (Phase 5.6.5) -------------------------------------------
+
+
+def test_paths_group_edit_stages_paths_dotted_key(
+    qtbot, project_tools_config: Path
+) -> None:
+    tab, controller = _make_tab(qtbot, project_tools_config)
+    line = tab._path_fields["calibre_lvs_dir"]
+    line.setText("$calibre_source_added_place|parent|parent")
+    tab._on_path_field_edited("calibre_lvs_dir")
+    assert controller.is_dirty is True
+    assert controller.pending_edits == {
+        "paths.calibre_lvs_dir": "$calibre_source_added_place|parent|parent"
+    }
+
+
+def test_paths_group_resolved_preview_in_tooltip(
+    qtbot, project_tools_config: Path
+) -> None:
+    tab, _ = _make_tab(qtbot, project_tools_config)
+    tip = tab._path_fields["calibre_lvs_dir"].toolTip()
+    # The tooltip should preview the resolved path using the staged env.
+    # Fixture sets calibre_source_added_place to .../Ver_Plus_1.0l_0.9/CFXXX/empty.cdl
+    assert "resolves to:" in tip
+    assert "CFXXX" in tip
+
+
+def test_paths_group_used_by_lists_calibre_template(
+    qtbot, project_tools_config: Path
+) -> None:
+    tab, _ = _make_tab(qtbot, project_tools_config)
+    label = tab._path_used_by_labels["calibre_lvs_dir"]
+    text = label.text()
+    # The bundled production calibre template references calibre_lvs_dir.
+    assert "calibre_lvs.qci.j2" in text
+    # qrc_deck_dir is referenced by both calibre + quantus templates.
+    label2 = tab._path_used_by_labels["qrc_deck_dir"]
+    text2 = label2.text()
+    assert "calibre_lvs.qci.j2" in text2
+    assert "ext.cmd.j2" in text2
+
+
+def test_paths_group_clear_field_stages_none(
+    qtbot, project_tools_config: Path
+) -> None:
+    tab, controller = _make_tab(qtbot, project_tools_config)
+    tab._path_fields["calibre_lvs_dir"].setText("")
+    tab._on_path_field_edited("calibre_lvs_dir")
+    assert controller.pending_edits == {"paths.calibre_lvs_dir": None}
 
 
 def test_placeholder_updates_after_env_override(

@@ -248,25 +248,18 @@ def test_calibre_lvs_knob_overrides_flip_render(
     assert "*cmnVConnectNamesState: ALL" in rendered
 
 
-def test_build_context_surfaces_pdk_fields(project_config) -> None:
-    """_build_context exposes tech_name / pdk_subdir / project_subdir /
-    lvs_runset_version / qrc_runset_version from ProjectConfig so
-    templates can reference [[tech_name]] etc. (Phase 4b2).
+def test_build_context_surfaces_paths(project_config) -> None:
+    """_build_context resolves project.paths entries via resolve_path_expr
+    and exposes each under the same key in the Jinja context. (Phase 5.6.5).
     """
-    from auto_ext.core.config import (
-        JivaroConfig,
-        RunsetVersions,
-        TaskConfig,
-        TemplatePaths,
-    )
+    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
     from auto_ext.core.runner import _build_context
 
     project_config.tech_name = "HN001"
-    project_config.pdk_subdir = "CFXXX"
-    project_config.project_subdir = "projB"
-    project_config.runset_versions = RunsetVersions(
-        lvs="Ver_Plus_1.0l_0.9", qrc="Ver_Plus_1.0a"
-    )
+    project_config.paths = {
+        "calibre_lvs_dir": "$calibre_source_added_place|parent",
+        "qrc_deck_dir": "$VERIFY_ROOT/runset/Calibre_QRC/QRC/v/CFXXX/QCI_deck",
+    }
     task = TaskConfig(
         task_id="L__c__layout__schematic",
         library="L",
@@ -285,62 +278,40 @@ def test_build_context_surfaces_pdk_fields(project_config) -> None:
     ctx = _build_context(
         project_config,
         task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w", "PDK_LAYER_MAP_FILE": "/w/layers.map"},
-    )
-    assert ctx["tech_name"] == "HN001"
-    assert ctx["pdk_subdir"] == "CFXXX"
-    assert ctx["project_subdir"] == "projB"
-    assert ctx["lvs_runset_version"] == "Ver_Plus_1.0l_0.9"
-    assert ctx["qrc_runset_version"] == "Ver_Plus_1.0a"
-
-
-def test_build_context_derives_pdk_subdir_from_env_var(project_config) -> None:
-    """When project.pdk_subdir is None and pdk_subdir_env_vars points to
-    a populated env var, the value is derived from the env var path's
-    parent dir name. Same shape as the existing tech_name fallback."""
-    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
-    from auto_ext.core.runner import _build_context
-
-    project_config.pdk_subdir = None
-    project_config.runset_versions.lvs = None
-    project_config.pdk_subdir_env_vars = ["calibre_source_added_place"]
-    project_config.lvs_runset_version_env_vars = ["calibre_source_added_place"]
-
-    task = TaskConfig(
-        task_id="L__c__layout__schematic",
-        library="L", cell="c",
-        lvs_source_view="schematic", lvs_layout_view="layout",
-        templates=TemplatePaths(),
-        ground_net="vss", out_file=None,
-        jivaro=JivaroConfig(),
-        continue_on_lvs_fail=False,
-        spec_index=0, expansion_index=0,
-    )
-    ctx = _build_context(
-        project_config, task,
         resolved_env={
-            "WORK_ROOT": "/w", "WORK_ROOT2": "/w",
+            "WORK_ROOT": "/w",
+            "WORK_ROOT2": "/w",
             "PDK_LAYER_MAP_FILE": "/w/layers.map",
+            "VERIFY_ROOT": "/v",
             "calibre_source_added_place": (
-                "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/"
-                "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9/empty.cdl"
+                "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
             ),
         },
     )
-    assert ctx["pdk_subdir"] == "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9"
-    assert ctx["lvs_runset_version"] == "Ver_Plus_1.0l_0.9"
+    assert ctx["tech_name"] == "HN001"
+    assert (
+        ctx["calibre_lvs_dir"]
+        == "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
+    )
+    # calibre_lvs_basename auto-derived from the path's leaf.
+    assert ctx["calibre_lvs_basename"] == "CFXXX"
+    assert (
+        ctx["qrc_deck_dir"]
+        == "/v/runset/Calibre_QRC/QRC/v/CFXXX/QCI_deck"
+    )
 
 
-def test_build_context_explicit_value_shadows_env_var_derivation(
-    project_config,
-) -> None:
-    """An explicit project.pdk_subdir wins over the env-var fallback —
-    user override always trumps auto-derivation."""
+def test_build_context_calibre_lvs_basename_user_override(project_config) -> None:
+    """If a project explicitly sets paths.calibre_lvs_basename it must win
+    over the auto-derived leaf — needed when the PDK breaks the
+    "rules-file basename = LVS dir leaf" convention."""
     from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
     from auto_ext.core.runner import _build_context
 
-    project_config.pdk_subdir = "MANUAL_PDK"
-    project_config.pdk_subdir_env_vars = ["calibre_source_added_place"]
+    project_config.paths = {
+        "calibre_lvs_dir": "/v/x/CFXXX",
+        "calibre_lvs_basename": "alt_basename",
+    }
     task = TaskConfig(
         task_id="L__c__layout__schematic",
         library="L", cell="c",
@@ -353,21 +324,15 @@ def test_build_context_explicit_value_shadows_env_var_derivation(
     )
     ctx = _build_context(
         project_config, task,
-        resolved_env={
-            "WORK_ROOT": "/w", "WORK_ROOT2": "/w",
-            "PDK_LAYER_MAP_FILE": "/w/layers.map",
-            "calibre_source_added_place": "/v/runset/x/y/AUTO_PDK/empty.cdl",
-        },
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
     )
-    assert ctx["pdk_subdir"] == "MANUAL_PDK"
+    assert ctx["calibre_lvs_basename"] == "alt_basename"
 
 
 def test_build_context_pdk_fields_default_to_none(project_config) -> None:
-    """When the project does not set PDK fields AND autoderive candidate env
-    vars are absent, they surface as None in the render context. A template
-    referencing [[tech_name]] with strict_undef would then raise — expected
-    behaviour for projects that have not yet run init-project and have no
-    PDK env set.
+    """When the project does not set tech_name AND its candidate env vars
+    are absent, tech_name stays None. paths is empty by default → no
+    extra keys land in the context.
     """
     from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
     from auto_ext.core.runner import _build_context
@@ -392,9 +357,9 @@ def test_build_context_pdk_fields_default_to_none(project_config) -> None:
         resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
     )
     assert ctx["tech_name"] is None
-    assert ctx["pdk_subdir"] is None
-    assert ctx["lvs_runset_version"] is None
-    assert ctx["qrc_runset_version"] is None
+    assert "calibre_lvs_dir" not in ctx
+    assert "qrc_deck_dir" not in ctx
+    assert "calibre_lvs_basename" not in ctx
 
 
 def test_build_context_tech_name_autoderived_from_pdk_tech_file(project_config) -> None:

@@ -12,7 +12,6 @@ from auto_ext.core.config import (
     JivaroConfig,
     JivaroOverride,
     ProjectConfig,
-    RunsetVersions,
     TaskConfig,
     TemplatePaths,
     apply_project_edits,
@@ -141,16 +140,29 @@ def test_apply_project_edits_none_deletes_key(fixtures_dir: Path) -> None:
     assert "employee_id" not in dumped
 
 
-def test_apply_project_edits_nested_runset_versions(fixtures_dir: Path) -> None:
+def test_apply_project_edits_nested_paths(fixtures_dir: Path) -> None:
     project = load_project(fixtures_dir / "project_minimal.yaml")
     apply_project_edits(
         project.raw,
-        {"runset_versions.lvs": "Ver_Plus_1.0a", "runset_versions.qrc": "Ver_Plus_1.0b"},
+        {
+            "paths.calibre_lvs_dir": "$calibre_source_added_place|parent",
+            "paths.qrc_deck_dir": "$VERIFY_ROOT/runset/Calibre_QRC/QRC/v/QCI_deck",
+        },
     )
     dumped = dump_project_yaml(project)
-    assert "runset_versions:" in dumped
-    assert "lvs: Ver_Plus_1.0a" in dumped
-    assert "qrc: Ver_Plus_1.0b" in dumped
+    assert "paths:" in dumped
+    assert "calibre_lvs_dir:" in dumped
+    assert "qrc_deck_dir:" in dumped
+
+
+def test_apply_project_edits_paths_unset_prunes_parent(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(
+        project.raw,
+        {"paths.calibre_lvs_dir": "$calibre_source_added_place|parent"},
+    )
+    apply_project_edits(project.raw, {"paths.calibre_lvs_dir": None})
+    assert "paths" not in project.raw
 
 
 def test_apply_project_edits_nested_env_override_round_trip(
@@ -179,8 +191,9 @@ def test_apply_project_edits_unknown_key_raises(fixtures_dir: Path) -> None:
 
 def test_apply_project_edits_unknown_nested_child_raises(fixtures_dir: Path) -> None:
     project = load_project(fixtures_dir / "project_minimal.yaml")
+    # ``templates`` has an explicit allowlist; an unknown subkey is caught.
     with pytest.raises(ConfigError, match="unknown nested key"):
-        apply_project_edits(project.raw, {"runset_versions.typo": "x"})
+        apply_project_edits(project.raw, {"templates.typo": "x"})
 
 
 def test_apply_project_edits_templates_set(fixtures_dir: Path) -> None:
@@ -545,50 +558,30 @@ def test_task_knobs_deep_copied_per_expansion(tmp_path: Path) -> None:
     assert tasks[0].knobs["quantus"] is not tasks[1].knobs["quantus"]
 
 
-# ---- PDK-level constants (Phase 4b2) --------------------------------------
+# ---- PDK-level constants (Phase 5.6.5: paths schema) ----------------------
 
 
-def test_project_config_pdk_fields_default_none(fixtures_dir: Path) -> None:
+def test_project_config_paths_default_empty(fixtures_dir: Path) -> None:
     project = load_project(fixtures_dir / "project_minimal.yaml")
     assert project.tech_name is None
-    assert project.pdk_subdir is None
-    assert project.project_subdir is None
-    assert project.runset_versions.lvs is None
-    assert project.runset_versions.qrc is None
+    assert project.paths == {}
 
 
-def test_project_config_accepts_pdk_fields(tmp_path: Path) -> None:
+def test_project_config_accepts_paths(tmp_path: Path) -> None:
     p = tmp_path / "project.yaml"
     p.write_text(
         "tech_name: HN001\n"
-        "pdk_subdir: CFXXX\n"
-        "project_subdir: projB\n"
-        "runset_versions:\n"
-        "  lvs: Ver_Plus_1.0l_0.9\n"
-        "  qrc: Ver_Plus_1.0a\n",
+        "paths:\n"
+        "  calibre_lvs_dir: $calibre_source_added_place|parent\n"
+        "  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/v/QCI_deck\n",
         encoding="utf-8",
     )
     project = load_project(p)
     assert project.tech_name == "HN001"
-    assert project.pdk_subdir == "CFXXX"
-    assert project.project_subdir == "projB"
-    assert project.runset_versions.lvs == "Ver_Plus_1.0l_0.9"
-    assert project.runset_versions.qrc == "Ver_Plus_1.0a"
-
-
-def test_runset_versions_rejects_unknown_key() -> None:
-    with pytest.raises(ValidationError):
-        RunsetVersions(lvs="x", bogus="y")  # type: ignore[call-arg]
-
-
-def test_project_config_runset_versions_partial(tmp_path: Path) -> None:
-    # A project that only imports calibre (no quantus) should be able to
-    # set only ``lvs`` and leave ``qrc`` as None.
-    p = tmp_path / "project.yaml"
-    p.write_text("runset_versions:\n  lvs: only-lvs\n", encoding="utf-8")
-    project = load_project(p)
-    assert project.runset_versions.lvs == "only-lvs"
-    assert project.runset_versions.qrc is None
+    assert project.paths == {
+        "calibre_lvs_dir": "$calibre_source_added_place|parent",
+        "qrc_deck_dir": "$VERIFY_ROOT/runset/Calibre_QRC/QRC/v/QCI_deck",
+    }
 
 
 def test_project_config_default_tech_name_env_vars(fixtures_dir: Path) -> None:
@@ -613,6 +606,22 @@ def test_project_config_override_tech_name_env_vars(tmp_path: Path) -> None:
     )
     project = load_project(p)
     assert project.tech_name_env_vars == ["MY_PDK_TECH", "MY_PDK_LAYERS"]
+
+
+def test_project_config_rejects_removed_pdk_subdir_field(tmp_path: Path) -> None:
+    """Phase 5.6.5 deletes pdk_subdir/runset_versions/etc; old YAMLs must
+    fail loud (no compat shim) so users notice and migrate."""
+    p = tmp_path / "project.yaml"
+    p.write_text("pdk_subdir: CFXXX\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="pdk_subdir"):
+        load_project(p)
+
+
+def test_project_config_rejects_removed_runset_versions_field(tmp_path: Path) -> None:
+    p = tmp_path / "project.yaml"
+    p.write_text("runset_versions:\n  lvs: x\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="runset_versions"):
+        load_project(p)
 
 
 # ---- Phase 5.4: exclude + jivaro_overrides --------------------------------

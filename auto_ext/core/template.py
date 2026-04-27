@@ -199,6 +199,70 @@ def render_template(
 _JINJA_VAR_RE = re.compile(r"\[\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\]")
 
 
+@dataclass(frozen=True)
+class VarReference:
+    """One occurrence of a ``[[var_name]]`` reference in a template.
+
+    Used by the GUI Project tab's "Used by" panel: each ``project.paths``
+    entry shows where in the template tree it's referenced. ``line_no``
+    is 1-indexed; ``line_excerpt`` is the matched line truncated to
+    something readable as inline traceability.
+    """
+
+    var_name: str
+    template_path: Path
+    line_no: int
+    line_excerpt: str
+
+
+_VAR_REFERENCE_LINE_RE = re.compile(r"\[\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\]")
+
+
+def collect_var_references(
+    template_paths: list[Path], *, excerpt_max: int = 80
+) -> list[VarReference]:
+    """Scan the given templates for every ``[[name]]`` reference.
+
+    Returns one :class:`VarReference` per (var_name, line_no) pair across
+    all templates. A line carrying ``[[a]] foo [[b]]`` produces two
+    entries (one for each var) sharing the line number and excerpt.
+
+    Excerpts are right-trimmed and truncated to ``excerpt_max`` chars
+    with an ellipsis marker so the GUI can show inline context without
+    blowing out the row height.
+
+    Templates that fail to read (missing file, non-UTF-8) are silently
+    skipped — the caller (the Project tab) shouldn't crash on a stale
+    template path; missing files surface elsewhere.
+    """
+    results: list[VarReference] = []
+    for path in template_paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            stripped = line.rstrip("\r")
+            seen_on_line: set[str] = set()
+            excerpt = stripped.strip()
+            if len(excerpt) > excerpt_max:
+                excerpt = excerpt[: excerpt_max - 1] + "…"
+            for m in _VAR_REFERENCE_LINE_RE.finditer(stripped):
+                name = m.group(1)
+                if name in seen_on_line:
+                    continue
+                seen_on_line.add(name)
+                results.append(
+                    VarReference(
+                        var_name=name,
+                        template_path=path,
+                        line_no=line_no,
+                        line_excerpt=excerpt,
+                    )
+                )
+    return results
+
+
 def _referenced_jinja_vars(source: str) -> set[str]:
     """Names appearing as ``[[name]]`` in template source.
 

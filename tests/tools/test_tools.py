@@ -235,9 +235,10 @@ def test_production_templates_render(
         "jivaro_frequency_limit": 14,
         "jivaro_error_max": 2,
         "tech_name": "HN001",
-        "pdk_subdir": "CFXXX",
-        "lvs_runset_version": "Ver_Plus_1.0l_0.9",
-        "qrc_runset_version": "Ver_Plus_1.0a",
+        # Phase 5.6.5 paths schema replaces pdk_subdir / runset_versions.
+        "calibre_lvs_dir": "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX",
+        "calibre_lvs_basename": "CFXXX",
+        "qrc_deck_dir": "/v/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck",
     }
     env = {
         "WORK_ROOT": "/w",

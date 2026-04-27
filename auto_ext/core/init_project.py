@@ -152,23 +152,16 @@ def build_project_yaml(
     """Serialize a ``project.yaml`` filled with aggregated PDK constants.
 
     Template paths are written as-is (absolute, since ``init-project``
-    resolves them). Fields whose value is ``None`` are omitted so the YAML
-    stays tidy — runtime picks their defaults via the pydantic schema.
+    resolves them). Fields whose value is ``None``/empty are omitted so
+    the YAML stays tidy — runtime picks their defaults via the pydantic
+    schema.
     """
     data: dict = {}
     if constants.tech_name:
         data["tech_name"] = constants.tech_name
-    if constants.pdk_subdir:
-        data["pdk_subdir"] = constants.pdk_subdir
-    if constants.project_subdir:
-        data["project_subdir"] = constants.project_subdir
-    if constants.lvs_runset_version or constants.qrc_runset_version:
-        rv: dict[str, str] = {}
-        if constants.lvs_runset_version:
-            rv["lvs"] = constants.lvs_runset_version
-        if constants.qrc_runset_version:
-            rv["qrc"] = constants.qrc_runset_version
-        data["runset_versions"] = rv
+    if constants.paths:
+        # Sort so the YAML is deterministic across runs.
+        data["paths"] = {k: constants.paths[k] for k in sorted(constants.paths)}
 
     data["templates"] = {
         tool: path.as_posix() for tool, path in templates.items()
@@ -183,6 +176,9 @@ def build_project_yaml(
         "# Identity-level fields (work_root / verify_root / setup_root /\n"
         "# employee_id / layer_map) are resolved from shell env by default —\n"
         "# set them here only if you need to override.\n"
+        "# paths: extracted from raw exports as literal directories.\n"
+        "# Edit to use $env_var|parent style if you'd rather track an\n"
+        "# env var across PDK upgrades (see docs/CONFIG_GLOSSARY.md#paths).\n"
     )
     return header + buf.getvalue()
 

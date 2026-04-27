@@ -390,17 +390,16 @@ class PreviewPage(QWizardPage):
         self._identity_view.setPlainText(ident_text)
 
         c = preview.constants
-        const_text = "\n".join(
-            f"{name:>20}: {value or '(未检测)'}"
-            for name, value in (
-                ("tech_name", c.tech_name),
-                ("pdk_subdir", c.pdk_subdir),
-                ("project_subdir", c.project_subdir),
-                ("lvs_runset_version", c.lvs_runset_version),
-                ("qrc_runset_version", c.qrc_runset_version),
-            )
-        )
-        self._constants_view.setPlainText(const_text)
+        const_lines: list[str] = [
+            f"{'tech_name':>20}: {c.tech_name or '(未检测)'}"
+        ]
+        if c.paths:
+            const_lines.append(f"{'paths':>20}:")
+            for key in sorted(c.paths):
+                const_lines.append(f"{'':>22}{key}: {c.paths[key]}")
+        else:
+            const_lines.append(f"{'paths':>20}: (未检测)")
+        self._constants_view.setPlainText("\n".join(const_lines))
 
         if preview.constants.unclassified:
             uncl_lines = [

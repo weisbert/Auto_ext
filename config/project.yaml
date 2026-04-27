@@ -13,10 +13,24 @@
 #     ./run.sh run --config-dir Auto_ext_pro/config --dry-run
 
 templates:
-  si: templates\si\default.env.j2
+  si: templates/si/default.env.j2
   calibre: templates/calibre/calibre_lvs.qci.j2
   quantus: templates/quantus/ext.cmd.j2
   jivaro: templates/jivaro/default.xml.j2
+
+# Path expressions referenced by templates as [[<key>]]. Each value may
+# combine env vars ($X / ${X} / $env(X)) with literal segments and an
+# optional ``|parent`` filter that takes ``Path.parent`` after env
+# substitution. See docs/CONFIG_GLOSSARY.md#paths.
+paths:
+  # Directory holding Calibre LVS rules files <basename>.<variant>.qcilvs.
+  # $calibre_source_added_place is set by the PDK setup to a file inside
+  # this dir, so its parent IS the dir.
+  calibre_lvs_dir: $calibre_source_added_place|parent
+  # Directory holding the QRC deck (query_cmd / preserveCellList.txt).
+  # No standard env-var convention; replace the literal segments with
+  # whichever runset-version + pdk subdir your project uses.
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/<runset>/<pdk_subdir>/QCI_deck
 
 # Uncomment and fill in only if ``check-env`` reports a var as "missing":
 # env_overrides:

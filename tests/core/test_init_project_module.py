@@ -59,7 +59,17 @@ def test_dry_run_projectA_produces_full_preview(
     assert preview.merged_identity.cell == "INV1"
     assert preview.merged_identity.library == "INV_LIB"
     assert preview.constants.tech_name == "HN001"
-    assert preview.constants.pdk_subdir == "CFXXX"
+    # Phase 5.6.5: paths schema. Calibre's lvsRulesFile dirname is
+    # extracted as calibre_lvs_dir; QCI deck dir cross-checked between
+    # calibre lvsPostTriggers + quantus -parasitic_blocking.
+    assert (
+        preview.constants.paths["calibre_lvs_dir"]
+        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
+    )
+    assert (
+        preview.constants.paths["qrc_deck_dir"]
+        == "$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
+    )
     assert not preview.conflicts
     # Ordering: 4 (template, manifest) pairs then project.yaml then tasks.yaml.
     roles = [f.role for f in preview.files]
@@ -112,8 +122,9 @@ def test_dry_run_with_overrides_wins(
 def test_dry_run_unclassified_tokens_surfaced(
     raw_projectA_dir: Path, tmp_path: Path
 ) -> None:
-    # Calibre normally has no /data/RFIC3/... path; inject a conflicting
-    # projA reference so aggregate_pdk_tokens unclassifies projA vs projB.
+    # Tech-name (HN...) tokens in a non-quantus raw are suspicious and
+    # always unclassified for review. Inject HN999 into calibre's raw
+    # somewhere harmless to trigger that branch of aggregate_pdk_tokens.
     conflict = tmp_path / "conflict_raw"
     conflict.mkdir()
     for name in (
@@ -124,16 +135,13 @@ def test_dry_run_unclassified_tokens_surfaced(
     ):
         (conflict / name).write_bytes((raw_projectA_dir / name).read_bytes())
     calibre_raw = (conflict / "calibre_sample.qci").read_text(encoding="utf-8")
-    calibre_raw += (
-        "*lvsPostTriggers: {{cat /data/RFIC3/projA/bob/x/y} process 1}\n"
-    )
+    calibre_raw += "*lvsCustomComment: tech HN999 leftover\n"
     (conflict / "calibre_sample.qci").write_text(calibre_raw, encoding="utf-8")
 
     preview = dry_run(_inputs(conflict, tmp_path / "out"))
     assert preview.constants.unclassified
     values = {u.token.value for u in preview.constants.unclassified}
-    # projA from calibre + projB from si both unclassified.
-    assert any("projA" in v for v in values)
+    assert any("HN999" in v for v in values)
 
 
 def test_dry_run_marks_overwrites_when_targets_exist(

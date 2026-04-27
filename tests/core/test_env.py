@@ -6,13 +6,13 @@ import pytest
 
 from auto_ext.core.env import (
     EnvResolution,
-    derive_ancestor_dir_from_env_candidates,
     derive_parent_dir_from_env_candidates,
     discover_required_vars,
     resolve_env,
+    resolve_path_expr,
     substitute_env,
 )
-from auto_ext.core.errors import EnvResolutionError
+from auto_ext.core.errors import ConfigError, EnvResolutionError
 
 
 # ---- discover_required_vars -------------------------------------------------
@@ -227,55 +227,50 @@ def test_derive_parent_dir_returns_none_when_path_has_no_parent() -> None:
     )
 
 
-# ---- derive_ancestor_dir_from_env_candidates -------------------------------
+# ---- resolve_path_expr ------------------------------------------------------
 
 
-def test_derive_ancestor_dir_depth_1_matches_parent() -> None:
-    """depth=1 is just the immediate parent dir name; same as
-    derive_parent_dir_from_env_candidates."""
-    resolved = {"V": "/a/b/c/file.txt"}
-    assert (
-        derive_ancestor_dir_from_env_candidates(["V"], resolved, depth=1) == "c"
+def test_resolve_path_expr_env_only() -> None:
+    # Without a filter, the env-substituted string is returned as-is —
+    # no Path round-trip, so cross-OS separators stay intact.
+    assert resolve_path_expr("$X", {"X": "/a/b"}) == "/a/b"
+
+
+def test_resolve_path_expr_env_plus_literal() -> None:
+    out = resolve_path_expr("$VERIFY_ROOT/foo/bar", {"VERIFY_ROOT": "/v"})
+    assert out == "/v/foo/bar"
+
+
+def test_resolve_path_expr_parent_filter() -> None:
+    out = resolve_path_expr(
+        "$calibre_source_added_place|parent",
+        {"calibre_source_added_place": "/v/runset/x/y/empty.cdl"},
     )
+    assert out == "/v/runset/x/y"
 
 
-def test_derive_ancestor_dir_depth_2_extracts_grandparent() -> None:
-    """The user's $calibre_source_added_place pattern:
-    $VERIFY_ROOT/runset/Calibre_QRC/LVS/<runset>/<pdk_subdir>/empty.cdl
-                                        depth=2  depth=1
-    """
-    resolved = {
-        "calibre_source_added_place": (
-            "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/"
-            "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9/empty.cdl"
-        )
-    }
-    pdk = derive_ancestor_dir_from_env_candidates(
-        ["calibre_source_added_place"], resolved, depth=1
+def test_resolve_path_expr_chained_parent() -> None:
+    out = resolve_path_expr(
+        "$X|parent|parent", {"X": "/v/runset/x/y/empty.cdl"}
     )
-    runset = derive_ancestor_dir_from_env_candidates(
-        ["calibre_source_added_place"], resolved, depth=2
-    )
-    assert pdk == "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9"
-    assert runset == "Ver_Plus_1.0l_0.9"
+    assert out == "/v/runset/x"
 
 
-def test_derive_ancestor_dir_falls_through_to_next_candidate() -> None:
-    resolved = {"V1": "", "V2": "/a/b/c/file.txt"}
-    assert (
-        derive_ancestor_dir_from_env_candidates(["V1", "V2"], resolved, depth=2)
-        == "b"
-    )
+def test_resolve_path_expr_unknown_filter_raises() -> None:
+    with pytest.raises(ConfigError, match="unknown path filter 'name'"):
+        resolve_path_expr("$X|name", {"X": "/a/b/c"})
 
 
-def test_derive_ancestor_dir_returns_none_when_too_shallow() -> None:
-    """Path doesn't have enough ancestors at the requested depth."""
-    resolved = {"V": "file.txt"}  # no ancestors
-    assert (
-        derive_ancestor_dir_from_env_candidates(["V"], resolved, depth=2) is None
-    )
+def test_resolve_path_expr_tolerates_whitespace_around_filter() -> None:
+    out = resolve_path_expr("$X | parent", {"X": "/a/b/c"})
+    assert out == "/a/b"
 
 
-def test_derive_ancestor_dir_rejects_invalid_depth() -> None:
-    with pytest.raises(ValueError, match="depth must be >= 1"):
-        derive_ancestor_dir_from_env_candidates(["V"], {}, depth=0)
+def test_resolve_path_expr_unresolved_env_passes_through() -> None:
+    # Same passthrough behavior as substitute_env: unknown var stays $X.
+    assert resolve_path_expr("$X/foo", {}) == "$X/foo"
+
+
+def test_resolve_path_expr_parent_on_pure_literal() -> None:
+    # No env vars; the filter still applies to the literal Path.
+    assert resolve_path_expr("/a/b/c|parent", {}) == "/a/b"

@@ -10,6 +10,8 @@ import pytest
 from auto_ext.core.errors import TemplateError
 from auto_ext.core.template import (
     PlaceholderInventory,
+    VarReference,
+    collect_var_references,
     render_template,
     resolve_template_path,
     scan_placeholders,
@@ -302,3 +304,79 @@ def test_resolve_template_no_bases_falls_through(tmp_path: Path, monkeypatch) ->
     (tmp_path / "x.j2").write_text("[[x]]", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     assert resolve_template_path(Path("x.j2")).is_file()
+
+
+# ---- collect_var_references ------------------------------------------------
+
+
+def test_collect_var_references_single_var_per_line(tmp_path: Path) -> None:
+    tpl = tmp_path / "x.j2"
+    tpl.write_text(
+        "*lvsRulesFile: [[calibre_lvs_dir]]/foo\n"
+        "*lvsRunDir: [[output_dir]]\n",
+        encoding="utf-8",
+    )
+    refs = collect_var_references([tpl])
+    assert len(refs) == 2
+    assert refs[0] == VarReference(
+        var_name="calibre_lvs_dir",
+        template_path=tpl,
+        line_no=1,
+        line_excerpt="*lvsRulesFile: [[calibre_lvs_dir]]/foo",
+    )
+    assert refs[1].var_name == "output_dir"
+    assert refs[1].line_no == 2
+
+
+def test_collect_var_references_multiple_vars_one_line(tmp_path: Path) -> None:
+    tpl = tmp_path / "x.j2"
+    tpl.write_text(
+        "rules: [[a]]/[[b]]/[[c]]\n",
+        encoding="utf-8",
+    )
+    refs = collect_var_references([tpl])
+    assert [r.var_name for r in refs] == ["a", "b", "c"]
+    assert all(r.line_no == 1 for r in refs)
+
+
+def test_collect_var_references_dedupes_same_var_on_one_line(tmp_path: Path) -> None:
+    tpl = tmp_path / "x.j2"
+    tpl.write_text("[[output_dir]]/foo and [[output_dir]]/bar\n", encoding="utf-8")
+    refs = collect_var_references([tpl])
+    assert len(refs) == 1
+    assert refs[0].var_name == "output_dir"
+
+
+def test_collect_var_references_truncates_long_excerpt(tmp_path: Path) -> None:
+    tpl = tmp_path / "x.j2"
+    line = "x" * 200 + " [[var]]\n"
+    tpl.write_text(line, encoding="utf-8")
+    refs = collect_var_references([tpl], excerpt_max=20)
+    assert len(refs) == 1
+    assert len(refs[0].line_excerpt) == 20
+    assert refs[0].line_excerpt.endswith("…")
+
+
+def test_collect_var_references_skips_unreadable_paths(tmp_path: Path) -> None:
+    real = tmp_path / "ok.j2"
+    real.write_text("hello [[a]]\n", encoding="utf-8")
+    missing = tmp_path / "missing.j2"
+    refs = collect_var_references([real, missing])
+    assert len(refs) == 1
+    assert refs[0].template_path == real
+
+
+def test_collect_var_references_no_match_returns_empty(tmp_path: Path) -> None:
+    tpl = tmp_path / "x.j2"
+    tpl.write_text("plain text, no placeholders\n", encoding="utf-8")
+    assert collect_var_references([tpl]) == []
+
+
+def test_collect_var_references_handles_whitespace_inside_brackets(
+    tmp_path: Path,
+) -> None:
+    tpl = tmp_path / "x.j2"
+    tpl.write_text("v=[[ name ]]\n", encoding="utf-8")
+    refs = collect_var_references([tpl])
+    assert len(refs) == 1
+    assert refs[0].var_name == "name"

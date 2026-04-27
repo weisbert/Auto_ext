@@ -9,6 +9,14 @@ The env panel re-runs :func:`auto_ext.core.runner._discover_env_vars`
 + :func:`auto_ext.core.env.resolve_env` after every load and every
 env-override stage so the user sees the pending state before Save
 lands on disk.
+
+Phase 5.6.5 replaces the per-segment PDK fields (``pdk_subdir`` /
+``project_subdir`` / ``runset_versions.{lvs,qrc}``) with a single
+``Paths`` group bound to ``project.paths``. Each entry is a free-form
+path expression resolved at render time via
+:func:`auto_ext.core.env.resolve_path_expr`. The group also surfaces
+"Used by" — every template line that references the path's key — so
+users can see at a glance which templates each path drives.
 """
 
 from __future__ import annotations
@@ -37,12 +45,17 @@ from PyQt5.QtWidgets import (
 
 from auto_ext.core.config import ProjectConfig
 from auto_ext.core.env import (
-    derive_ancestor_dir_from_env_candidates,
     derive_parent_dir_from_env_candidates,
     resolve_env,
+    resolve_path_expr,
 )
-from auto_ext.core.errors import AutoExtError
+from auto_ext.core.errors import AutoExtError, ConfigError
 from auto_ext.core.runner import _discover_env_vars
+from auto_ext.core.template import (
+    VarReference,
+    collect_var_references,
+    resolve_template_path,
+)
 from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import ENV_SOURCE_COLOR, ENV_SOURCE_DISPLAY
 
@@ -57,10 +70,6 @@ _FIELDS: list[tuple[str, str, str]] = [
     ("setup_root", "setup_root", "Identity"),
     ("employee_id", "employee_id", "Identity"),
     ("tech_name", "tech_name", "PDK"),
-    ("pdk_subdir", "pdk_subdir", "PDK"),
-    ("project_subdir", "project_subdir", "PDK"),
-    ("runset_versions.lvs", "runset_versions.lvs", "PDK"),
-    ("runset_versions.qrc", "runset_versions.qrc", "PDK"),
     ("layer_map", "layer_map", "Output"),
     ("extraction_output_dir", "extraction_output_dir", "Output"),
     ("intermediate_dir", "intermediate_dir", "Output"),
@@ -110,45 +119,6 @@ def _hint_for_field(
             return f"(auto-derived: {derived})"
         return f"(no candidate resolved from {candidates})"
 
-    if key == "pdk_subdir":
-        candidates = list(project.pdk_subdir_env_vars)
-        resolution = resolve_env(set(candidates), effective_env)
-        derived = derive_ancestor_dir_from_env_candidates(
-            candidates, resolution.resolved, depth=1
-        )
-        if derived:
-            return f"(auto-derived: {derived})"
-        if candidates:
-            return f"(no candidate resolved from {candidates})"
-        return "(no fallback — required if templates use [[pdk_subdir]])"
-
-    if key == "project_subdir":
-        return "(no fallback — required if templates use [[project_subdir]])"
-
-    if key == "runset_versions.lvs":
-        candidates = list(project.lvs_runset_version_env_vars)
-        resolution = resolve_env(set(candidates), effective_env)
-        derived = derive_ancestor_dir_from_env_candidates(
-            candidates, resolution.resolved, depth=2
-        )
-        if derived:
-            return f"(auto-derived: {derived})"
-        if candidates:
-            return f"(no candidate resolved from {candidates})"
-        return "(no fallback — required if calibre/si use [[lvs_runset_version]])"
-
-    if key == "runset_versions.qrc":
-        candidates = list(project.qrc_runset_version_env_vars)
-        resolution = resolve_env(set(candidates), effective_env)
-        derived = derive_ancestor_dir_from_env_candidates(
-            candidates, resolution.resolved, depth=2
-        )
-        if derived:
-            return f"(auto-derived: {derived})"
-        if candidates:
-            return f"(no candidate resolved from {candidates})"
-        return "(no fallback — required if quantus uses [[qrc_runset_version]])"
-
     if key == "layer_map":
         return "(default: ${PDK_LAYER_MAP_FILE})"
     if key == "extraction_output_dir":
@@ -157,6 +127,18 @@ def _hint_for_field(
         return "(default: ${WORK_ROOT2})"
 
     return "(unset)"
+
+
+def _path_resolved_preview(expr: str, effective_env: dict[str, str]) -> str:
+    """Resolve ``expr`` for display; never raise.
+
+    Surface filter errors / env misses inline rather than crashing the
+    panel — this is read-only preview text.
+    """
+    try:
+        return resolve_path_expr(expr, effective_env)
+    except ConfigError as exc:
+        return f"(error: {exc})"
 
 
 #: Static "What is this field, and where do I find the value?" reference
@@ -189,39 +171,6 @@ _FIELD_DOCS: dict[str, str] = {
         "Auto-derived from parent dir of $PDK_TECH_FILE / $PDK_LAYER_MAP_FILE / $PDK_DISPLAY_FILE.\n"
         "Docs: docs/CONFIG_GLOSSARY.md#tech_name"
     ),
-    "pdk_subdir": (
-        "PDK subdirectory name appearing in calibre/quantus runset paths:\n"
-        "  $VERIFY_ROOT/runset/Calibre_QRC/LVS/<runset>/<HERE>/...\n"
-        "Example: CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9\n"
-        "Where to find:\n"
-        "  - $calibre_source_added_place (parent dir name auto-derived from this)\n"
-        "  - or: ls $VERIFY_ROOT/runset/Calibre_QRC/LVS/*/\n"
-        "Docs: docs/CONFIG_GLOSSARY.md#pdk_subdir"
-    ),
-    "project_subdir": (
-        "Project subdirectory in absolute /data/RFIC3/<HERE>/ paths.\n"
-        "Example: projB\n"
-        "Where to find: pwd | grep -oP '/data/RFIC3/\\K[^/]+'\n"
-        "Docs: docs/CONFIG_GLOSSARY.md#project_subdir"
-    ),
-    "runset_versions.lvs": (
-        "Calibre LVS runset version segment in the rules-file path:\n"
-        "  $VERIFY_ROOT/runset/Calibre_QRC/LVS/<HERE>/<pdk_subdir>/...\n"
-        "Example: Ver_Plus_1.0l_0.9\n"
-        "Where to find:\n"
-        "  - $calibre_source_added_place (grandparent dir name auto-derived)\n"
-        "  - or: ls $VERIFY_ROOT/runset/Calibre_QRC/LVS/\n"
-        "Docs: docs/CONFIG_GLOSSARY.md#runset_versions"
-    ),
-    "runset_versions.qrc": (
-        "Quantus QRC runset version segment in the QRC paths:\n"
-        "  $VERIFY_ROOT/runset/Calibre_QRC/QRC/<HERE>/<pdk_subdir>/QCI_deck/...\n"
-        "Example: Ver_Plus_1.0a\n"
-        "Where to find:\n"
-        "  - check the calibre lvsPostTriggers line in your raw .qci\n"
-        "  - or: ls $VERIFY_ROOT/runset/Calibre_QRC/QRC/\n"
-        "Docs: docs/CONFIG_GLOSSARY.md#runset_versions"
-    ),
     "layer_map": (
         "GDS layer-map file used by strmout.\n"
         "Default: ${PDK_LAYER_MAP_FILE} (resolved at run time).\n"
@@ -242,12 +191,50 @@ _FIELD_DOCS: dict[str, str] = {
 }
 
 
+_PATHS_FIELD_DOCS: dict[str, str] = {
+    "calibre_lvs_dir": (
+        "Directory holding Calibre LVS rules files\n"
+        "(``<basename>.<variant>.qcilvs``). Used by:\n"
+        "  templates/calibre/calibre_lvs.qci.j2  (*lvsRulesFile)\n"
+        "Typical value: $calibre_source_added_place|parent\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#paths"
+    ),
+    "qrc_deck_dir": (
+        "Directory holding QCI_deck artefacts (query_cmd / preserveCellList.txt).\n"
+        "Used by:\n"
+        "  templates/calibre/calibre_lvs.qci.j2  (*lvsPostTriggers)\n"
+        "  templates/quantus/{ext,dspf}.cmd.j2   (-parasitic_blocking_*)\n"
+        "Typical value: $VERIFY_ROOT/runset/Calibre_QRC/QRC/<runset>/<pdk>/QCI_deck\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#paths"
+    ),
+}
+
+
 def _full_tooltip(key: str, live_hint: str) -> str:
     """Compose the rich tooltip: live-derived hint + static field docs."""
     static = _FIELD_DOCS.get(key, "")
     if not static:
         return live_hint
     return f"{live_hint}\n\n{static}"
+
+
+def _path_tooltip(key: str, live_resolved: str, used_by: list[VarReference]) -> str:
+    """Tooltip for a paths.<key> field: resolved preview + used-by list +
+    static doc snippet (for the canonical keys)."""
+    parts: list[str] = [f"resolves to: {live_resolved}"]
+    if used_by:
+        parts.append("\nUsed by:")
+        for ref in used_by:
+            parts.append(
+                f"  {ref.template_path.name}:{ref.line_no}  {ref.line_excerpt}"
+            )
+    else:
+        parts.append("\n(not referenced by any current template)")
+    static = _PATHS_FIELD_DOCS.get(key)
+    if static:
+        parts.append("")
+        parts.append(static)
+    return "\n".join(parts)
 
 
 class ProjectTab(QWidget):
@@ -265,6 +252,9 @@ class ProjectTab(QWidget):
 
         self._fields: dict[str, QLineEdit] = {}
         self._original_values: dict[str, str] = {}
+        # paths.<key> → (line edit, used-by label) for the dynamic Paths group.
+        self._path_fields: dict[str, QLineEdit] = {}
+        self._path_used_by_labels: dict[str, QLabel] = {}
         # True while we're rebuilding fields from ProjectConfig — prevents
         # editingFinished from feeding spurious edits back into the
         # controller.
@@ -329,6 +319,21 @@ class ProjectTab(QWidget):
             else:
                 groups[group_name].addRow(QLabel(label + ":", self), line)
 
+        # Paths group: dynamic key/value rows for project.paths. Each row
+        # carries an edit field plus a "Used by" annotation derived from
+        # scanning the configured templates.
+        paths_box = QGroupBox(
+            "Paths (project.paths — referenced as [[key]] in templates)", self
+        )
+        self._paths_form = QFormLayout(paths_box)
+        paths_btn_row = QHBoxLayout()
+        add_path_btn = QPushButton("+ Add path", self)
+        add_path_btn.clicked.connect(self._on_add_path_clicked)
+        paths_btn_row.addStretch(1)
+        paths_btn_row.addWidget(add_path_btn)
+        self._paths_form.addRow(paths_btn_row)
+        root.addWidget(paths_box)
+
         templates_box = QGroupBox("Templates (read-only; editor lands in 5.5)", self)
         tform = QFormLayout(templates_box)
         self._templates_summary = QLabel("(no config)", self)
@@ -378,6 +383,8 @@ class ProjectTab(QWidget):
                 line.setText(value)
                 self._original_values[key] = value
 
+            self._rebuild_paths_rows(project)
+
             if project is None:
                 self._templates_summary.setText("(no config)")
             else:
@@ -397,6 +404,114 @@ class ProjectTab(QWidget):
         finally:
             self._populating = False
 
+    def _rebuild_paths_rows(self, project: ProjectConfig | None) -> None:
+        """Tear down any existing per-path widgets and rebuild from
+        ``project.paths``."""
+        # Drop existing rows. Skip the trailing button row (last row).
+        # QFormLayout exposes rows by index; remove from end so indices
+        # don't shift.
+        while self._paths_form.rowCount() > 1:
+            self._paths_form.removeRow(0)
+        self._path_fields.clear()
+        self._path_used_by_labels.clear()
+
+        if project is None or not project.paths:
+            return
+
+        used_by_index = self._collect_used_by_index(project)
+        for key in sorted(project.paths):
+            self._add_path_row(
+                key, project.paths[key], used_by_index.get(key, [])
+            )
+
+    def _collect_used_by_index(
+        self, project: ProjectConfig
+    ) -> dict[str, list[VarReference]]:
+        """Scan every configured template for ``[[X]]`` references and
+        index them by var name. Templates that don't resolve (missing
+        file, etc.) are skipped silently."""
+        template_paths: list[Path] = []
+        seen: set[Path] = set()
+        for stage in ("si", "calibre", "quantus", "jivaro"):
+            tp = getattr(project.templates, stage, None)
+            if tp is None:
+                continue
+            resolved = resolve_template_path(
+                tp,
+                auto_ext_root=self._controller.auto_ext_root,
+                workarea=self._controller.workarea,
+            )
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            template_paths.append(resolved)
+        refs = collect_var_references(template_paths)
+        index: dict[str, list[VarReference]] = {}
+        for ref in refs:
+            index.setdefault(ref.var_name, []).append(ref)
+        return index
+
+    def _add_path_row(
+        self, key: str, value: str, used_by: list[VarReference]
+    ) -> None:
+        line = QLineEdit(self)
+        line.setText(value)
+        line.editingFinished.connect(
+            lambda k=key: self._on_path_field_edited(k)
+        )
+        self._path_fields[key] = line
+
+        used_by_label = QLabel(self)
+        used_by_label.setStyleSheet("color: #666; font-size: 11px;")
+        used_by_label.setWordWrap(True)
+        self._path_used_by_labels[key] = used_by_label
+
+        # Compose row widget: line edit + remove button + used-by below.
+        row_widget = QWidget(self)
+        vbox = QVBoxLayout(row_widget)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        top = QHBoxLayout()
+        top.addWidget(line, stretch=1)
+        remove_btn = QPushButton("−", self)
+        remove_btn.setMaximumWidth(28)
+        remove_btn.setToolTip(f"Remove paths.{key} entry")
+        remove_btn.clicked.connect(
+            lambda _=False, k=key: self._on_remove_path_clicked(k)
+        )
+        top.addWidget(remove_btn)
+        vbox.addLayout(top)
+        vbox.addWidget(used_by_label)
+
+        # Insert before the trailing button row.
+        insert_at = max(0, self._paths_form.rowCount() - 1)
+        self._paths_form.insertRow(insert_at, QLabel(f"{key}:", self), row_widget)
+
+        # Initial used-by + tooltip render — gets refreshed by _refresh_hints
+        # whenever effective_env changes.
+        self._refresh_path_row(key, used_by)
+
+    def _refresh_path_row(
+        self, key: str, used_by: list[VarReference]
+    ) -> None:
+        line = self._path_fields.get(key)
+        if line is None:
+            return
+        effective = self._controller.effective_env_overrides()
+        expr = line.text() or self._controller.project.paths.get(key, "")
+        resolved = _path_resolved_preview(expr, effective)
+        line.setPlaceholderText(resolved)
+        line.setToolTip(_path_tooltip(key, resolved, used_by))
+        label = self._path_used_by_labels.get(key)
+        if label is not None:
+            if used_by:
+                lines = [
+                    f"↳ {ref.template_path.name}:{ref.line_no}  {ref.line_excerpt}"
+                    for ref in used_by
+                ]
+                label.setText("\n".join(lines))
+            else:
+                label.setText("↳ (no template references this path)")
+
     def _refresh_hints(self) -> None:
         """Recompute placeholder + tooltip per field from the current env state."""
         project = self._controller.project
@@ -411,14 +526,15 @@ class ProjectTab(QWidget):
             line.setPlaceholderText(hint)
             line.setToolTip(_full_tooltip(key, hint))
 
+        # Refresh paths rows too — staged env edits change resolved values.
+        used_by_index = self._collect_used_by_index(project)
+        for key in self._path_fields:
+            self._refresh_path_row(key, used_by_index.get(key, []))
+
     @staticmethod
     def _read_field_value(project: Any, key: str) -> str:
         if project is None:
             return ""
-        if key.startswith("runset_versions."):
-            attr = key.split(".", 1)[1]
-            v = getattr(project.runset_versions, attr, None)
-            return "" if v is None else str(v)
         v = getattr(project, key, None)
         return "" if v is None else str(v)
 
@@ -430,6 +546,56 @@ class ProjectTab(QWidget):
         text = self._fields[key].text().strip()
         value: Any = None if text == "" else text
         self._controller.stage_edits({key: value})
+
+    def _on_path_field_edited(self, key: str) -> None:
+        if self._populating:
+            return
+        line = self._path_fields.get(key)
+        if line is None:
+            return
+        text = line.text().strip()
+        value: Any = None if text == "" else text
+        self._controller.stage_edits({f"paths.{key}": value})
+        # Refresh resolved preview after staging.
+        used_by_index = self._collect_used_by_index(self._controller.project)
+        self._refresh_path_row(key, used_by_index.get(key, []))
+
+    def _on_add_path_clicked(self) -> None:
+        if self._controller.project is None:
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "Add path",
+            "Path key (the [[name]] templates will reference):",
+        )
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        if name in self._controller.project.paths or name in self._path_fields:
+            QMessageBox.warning(
+                self,
+                "Path exists",
+                f"paths.{name} already exists. Edit it directly above.",
+            )
+            return
+        self._controller.stage_edits({f"paths.{name}": ""})
+        used_by_index = self._collect_used_by_index(self._controller.project)
+        self._add_path_row(name, "", used_by_index.get(name, []))
+
+    def _on_remove_path_clicked(self, key: str) -> None:
+        self._controller.stage_edits({f"paths.{key}": None})
+        line = self._path_fields.pop(key, None)
+        if line is not None:
+            self._path_used_by_labels.pop(key, None)
+            # Find and remove the matching row by walking the form.
+            for r in range(self._paths_form.rowCount() - 1):
+                label_item = self._paths_form.itemAt(r, QFormLayout.LabelRole)
+                if label_item is None:
+                    continue
+                lbl = label_item.widget()
+                if isinstance(lbl, QLabel) and lbl.text() == f"{key}:":
+                    self._paths_form.removeRow(r)
+                    break
 
     def _browse_path(self, key: str) -> None:
         line = self._fields[key]

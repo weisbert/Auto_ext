@@ -51,15 +51,15 @@ import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from auto_ext.core.config import ProjectConfig, TaskConfig
 from auto_ext.core.env import (
-    derive_ancestor_dir_from_env_candidates,
     derive_parent_dir_from_env_candidates,
     discover_required_vars,
     resolve_env,
+    resolve_path_expr,
     substitute_env,
 )
 from auto_ext.core.errors import AutoExtError, ConfigError
@@ -576,23 +576,8 @@ def _build_context(
     tech_name = project.tech_name or derive_parent_dir_from_env_candidates(
         project.tech_name_env_vars, resolved_env
     )
-    pdk_subdir = project.pdk_subdir or derive_ancestor_dir_from_env_candidates(
-        project.pdk_subdir_env_vars, resolved_env, depth=1
-    )
-    lvs_runset_version = (
-        project.runset_versions.lvs
-        or derive_ancestor_dir_from_env_candidates(
-            project.lvs_runset_version_env_vars, resolved_env, depth=2
-        )
-    )
-    qrc_runset_version = (
-        project.runset_versions.qrc
-        or derive_ancestor_dir_from_env_candidates(
-            project.qrc_runset_version_env_vars, resolved_env, depth=2
-        )
-    )
 
-    return {
+    ctx: dict[str, Any] = {
         "library": task.library,
         "cell": task.cell,
         "lvs_source_view": task.lvs_source_view,
@@ -607,11 +592,20 @@ def _build_context(
         "jivaro_frequency_limit": task.jivaro.frequency_limit,
         "jivaro_error_max": task.jivaro.error_max,
         "tech_name": tech_name,
-        "pdk_subdir": pdk_subdir,
-        "project_subdir": project.project_subdir,
-        "lvs_runset_version": lvs_runset_version,
-        "qrc_runset_version": qrc_runset_version,
     }
+
+    # Resolve every project.paths.* entry and expose it under the same
+    # key in the Jinja context. Auto-derive ``calibre_lvs_basename`` from
+    # ``calibre_lvs_dir`` (PDK convention: rules-file basename = LVS
+    # subdir basename); user can override by setting paths.calibre_lvs_basename
+    # explicitly when their PDK breaks the convention.
+    for key, expr in project.paths.items():
+        ctx[key] = resolve_path_expr(expr, resolved_env)
+
+    if "calibre_lvs_dir" in ctx and "calibre_lvs_basename" not in ctx:
+        ctx["calibre_lvs_basename"] = PurePosixPath(ctx["calibre_lvs_dir"]).name
+
+    return ctx
 
 
 def _discover_env_vars(
@@ -625,6 +619,9 @@ def _discover_env_vars(
         project.intermediate_dir,
         str(project.layer_map),
     ]
+    # paths.* values typically reference $X env vars; surface them so
+    # check-env / preflight catches missing ones up-front.
+    sources.extend(project.paths.values())
     seen: set[Path] = set()
     for task in tasks:
         for stage in ("si", "calibre", "quantus", "jivaro"):
@@ -638,18 +635,9 @@ def _discover_env_vars(
             except OSError as exc:
                 raise ConfigError(f"cannot read template {tp}: {exc}") from exc
     required = discover_required_vars(sources)
-    # Surface env vars consulted by the auto-derive fallback chains so
-    # check-env / preflight resolves them up-front (otherwise the env
-    # panel would never list them and missing-var errors at render time
-    # would be confusing).
+    # tech_name auto-derive still walks env-var candidates when unset.
     if project.tech_name is None:
         required.update(project.tech_name_env_vars)
-    if project.pdk_subdir is None:
-        required.update(project.pdk_subdir_env_vars)
-    if project.runset_versions.lvs is None:
-        required.update(project.lvs_runset_version_env_vars)
-    if project.runset_versions.qrc is None:
-        required.update(project.qrc_runset_version_env_vars)
     return required
 
 

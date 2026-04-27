@@ -103,19 +103,6 @@ class TemplatePaths(BaseModel):
         return v
 
 
-class RunsetVersions(BaseModel):
-    """Runset versions split by stage. Phase 4b2 populates these via
-    ``aggregate_pdk_tokens``: calibre/si raws carry the ``lvs`` string,
-    quantus carries ``qrc``. Both are optional — projects that only run
-    a subset of stages can leave the unused side ``None``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    lvs: str | None = None
-    qrc: str | None = None
-
-
 class ProjectConfig(BaseModel):
     """Schema for ``project.yaml``. ``source_path`` and ``raw`` are filled
     in by :func:`load_project` after validation and are excluded from
@@ -160,40 +147,23 @@ class ProjectConfig(BaseModel):
         ]
     )
 
-    #: PDK subdirectory name (e.g. ``CFXXX``) that appears under
-    #: ``$VERIFY_ROOT/runset/...`` in calibre/quantus/si templates.
-    pdk_subdir: str | None = None
-
-    #: Env vars consulted, in order, when ``pdk_subdir`` is ``None``. Each
-    #: var's value is interpreted as a path inside the runset tree
-    #: (``.../LVS/<runset>/<pdk_subdir>/<file>``); the immediate parent
-    #: dir name = ``pdk_subdir``. First candidate with a non-empty parent
-    #: wins. Default targets the LVS-side anchor most teams already
-    #: maintain; add other env vars per project as needed.
-    pdk_subdir_env_vars: list[str] = Field(
-        default_factory=lambda: ["calibre_source_added_place"]
-    )
-
-    #: Project subdirectory name (e.g. ``projB``) that appears under
-    #: ``/data/RFIC3/<project>/`` in absolute raw paths. Optional.
-    project_subdir: str | None = None
-
-    #: Per-stage runset versions. ``init-project`` fills ``lvs`` from
-    #: calibre/si rawfiles and ``qrc`` from quantus. Either side may be
-    #: ``None`` when the corresponding stage is not imported.
-    runset_versions: RunsetVersions = Field(default_factory=RunsetVersions)
-
-    #: Env vars consulted when ``runset_versions.lvs`` is ``None``. Same
-    #: shape as ``pdk_subdir_env_vars`` but takes the *grandparent* dir
-    #: name (the runset version segment sits one level above pdk_subdir).
-    lvs_runset_version_env_vars: list[str] = Field(
-        default_factory=lambda: ["calibre_source_added_place"]
-    )
-
-    #: Env vars consulted when ``runset_versions.qrc`` is ``None``. No
-    #: standard convention, leave empty by default; teams that maintain a
-    #: ``$quantus_source_added_place`` (or similar) can list it here.
-    qrc_runset_version_env_vars: list[str] = Field(default_factory=list)
+    #: Path expressions referenced by templates as ``[[<key>]]``. Each value
+    #: is a string that may mix env-var references (``$X`` / ``${X}`` /
+    #: ``$env(X)``) with literal segments, optionally followed by ``|parent``
+    #: to take ``Path.parent`` after env substitution. The whole expression
+    #: is resolved at render time via :func:`resolve_path_expr` and the
+    #: result is exposed in the Jinja context under the same key.
+    #:
+    #: Canonical entries used by the bundled templates:
+    #:   - ``calibre_lvs_dir``: directory holding ``<basename>.<variant>.qcilvs``
+    #:     rules files. Typical value: ``$calibre_source_added_place|parent``.
+    #:   - ``qrc_deck_dir``: directory holding ``query_cmd`` /
+    #:     ``preserveCellList.txt`` for QRC. Usually project-supplied;
+    #:     no widely-shared env-var convention.
+    #:
+    #: Projects can add custom keys (e.g. ``paths.foo: $X/bar``) and any
+    #: template ``[[foo]]`` reference picks the value up automatically.
+    paths: dict[str, str] = Field(default_factory=dict)
 
     #: Default refers to the env var set by the PDK setup; override only if
     #: you need a specific file different from ``$PDK_LAYER_MAP_FILE``.
@@ -535,8 +505,6 @@ _EDIT_SCALAR_KEYS = frozenset(
         "setup_root",
         "employee_id",
         "tech_name",
-        "pdk_subdir",
-        "project_subdir",
         "layer_map",
         "extraction_output_dir",
         "intermediate_dir",
@@ -545,8 +513,8 @@ _EDIT_SCALAR_KEYS = frozenset(
 
 # parent → allowed children, or None for "arbitrary child keys"
 _EDIT_NESTED_KEYS: dict[str, frozenset[str] | None] = {
-    "runset_versions": frozenset({"lvs", "qrc"}),
     "env_overrides": None,  # env var names are arbitrary
+    "paths": None,  # path keys are user-extensible
     "templates": frozenset({"calibre", "quantus", "jivaro", "si"}),
 }
 

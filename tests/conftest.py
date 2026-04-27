@@ -174,10 +174,9 @@ verify_root: {wa_posix}/fake/verify
 setup_root: {wa_posix}/fake/setup
 employee_id: alice
 tech_name: HN001
-pdk_subdir: CFXXX
-runset_versions:
-  lvs: Ver_Plus_1.0l_0.9
-  qrc: Ver_Plus_1.0a
+paths:
+  calibre_lvs_dir: $calibre_source_added_place|parent
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck
 layer_map: {wa_posix}/fake/layers.map
 env_overrides:
   WORK_ROOT: {wa_posix}
@@ -185,7 +184,7 @@ env_overrides:
   VERIFY_ROOT: {wa_posix}/fake/verify
   SETUP_ROOT: {wa_posix}/fake/setup
   PDK_LAYER_MAP_FILE: {wa_posix}/fake/layers.map
-  calibre_source_added_place: {wa_posix}/fake/empty.cdl
+  calibre_source_added_place: {wa_posix}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl
 extraction_output_dir: "${{WORK_ROOT}}/cds/verify/QCI_PATH_{{cell}}"
 intermediate_dir: "${{WORK_ROOT2}}"
 templates:

@@ -410,33 +410,27 @@ def _pdk_values_by_category(tokens):
     return out
 
 
-def test_pdk_tokens_calibre(calibre_raw: str) -> None:
+def test_pdk_tokens_calibre_only_carries_segment_free_signals(
+    calibre_raw: str,
+) -> None:
+    """Phase 5.6.5: pdk_subdir / runset_version / project_subdir
+    categories were removed. Calibre raws have no HN... so PdkTokens
+    are essentially empty (or just the rare abs_path)."""
     toks = import_template("calibre", calibre_raw).pdk_tokens
     by_cat = _pdk_values_by_category(toks)
-    assert "CFXXX" in by_cat.get("pdk_subdir", set())
-    assert "Ver_Plus_1.0l_0.9" in by_cat.get("runset_version", set())
-    # No tech_name in calibre sample.
     assert "tech_name" not in by_cat
+    assert "pdk_subdir" not in by_cat
+    assert "runset_version" not in by_cat
 
 
 def test_pdk_tokens_quantus(quantus_raw: str) -> None:
     toks = import_template("quantus", quantus_raw).pdk_tokens
     by_cat = _pdk_values_by_category(toks)
     assert "HN001" in by_cat.get("tech_name", set())
-    assert "CFXXX" in by_cat.get("pdk_subdir", set())
-    assert "Ver_Plus_1.0a" in by_cat.get("runset_version", set())
     # /tmpdata/RFIC/rfic_share/[[employee_id]]/ is substituted, so
     # abs_path should NOT be reported for that path.
     for t in toks:
         assert "[[employee_id]]" not in t.value
-
-
-def test_pdk_tokens_si_surfaces_project_subdir(si_raw: str) -> None:
-    # si incFILE path: /data/RFIC3/projB/alice/setup/...
-    toks = import_template("si", si_raw).pdk_tokens
-    by_cat = _pdk_values_by_category(toks)
-    # project_subdir extracts just the segment name.
-    assert "projB" in by_cat.get("project_subdir", set())
 
 
 def test_pdk_tokens_jivaro_has_none(jivaro_raw: str) -> None:
@@ -583,145 +577,82 @@ def test_aggregate_tech_name_from_quantus(raw_dir: Path) -> None:
     assert constants.tech_name == "HN001"
 
 
-def test_aggregate_pdk_subdir_requires_multi_tool_agreement(raw_dir: Path) -> None:
-    # CFXXX appears in calibre + si + quantus → promote.
+def test_aggregate_calibre_lvs_dir_extracted_from_rules_file(raw_dir: Path) -> None:
+    """Phase 5.6.5: ``paths.calibre_lvs_dir`` = dirname of the calibre raw's
+    ``*lvsRulesFile`` value. Whole-path capture replaces the per-segment
+    pdk_subdir / runset_version extraction."""
     from auto_ext.core.importer import aggregate_pdk_tokens
 
     constants = aggregate_pdk_tokens(_all_four_results(raw_dir))
-    assert constants.pdk_subdir == "CFXXX"
-
-
-def test_detect_pdk_tokens_handles_underscored_subdir_name() -> None:
-    """Regression: real-world PDK subdir names contain mixed case + `_` +
-    `.` (e.g. CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9). The earlier
-    `\\bCF[A-Z0-9]+\\b` pattern matched only `CF710` because `_` is a
-    word char so `\\b` could never anchor the right end. The new pattern
-    extends until a path separator / whitespace / quote terminator.
-    """
-    from auto_ext.core.importer import _detect_pdk_tokens
-
-    body = (
-        "*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/"
-        "Ver_Plus_1.0l_0.9/CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9/"
-        "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9.wodio.qcilvs\n"
+    assert (
+        constants.paths["calibre_lvs_dir"]
+        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
     )
-    tokens = _detect_pdk_tokens(body)
-    pdk_values = [t.value for t in tokens if t.category == "pdk_subdir"]
-    assert "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9" in pdk_values
-    # And the runset version still matches as before.
-    runset_values = [t.value for t in tokens if t.category == "runset_version"]
-    assert "Ver_Plus_1.0l_0.9" in runset_values
 
 
-def test_detect_pdk_tokens_handles_underscored_tech_name() -> None:
-    """Same fix applied to tech_name: HN001_v2 should now match in full
-    instead of being truncated to HN001 (or missed entirely when followed
-    by `_`)."""
-    from auto_ext.core.importer import _detect_pdk_tokens
-
-    body = "set tech HN001_v2/CFXXX\n"
-    tokens = _detect_pdk_tokens(body)
-    tech_values = [t.value for t in tokens if t.category == "tech_name"]
-    assert "HN001_v2" in tech_values
-
-
-def test_aggregate_runset_version_split_by_tool_group(raw_dir: Path) -> None:
+def test_aggregate_qrc_deck_dir_cross_checked(raw_dir: Path) -> None:
+    """``paths.qrc_deck_dir`` is the dirname of calibre's
+    ``-query_input <X>/query_cmd`` and quantus's
+    ``-parasitic_blocking_device_cells_file "<X>/preserveCellList.txt"``;
+    if both are present they must agree."""
     from auto_ext.core.importer import aggregate_pdk_tokens
 
     constants = aggregate_pdk_tokens(_all_four_results(raw_dir))
-    # calibre + si carry the LVS runset; they agree on Ver_Plus_1.0l_0.9.
-    assert constants.lvs_runset_version == "Ver_Plus_1.0l_0.9"
-    # quantus carries the QRC runset (single tool, single-source OK).
-    assert constants.qrc_runset_version == "Ver_Plus_1.0a"
+    assert (
+        constants.paths["qrc_deck_dir"]
+        == "$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
+    )
 
 
-def test_aggregate_project_subdir_single_tool_promotes(raw_dir: Path) -> None:
-    # projB only appears in si's /data/RFIC3/<project>/ path; the relaxed
-    # project_subdir rule promotes any value that all tools carrying the
-    # category agree on (single-source OK).
-    from auto_ext.core.importer import aggregate_pdk_tokens
-
-    constants = aggregate_pdk_tokens(_all_four_results(raw_dir))
-    assert constants.project_subdir == "projB"
-    # No unclassified entries for projB (it was promoted).
-    assert not any(u.token.value == "projB" for u in constants.unclassified)
-
-
-def test_aggregate_project_subdir_conflict_unclassifies() -> None:
-    # si says projA, some other tool (calibre) says projB — cross-tool
-    # conflict triggers the unclassify-all fallback.
+def test_aggregate_qrc_deck_dir_conflict_unclassifies() -> None:
+    """When calibre and quantus disagree on the QRC deck dir, neither
+    promotes — both values land in unclassified for human review."""
     from auto_ext.core.importer import (
         Identity,
         ImportResult,
-        PdkToken,
-        aggregate_pdk_tokens,
-    )
-
-    si = ImportResult(
-        tool="si",
-        identity=Identity(),
-        template_body="",
-        pdk_tokens=[PdkToken(value="projA", category="project_subdir", line=1)],
-    )
-    calibre = ImportResult(
-        tool="calibre",
-        identity=Identity(),
-        template_body="",
-        pdk_tokens=[PdkToken(value="projB", category="project_subdir", line=1)],
-    )
-    constants = aggregate_pdk_tokens({"si": si, "calibre": calibre})
-    assert constants.project_subdir is None
-    conflicted = {u.token.value for u in constants.unclassified}
-    assert conflicted == {"projA", "projB"}
-
-
-def test_aggregate_single_tool_pdk_subdir_is_unclassified() -> None:
-    # Only calibre has CFZZZ; without a second tool agreeing, it stays
-    # unclassified per the strict ≥2-tool rule.
-    from auto_ext.core.importer import (
-        ImportResult,
-        Identity,
-        PdkToken,
         aggregate_pdk_tokens,
     )
 
     calibre = ImportResult(
         tool="calibre",
         identity=Identity(),
-        template_body="",
-        pdk_tokens=[PdkToken(value="CFZZZ", category="pdk_subdir", line=1)],
+        template_body=(
+            "*lvsRulesFile: /r/LVS/x/CF/CF.wodio.qcilvs\n"
+            "*lvsPostTriggers: {{calibre -query_input /qrc/A/QCI_deck/query_cmd } process 1}\n"
+        ),
     )
-    constants = aggregate_pdk_tokens({"calibre": calibre})
-    assert constants.pdk_subdir is None
-    assert any(u.token.value == "CFZZZ" for u in constants.unclassified)
+    quantus = ImportResult(
+        tool="quantus",
+        identity=Identity(),
+        template_body=(
+            '-parasitic_blocking_device_cells_file "/qrc/B/QCI_deck/preserveCellList.txt"\n'
+        ),
+    )
+    constants = aggregate_pdk_tokens({"calibre": calibre, "quantus": quantus})
+    assert "qrc_deck_dir" not in constants.paths
+    values = {u.token.value for u in constants.unclassified}
+    assert "/qrc/A/QCI_deck" in values
+    assert "/qrc/B/QCI_deck" in values
 
 
-def test_aggregate_runset_conflict_unclassifies_all() -> None:
-    # calibre + si disagree on LVS version → both tokens unclassify, none
-    # gets promoted. User must resolve.
+def test_aggregate_qrc_deck_dir_quantus_only() -> None:
+    """If only quantus has a deck-dir-bearing line (no calibre query_cmd),
+    the quantus value still promotes."""
     from auto_ext.core.importer import (
         Identity,
         ImportResult,
-        PdkToken,
         aggregate_pdk_tokens,
     )
 
-    calibre = ImportResult(
-        tool="calibre",
+    quantus = ImportResult(
+        tool="quantus",
         identity=Identity(),
-        template_body="",
-        pdk_tokens=[PdkToken(value="Ver_Plus_1.0a", category="runset_version", line=1)],
+        template_body=(
+            '-parasitic_blocking_device_cells_file "/q/QCI_deck/preserveCellList.txt"\n'
+        ),
     )
-    si = ImportResult(
-        tool="si",
-        identity=Identity(),
-        template_body="",
-        pdk_tokens=[PdkToken(value="Ver_Plus_2.0b", category="runset_version", line=1)],
-    )
-    constants = aggregate_pdk_tokens({"calibre": calibre, "si": si})
-    assert constants.lvs_runset_version is None
-    conflicted = {u.token.value for u in constants.unclassified}
-    assert conflicted == {"Ver_Plus_1.0a", "Ver_Plus_2.0b"}
+    constants = aggregate_pdk_tokens({"quantus": quantus})
+    assert constants.paths.get("qrc_deck_dir") == "/q/QCI_deck"
 
 
 def test_aggregate_abs_path_always_unclassified() -> None:
@@ -771,63 +702,61 @@ def test_aggregate_tech_name_non_quantus_source_unclassified() -> None:
     assert any(u.token.value == "HN999" for u in constants.unclassified)
 
 
-# ---- Phase 4b2: apply_project_constants (body rewrite) --------------------
+# ---- apply_project_constants (Phase 5.6.5 body rewrite) -------------------
 
 
-def test_apply_constants_substitutes_all_fields_in_calibre() -> None:
+def test_apply_constants_substitutes_calibre_paths_and_basename() -> None:
+    """Calibre body gets calibre_lvs_dir + qrc_deck_dir substituted, plus
+    the rules-file basename rewritten so the imported template matches
+    the production calibre template's [[calibre_lvs_basename]] knob."""
     from auto_ext.core.importer import ProjectConstants, apply_project_constants
 
     body = (
-        "*lvsRulesFile: /r/LVS/Ver_Plus_1.0l_0.9/CFXXX/x.qcilvs\n"
-        "*cmnTemplate_RN: [[output_dir]]\n"
+        "*lvsRulesFile: /r/LVS/Ver_Plus_1.0l_0.9/CFXXX/CFXXX.wodio.qcilvs\n"
+        "*lvsPostTriggers: {{calibre -query_input /q/QCI_deck/query_cmd -query svdb } process 1}\n"
     )
     constants = ProjectConstants(
         tech_name="HN001",
-        pdk_subdir="CFXXX",
-        lvs_runset_version="Ver_Plus_1.0l_0.9",
-        qrc_runset_version="Ver_Plus_1.0a",
+        paths={
+            "calibre_lvs_dir": "/r/LVS/Ver_Plus_1.0l_0.9/CFXXX",
+            "qrc_deck_dir": "/q/QCI_deck",
+        },
     )
     out = apply_project_constants("calibre", body, constants)
-    assert "[[pdk_subdir]]" in out
-    assert "[[lvs_runset_version]]" in out
-    # Raw values no longer present (replaced).
-    assert "CFXXX" not in out
-    assert "Ver_Plus_1.0l_0.9" not in out
-    # Quantus-only runset untouched in a calibre body.
-    assert "Ver_Plus_1.0a" not in out
-    # tech_name absent in calibre body → no change.
-    # Identity placeholder untouched.
-    assert "[[output_dir]]" in out
+    assert "[[calibre_lvs_dir]]" in out
+    assert "[[calibre_lvs_basename]].wodio.qcilvs" in out
+    assert "[[qrc_deck_dir]]" in out
+    # Raw values gone.
+    assert "/r/LVS/Ver_Plus_1.0l_0.9/CFXXX" not in out
+    assert "/q/QCI_deck" not in out
 
 
-def test_apply_constants_quantus_uses_qrc_runset() -> None:
+def test_apply_constants_quantus_uses_qrc_deck_dir() -> None:
     from auto_ext.core.importer import ProjectConstants, apply_project_constants
 
-    body = '-technology_name "HN001"\n-parasitic_blocking "/r/QRC/Ver_Plus_1.0a/CFXXX/x"\n'
+    body = (
+        '-technology_name "HN001"\n'
+        '-parasitic_blocking_device_cells_file "/q/QCI_deck/preserveCellList.txt"\n'
+    )
     constants = ProjectConstants(
         tech_name="HN001",
-        pdk_subdir="CFXXX",
-        lvs_runset_version="Ver_Plus_1.0l_0.9",
-        qrc_runset_version="Ver_Plus_1.0a",
+        paths={"qrc_deck_dir": "/q/QCI_deck"},
     )
     out = apply_project_constants("quantus", body, constants)
     assert '-technology_name "[[tech_name]]"' in out
-    assert "[[qrc_runset_version]]" in out
-    assert "[[pdk_subdir]]" in out
-    # lvs version never appears in quantus body; unchanged either way.
-    assert "[[lvs_runset_version]]" not in out
+    assert '"[[qrc_deck_dir]]/preserveCellList.txt"' in out
 
 
 def test_apply_constants_no_substring_overshoot() -> None:
-    # pdk_subdir=projB must not match inside a hypothetical projBar identifier.
+    """A path value that happens to be a prefix of another identifier
+    must not match it — boundary anchors guard against that."""
     from auto_ext.core.importer import ProjectConstants, apply_project_constants
 
-    body = "path /data/RFIC3/projB/x\nother /data/RFIC3/projBar/y\n"
-    constants = ProjectConstants(project_subdir="projB")
-    out = apply_project_constants("si", body, constants)
-    assert "/data/RFIC3/[[project_subdir]]/x" in out
-    # projBar untouched because B is followed by [A-Za-z0-9].
-    assert "/data/RFIC3/projBar/y" in out
+    body = "path /q/dir and /q/dir_extra both\n"
+    constants = ProjectConstants(paths={"qrc_deck_dir": "/q/dir"})
+    out = apply_project_constants("quantus", body, constants)
+    assert "/q/dir_extra" in out
+    assert "[[qrc_deck_dir]] and" in out
 
 
 def test_apply_constants_none_fields_are_no_op() -> None:
@@ -835,6 +764,18 @@ def test_apply_constants_none_fields_are_no_op() -> None:
 
     body = "some random content\n"
     out = apply_project_constants("calibre", body, ProjectConstants())
+    assert out == body
+
+
+def test_apply_constants_si_body_untouched_by_paths() -> None:
+    """paths.calibre_lvs_dir / qrc_deck_dir don't apply to si templates."""
+    from auto_ext.core.importer import ProjectConstants, apply_project_constants
+
+    body = "incFILE = '/r/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl'\n"
+    constants = ProjectConstants(
+        paths={"calibre_lvs_dir": "/r/LVS/Ver_Plus_1.0l_0.9/CFXXX"}
+    )
+    out = apply_project_constants("si", body, constants)
     assert out == body
 
 

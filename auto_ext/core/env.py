@@ -17,10 +17,10 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable, Literal
 
-from auto_ext.core.errors import EnvResolutionError
+from auto_ext.core.errors import ConfigError, EnvResolutionError
 
 logger = logging.getLogger(__name__)
 
@@ -125,46 +125,51 @@ def derive_parent_dir_from_env_candidates(
     the parent dir of the first one set. Returns ``None`` if no candidate
     resolves to something usable.
     """
-    return derive_ancestor_dir_from_env_candidates(
-        candidate_var_names, resolved_env, depth=1
-    )
-
-
-def derive_ancestor_dir_from_env_candidates(
-    candidate_var_names: list[str],
-    resolved_env: dict[str, str],
-    *,
-    depth: int,
-) -> str | None:
-    """Return the n-th ancestor directory name from the first env var that
-    resolves.
-
-    ``depth=1`` is the immediate parent (file's directory), ``depth=2`` is
-    its grandparent, etc. Used to extract structured PDK info from env
-    vars whose value points to a file *inside* the runset tree, e.g.::
-
-        $calibre_source_added_place
-            = $VERIFY_ROOT/runset/Calibre_QRC/LVS/<runset>/<pdk_subdir>/empty.cdl
-                                                            └── depth=1
-                                                  └────────── depth=2
-
-    so ``depth=1`` derives ``pdk_subdir`` and ``depth=2`` derives
-    ``lvs_runset_version``. Returns ``None`` if no candidate resolves to
-    a path with that many ancestors with non-empty names.
-    """
-    if depth < 1:
-        raise ValueError(f"depth must be >= 1, got {depth}")
     for var in candidate_var_names:
         value = resolved_env.get(var, "")
         if not value:
             continue
-        ancestor = Path(value)
-        for _ in range(depth):
-            ancestor = ancestor.parent
-        name = ancestor.name
+        name = Path(value).parent.name
         if name:
             return name
     return None
+
+
+def resolve_path_expr(expr: str, env: dict[str, str]) -> str:
+    """Resolve a ``project.paths.<key>`` value to a final path string.
+
+    Syntax: ``<head>[|filter]*``. ``<head>`` is env-substituted via
+    :func:`substitute_env`; each trailing filter is then applied to the
+    resulting :class:`pathlib.Path`. Currently the only filter is
+    ``parent`` (returns ``Path.parent``). Filters chain left-to-right, so
+    ``$X|parent|parent`` walks two levels up.
+
+    Examples (with ``calibre_source_added_place=/v/runset/x/y/empty.cdl``):
+
+    - ``$calibre_source_added_place|parent`` → ``/v/runset/x/y``
+    - ``$VERIFY_ROOT/runset/foo`` → literal substitution, no filter
+    - ``$X|parent|parent`` → ``/v/runset/x``
+
+    Raises :class:`ConfigError` for unknown filter names. Whitespace
+    around ``|`` is tolerated. ``|`` inside the path itself is not
+    supported — `paths.*` values reserve it as the filter delimiter.
+    """
+    head, *filters = expr.split("|")
+    resolved = substitute_env(head, env)
+    if not filters:
+        return resolved
+    # PurePosixPath so Windows dev runs preview the same separators that
+    # the Linux deploy will see (rendered templates always target Linux EDA).
+    p = PurePosixPath(resolved)
+    for f in filters:
+        f = f.strip()
+        if f == "parent":
+            p = p.parent
+        else:
+            raise ConfigError(
+                f"unknown path filter {f!r} in {expr!r}; supported: parent"
+            )
+    return str(p)
 
 
 def substitute_env(text: str, resolved: dict[str, str]) -> str:

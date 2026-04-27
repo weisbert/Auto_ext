@@ -11,7 +11,7 @@
 
 ---
 
-> 配置字段（pdk_subdir / runset_versions / 等）不知道是啥、去哪填的，看 [`CONFIG_GLOSSARY.md`](CONFIG_GLOSSARY.md)。Phase 5.6.4 起大多数字段会从 `$calibre_source_added_place` 等 env var **自动反解**，不用手填。
+> 配置字段（`paths.calibre_lvs_dir` / `paths.qrc_deck_dir` / 等）不知道是啥、去哪填的，看 [`CONFIG_GLOSSARY.md`](CONFIG_GLOSSARY.md)。Phase 5.6.5 起每个 path 直接是模板 `[[<key>]]` 引用的整条目录路径，可以用 `$X|parent` 形式动态地基于 env var 派生。
 
 ## Step 1 — 拉最新代码 + 跑测试
 
@@ -86,9 +86,10 @@ cat runs/task_*/rendered/calibre_lvs.qci | grep -E 'lvsRulesFile|VConnectNamesSt
 
 **预期**两行：
 ```
-*lvsRulesFile: $VERIFY_ROOT/runset/Calibre_QRC/LVS/<lvs_runset_version>/<pdk_subdir>/<pdk_subdir>.widio.qcilvs
+*lvsRulesFile: <calibre_lvs_dir>/<calibre_lvs_basename>.widio.qcilvs
 *cmnVConnectNamesState: ALL
 ```
+其中 `<calibre_lvs_dir>` 是 `project.yaml.paths.calibre_lvs_dir` 解析结果（典型：`$calibre_source_added_place|parent`），`<calibre_lvs_basename>` 自动取 `Path(calibre_lvs_dir).name`。
 
 把 GUI 改回默认（`lvs_variant=wodio` + `connect_by_name=false` → reset 按钮也行），再 dry-run 一次：
 ```

@@ -107,8 +107,9 @@ PYTHONPATH=/c/code/Auto_ext/Auto_ext /c/code/Auto_ext/.venv/Scripts/python -m au
 - 顶部：config 路径标签 / `●` 脏标记 / `[Save]` / `[Revert]`
 - 三个 GroupBox：
   - **Identity**：`work_root` / `verify_root` / `setup_root`（带 `[…]` 目录选择）/ `employee_id`
-  - **PDK**：`tech_name` / `pdk_subdir` / `project_subdir` / `runset_versions.lvs` / `runset_versions.qrc`
+  - **PDK**：`tech_name`
   - **Output**：`layer_map`（文件选择）/ `extraction_output_dir` / `intermediate_dir`
+- **Paths**（Phase 5.6.5）：每条 `project.paths.<key>` 一行；下面 `↳ <template>:<line>  <line excerpt>` 显示这个 path 在哪些模板里被引用（自动 grep），hover 看 tooltip 给 resolves to 预览 + 用法说明。`+ Add path` 加自定义 key、行末 `−` 删除。
 - **Templates**：只读 summary（5.5 之前是这里编辑入口的占位；现在去 Templates tab 编辑）
 - **Environment resolution** 表（核心面板）：
   - 列：`var / source / value / shell value / [Override] / [Clear]`

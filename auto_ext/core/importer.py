@@ -78,14 +78,16 @@ class PdkToken:
 
     Cross-file aggregation is Phase 4b2's job; 4b1 emits per-file hits so
     the review report can list them and so ``init-project`` has raw input.
+
+    Phase 5.6.5 simplifies categories to ``tech_name`` + ``abs_path`` /
+    ``unknown``: the pdk_subdir / runset_version / project_subdir
+    segment-extraction model was abandoned in favor of whole-path
+    capture (see :class:`ProjectConstants.paths`).
     """
 
     value: str
     category: Literal[
-        "pdk_subdir",
         "tech_name",
-        "runset_version",
-        "project_subdir",
         "abs_path",
         "unknown",
     ]
@@ -597,39 +599,26 @@ def _detect_candidates(tool: TOOL, body: str) -> list[Candidate]:
 # ---- PdkToken detection ----------------------------------------------------
 
 
-# Per-file hardcoded-value survey. 4b1 emits these for the import review
-# report; 4b2's ``aggregate_pdk_tokens`` cross-references across tools to
-# auto-promote matching values into project-level fields.
+# Per-file hardcoded-value survey. The Phase 5.6.5 simplification keeps
+# only:
 #
-# - ``pdk_subdir``  : ``CF<ALNUM>+`` anywhere (common PDK-subdir marker).
-# - ``tech_name``   : ``HN<ALNUM>+`` anywhere (Cadence tech library prefix).
-# - ``runset_version``: ``Ver_...`` version strings, delimited by path
-#                       separators / whitespace / quotes.
-# - ``project_subdir``: the ``<name>`` segment from a ``/data/RFIC3/<name>/``
-#                       absolute path (common workarea mount root).
-# - ``abs_path``     : a ``/tmpdata/RFIC/rfic_share/<id>/`` prefix that
-#                       was *not* rewritten to ``[[employee_id]]`` by the
-#                       quantus pre-pass (e.g. raw si paths).
+# - ``tech_name``   : ``HN<ALNUM>+`` anywhere (Cadence tech library prefix);
+#                     promoted by :func:`aggregate_pdk_tokens` from quantus.
+# - ``abs_path``    : a ``/tmpdata/RFIC/rfic_share/<id>/`` prefix that was
+#                     *not* rewritten to ``[[employee_id]]`` by the quantus
+#                     pre-pass; always unclassified for human review.
+#
+# pdk_subdir / runset_version / project_subdir went away when the project
+# schema replaced the per-segment fields with whole-path entries under
+# ``project.paths``; the importer now extracts those paths directly from
+# anchor lines (``*lvsRulesFile`` / ``*lvsPostTriggers`` /
+# ``-parasitic_blocking_device_cells_file``) rather than from regex
+# searches over the body.
 _PDK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    # pdk_subdir / tech_name use the same shape as runset_version: anchor
-    # the start with a negative lookbehind for word chars, then match
-    # mixed-case alnum + underscore + dot until a path / whitespace /
-    # quote terminator. The earlier `\bCF[A-Z0-9]+\b` form failed on
-    # real-world subdir names like CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9
-    # because `_` is a word char so `\b` could never anchor the right end.
-    (
-        "pdk_subdir",
-        re.compile(r"(?<![A-Za-z0-9_])CF[A-Za-z0-9_.]+?(?=[/\s\"]|$)"),
-    ),
     (
         "tech_name",
         re.compile(r"(?<![A-Za-z0-9_])HN[A-Za-z0-9_.]+?(?=[/\s\"]|$)"),
     ),
-    (
-        "runset_version",
-        re.compile(r"(?<![A-Za-z0-9_])Ver_[A-Za-z0-9_.]+?(?=[/\s\"]|$)"),
-    ),
-    ("project_subdir", re.compile(r"/data/RFIC3/(?P<name>[^/\s\"]+)/")),
     ("abs_path", re.compile(r"/tmpdata/RFIC/rfic_share/(?P<name>[^/\s\"]+)/")),
 )
 
@@ -637,9 +626,7 @@ _PDK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 def _detect_pdk_tokens(body: str) -> list[PdkToken]:
     """Scan ``body`` for hardcoded PDK-level values.
 
-    Emits one :class:`PdkToken` per regex hit (multiple occurrences of
-    the same value on different lines yield multiple tokens — the review
-    report groups or dedupes as needed). Matches that reduce to
+    Emits one :class:`PdkToken` per regex hit. Matches that reduce to
     ``[[employee_id]]`` after the per-tool pre-pass are skipped so the
     substituted placeholder is not flagged.
     """
@@ -647,11 +634,11 @@ def _detect_pdk_tokens(body: str) -> list[PdkToken]:
     for line_no, line in enumerate(body.splitlines(), start=1):
         for category, pattern in _PDK_PATTERNS:
             for m in pattern.finditer(line):
-                if category in ("project_subdir", "abs_path"):
+                if category == "abs_path":
                     name = m.group("name")
                     if name == "[[employee_id]]":
                         continue
-                    value = name if category == "project_subdir" else m.group(0)
+                    value = m.group(0)
                 else:
                     value = m.group(0)
                 tokens.append(PdkToken(value=value, category=category, line=line_no))
@@ -822,46 +809,95 @@ class UnclassifiedToken:
 class ProjectConstants:
     """Cross-file PDK constants inferred from a set of :class:`ImportResult`.
 
-    Populated by :func:`aggregate_pdk_tokens`. Maps one-to-one onto the
-    Phase 4b2 ``ProjectConfig`` fields (``tech_name``, ``pdk_subdir``,
-    ``project_subdir``, ``runset_versions.lvs``, ``runset_versions.qrc``).
+    Populated by :func:`aggregate_pdk_tokens`. Phase 5.6.5 collapsed the
+    five segment fields (``pdk_subdir`` / ``project_subdir`` /
+    ``runset_versions.{lvs,qrc}``) into a single ``paths`` dict whose
+    canonical entries are ``calibre_lvs_dir`` and ``qrc_deck_dir`` — the
+    whole-path values referenced directly by ``[[<key>]]`` in templates.
+
     ``unclassified`` surfaces hardcoded values that couldn't be confidently
-    promoted — rendered as-is in the review report for user review.
+    promoted (e.g. cross-tool conflicts on the QRC deck dir, ``abs_path``
+    leaks); the review report renders them as-is for user review.
     """
 
     tech_name: str | None = None
-    pdk_subdir: str | None = None
-    project_subdir: str | None = None
-    lvs_runset_version: str | None = None
-    qrc_runset_version: str | None = None
+    paths: dict[str, str] = field(default_factory=dict)
     unclassified: tuple[UnclassifiedToken, ...] = ()
+
+
+# ---- path extraction (calibre + quantus anchor lines) ----------------------
+
+
+# *lvsRulesFile: <path>/<basename>.<variant>.qcilvs
+# Capture the dirname (everything before the last "/") and the basename.
+# We assume the calibre per-tool importer hasn't touched this line — the
+# rules file value is not an identity field.
+_CALIBRE_RULES_FILE_RE = re.compile(
+    r"^\*lvsRulesFile:\s+(?P<dir>\S+)/(?P<basename>[^/\s]+?)\.[^/.\s]+\.qcilvs\s*$",
+    re.MULTILINE,
+)
+# *lvsPostTriggers: ... -query_input <path>/query_cmd ...
+_CALIBRE_QUERY_CMD_RE = re.compile(
+    r"-query_input\s+(?P<dir>\S+)/query_cmd"
+)
+# Quantus: -parasitic_blocking_device_cells_file "<path>/preserveCellList.txt"
+_QUANTUS_PRESERVE_RE = re.compile(
+    r'-parasitic_blocking_device_cells_file\s+"(?P<dir>[^"]+)/preserveCellList\.txt"'
+)
+
+
+def _extract_calibre_lvs_dir(body: str) -> str | None:
+    m = _CALIBRE_RULES_FILE_RE.search(body)
+    return m.group("dir") if m else None
+
+
+def _extract_calibre_lvs_basename(body: str) -> str | None:
+    m = _CALIBRE_RULES_FILE_RE.search(body)
+    return m.group("basename") if m else None
+
+
+def _extract_qrc_deck_from_calibre(body: str) -> str | None:
+    m = _CALIBRE_QUERY_CMD_RE.search(body)
+    return m.group("dir") if m else None
+
+
+def _extract_qrc_deck_from_quantus(body: str) -> str | None:
+    m = _QUANTUS_PRESERVE_RE.search(body)
+    return m.group("dir") if m else None
+
+
+# ``$env(VERIFY_ROOT)`` (Tcl) and ``$VERIFY_ROOT`` / ``${VERIFY_ROOT}`` (shell)
+# all denote the same env var; the cross-check between calibre and quantus
+# qrc_deck_dir candidates needs to treat them as equivalent. Normalize all
+# three forms to the bare ``$NAME`` shape before comparison + emission.
+_ENV_NORMALIZE_TCL = re.compile(r"\$env\(([A-Za-z_][A-Za-z0-9_]*)\)")
+_ENV_NORMALIZE_BRACE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _canonicalize_env_refs(value: str) -> str:
+    value = _ENV_NORMALIZE_TCL.sub(r"$\1", value)
+    value = _ENV_NORMALIZE_BRACE.sub(r"$\1", value)
+    return value
 
 
 def aggregate_pdk_tokens(
     results: dict[TOOL, ImportResult],
 ) -> ProjectConstants:
-    """Cross-reference :class:`PdkToken`\\ s from every tool's import.
+    """Cross-reference :class:`PdkToken`\\ s + per-tool anchor lines.
 
-    Promotion policy (from the Phase 4b2 plan, Q6/Q8):
+    Promotion policy (Phase 5.6.5):
 
-    - ``tech_name``: take the first ``HN...`` token from quantus. Non-quantus
-      ``tech_name`` tokens go to ``unclassified`` (suspicious — calibre/si/jivaro
-      don't carry ``-technology_name``).
-    - ``pdk_subdir``: a value must appear in ≥ 2 tools to promote. Below
-      threshold → all occurrences of that category land in ``unclassified``.
-      Rationale: pdk_subdir is cross-referenced across every runset path;
-      a single-file hit is more likely a partial raw export than a real
-      project constant.
-    - ``project_subdir``: single-tool OK (realistically only si's
-      ``/data/RFIC3/<project>/`` path carries it). Cross-tool conflict →
-      unclassify all so the user picks a winner.
-    - ``runset_versions.lvs``: collected from calibre + si (both carry LVS
-      runset strings). If the tool group has exactly one distinct value →
-      promote; conflict → unclassify all.
-    - ``runset_versions.qrc``: same rule, applied to the quantus group.
-    - ``abs_path`` and ``unknown`` categories are always unclassified —
-      they're for surfacing absolute paths the user must review, never
-      auto-substituted.
+    - ``tech_name``: first ``HN...`` token from quantus. Non-quantus
+      hits → ``unclassified``.
+    - ``paths.calibre_lvs_dir``: dirname of ``*lvsRulesFile`` in the
+      calibre raw. Not extracted from any other tool.
+    - ``paths.qrc_deck_dir``: dirname of the ``query_cmd`` argument in
+      calibre's ``*lvsPostTriggers`` AND/OR dirname of quantus's
+      ``-parasitic_blocking_device_cells_file``. If both are present and
+      disagree, neither is promoted and both values land in
+      ``unclassified``.
+    - ``abs_path`` / ``unknown`` PdkTokens are always unclassified —
+      surfacing absolute paths the user must review, never auto-substituted.
     """
 
     unclassified: list[UnclassifiedToken] = []
@@ -877,23 +913,56 @@ def aggregate_pdk_tokens(
                     tech_name = tok.value
                 elif tok.value != tech_name:
                     unclassified.append(UnclassifiedToken(tool=tool, token=tok))
-                # Else: duplicate of the promoted value — silently absorb.
+                # else: duplicate of promoted value, silently absorb.
             else:
                 unclassified.append(UnclassifiedToken(tool=tool, token=tok))
 
-    # ---- pdk_subdir (strict ≥ 2-tool agreement) ---------------------------
-    pdk_subdir = _promote_multi_tool(results, "pdk_subdir", unclassified)
+    # ---- paths.calibre_lvs_dir -------------------------------------------
+    paths: dict[str, str] = {}
+    if "calibre" in results:
+        d = _extract_calibre_lvs_dir(results["calibre"].template_body)
+        if d:
+            paths["calibre_lvs_dir"] = _canonicalize_env_refs(d)
 
-    # ---- project_subdir (relaxed: single-tool OK, conflicts unclassify) ---
-    project_subdir = _promote_any_agreeing(
-        results, "project_subdir", unclassified
+    # ---- paths.qrc_deck_dir (calibre + quantus, with cross-check) --------
+    qrc_from_calibre = (
+        _extract_qrc_deck_from_calibre(results["calibre"].template_body)
+        if "calibre" in results
+        else None
     )
+    qrc_from_quantus = (
+        _extract_qrc_deck_from_quantus(results["quantus"].template_body)
+        if "quantus" in results
+        else None
+    )
+    qrc_calibre_norm = _canonicalize_env_refs(qrc_from_calibre) if qrc_from_calibre else None
+    qrc_quantus_norm = _canonicalize_env_refs(qrc_from_quantus) if qrc_from_quantus else None
+    if qrc_calibre_norm and qrc_quantus_norm:
+        if qrc_calibre_norm == qrc_quantus_norm:
+            paths["qrc_deck_dir"] = qrc_calibre_norm
+        else:
+            unclassified.append(
+                UnclassifiedToken(
+                    tool="calibre",
+                    token=PdkToken(
+                        value=qrc_calibre_norm, category="unknown", line=0
+                    ),
+                )
+            )
+            unclassified.append(
+                UnclassifiedToken(
+                    tool="quantus",
+                    token=PdkToken(
+                        value=qrc_quantus_norm, category="unknown", line=0
+                    ),
+                )
+            )
+    elif qrc_calibre_norm:
+        paths["qrc_deck_dir"] = qrc_calibre_norm
+    elif qrc_quantus_norm:
+        paths["qrc_deck_dir"] = qrc_quantus_norm
 
-    # ---- runset_versions (tool-group scoped) ------------------------------
-    lvs_runset = _promote_runset(results, ("calibre", "si"), unclassified)
-    qrc_runset = _promote_runset(results, ("quantus",), unclassified)
-
-    # ---- abs_path / unknown always unclassified ---------------------------
+    # ---- abs_path / unknown PdkTokens always unclassified ----------------
     for tool, result in results.items():
         for tok in result.pdk_tokens:
             if tok.category in ("abs_path", "unknown"):
@@ -904,108 +973,34 @@ def aggregate_pdk_tokens(
 
     return ProjectConstants(
         tech_name=tech_name,
-        pdk_subdir=pdk_subdir,
-        project_subdir=project_subdir,
-        lvs_runset_version=lvs_runset,
-        qrc_runset_version=qrc_runset,
+        paths=paths,
         unclassified=tuple(unclassified),
     )
 
 
-def _promote_multi_tool(
-    results: dict[TOOL, ImportResult],
-    category: str,
-    unclassified: list[UnclassifiedToken],
-) -> str | None:
-    """Promote a single ``category`` value iff it appears in ≥ 2 tools.
-
-    Every other token of that category (losing value, or all tokens when
-    nothing meets the threshold) is appended to ``unclassified``.
-    """
-    value_to_tools: dict[str, set[TOOL]] = {}
-    hits: list[tuple[TOOL, PdkToken]] = []
-    for tool, result in results.items():
-        for tok in result.pdk_tokens:
-            if tok.category != category:
-                continue
-            value_to_tools.setdefault(tok.value, set()).add(tool)
-            hits.append((tool, tok))
-
-    winner: str | None = None
-    best_count = 1
-    for value, tools in value_to_tools.items():
-        if len(tools) >= 2 and len(tools) > best_count:
-            winner = value
-            best_count = len(tools)
-
-    for tool, tok in hits:
-        if tok.value == winner:
-            continue
-        unclassified.append(UnclassifiedToken(tool=tool, token=tok))
-
-    return winner
-
-
-def _promote_any_agreeing(
-    results: dict[TOOL, ImportResult],
-    category: str,
-    unclassified: list[UnclassifiedToken],
-) -> str | None:
-    """Promote ``category`` if every tool carrying it agrees on one value.
-
-    Single-tool sources are OK — unlike :func:`_promote_multi_tool` this
-    does not require cross-file corroboration. Cross-tool disagreement is
-    the only failure mode; every conflicting token goes to ``unclassified``.
-    """
-    values: set[str] = set()
-    hits: list[tuple[TOOL, PdkToken]] = []
-    for tool, result in results.items():
-        for tok in result.pdk_tokens:
-            if tok.category != category:
-                continue
-            values.add(tok.value)
-            hits.append((tool, tok))
-
-    if len(values) == 1:
-        return next(iter(values))
-
-    for tool, tok in hits:
-        unclassified.append(UnclassifiedToken(tool=tool, token=tok))
-    return None
-
-
-def _promote_runset(
-    results: dict[TOOL, ImportResult],
-    tool_group: tuple[TOOL, ...],
-    unclassified: list[UnclassifiedToken],
-) -> str | None:
-    """Promote a runset_version for ``tool_group`` (calibre/si → lvs;
-    quantus → qrc).
-
-    Policy: the group must agree on exactly one distinct value. Zero →
-    nothing to promote. Conflict → everyone unclassifies (human-review
-    signal; the runset strings are too critical to guess).
-    """
-    hits: list[tuple[TOOL, PdkToken]] = []
-    values: set[str] = set()
-    for tool in tool_group:
-        if tool not in results:
-            continue
-        for tok in results[tool].pdk_tokens:
-            if tok.category != "runset_version":
-                continue
-            hits.append((tool, tok))
-            values.add(tok.value)
-
-    if len(values) == 1:
-        return next(iter(values))
-
-    for tool, tok in hits:
-        unclassified.append(UnclassifiedToken(tool=tool, token=tok))
-    return None
-
-
 # ---- body rewrite (apply ProjectConstants to a template body) -------------
+
+
+def _compile_path_substitution_re(canonical: str) -> re.Pattern[str]:
+    """Build a regex that matches every env-var-form variant of ``canonical``.
+
+    A canonical path value uses the bare ``$NAME`` form; the body it's
+    substituted into may use ``$NAME``, ``${NAME}``, or ``$env(NAME)`` for
+    the same env var. The compiled regex tolerates any of those forms at
+    each ``$NAME`` position while keeping the literal segments (and
+    non-identifier boundary anchors) intact.
+    """
+    parts: list[str] = []
+    last = 0
+    for m in re.finditer(r"\$([A-Za-z_][A-Za-z0-9_]*)", canonical):
+        parts.append(re.escape(canonical[last : m.start()]))
+        name = m.group(1)
+        parts.append(rf"(?:\${name}|\${{{name}}}|\$env\({name}\))")
+        last = m.end()
+    parts.append(re.escape(canonical[last:]))
+    return re.compile(
+        r"(?<![A-Za-z0-9_])" + "".join(parts) + r"(?![A-Za-z0-9_])"
+    )
 
 
 def apply_project_constants(
@@ -1013,37 +1008,58 @@ def apply_project_constants(
 ) -> str:
     """Substitute promoted PDK constants in ``body`` with Jinja placeholders.
 
-    Each raw value is replaced in-place at every non-identifier-bounded
-    occurrence: the lookaround guards ``(?<![A-Za-z0-9_])`` / ``(?![A-Za-z0-9_])``
-    prevent short matches from eating parts of longer identifiers (e.g.
-    ``HN001`` inside ``HN0010`` stays intact; ``projB`` inside ``projBar`` stays
-    intact). Substitutions are applied in order of descending value length
-    so a short value does not pre-empt a longer one that includes it.
+    Phase 5.6.5 substitutions:
 
-    Runset versions are per-tool: calibre/si bodies receive ``[[lvs_runset_version]]``,
-    quantus bodies receive ``[[qrc_runset_version]]``, jivaro bodies receive
-    neither (jivaro XML never references runset strings).
+    - ``tech_name`` → ``[[tech_name]]`` (any tool body that contains it;
+      typically only quantus carries ``HN...``).
+    - ``paths.calibre_lvs_dir`` → ``[[calibre_lvs_dir]]`` (calibre body only).
+      The basename portion of the rules-file line is also rewritten to
+      ``[[calibre_lvs_basename]]`` so the imported template matches the
+      bundled production calibre template's shape.
+    - ``paths.qrc_deck_dir`` → ``[[qrc_deck_dir]]`` (calibre + quantus only).
+
+    Path values stored in ``constants.paths`` are in canonical ``$NAME``
+    form. The body substitution accepts any equivalent env-var form
+    (``$NAME`` / ``${NAME}`` / ``$env(NAME)``) at each position, so a
+    calibre body with ``$VERIFY_ROOT/...`` and a quantus body with
+    ``$env(VERIFY_ROOT)/...`` both get rewritten correctly.
+
+    Boundary anchors guard against substring overshoot (e.g. ``/q/dir``
+    inside ``/q/dir_extra`` stays intact). Order of application is
+    descending canonical-value length so a short value cannot pre-empt a
+    longer one that contains it.
     """
     substitutions: list[tuple[str, str]] = []
     if constants.tech_name:
         substitutions.append((constants.tech_name, "[[tech_name]]"))
-    if constants.pdk_subdir:
-        substitutions.append((constants.pdk_subdir, "[[pdk_subdir]]"))
-    if constants.project_subdir:
-        substitutions.append((constants.project_subdir, "[[project_subdir]]"))
-    if tool in ("calibre", "si") and constants.lvs_runset_version:
-        substitutions.append(
-            (constants.lvs_runset_version, "[[lvs_runset_version]]")
-        )
-    elif tool == "quantus" and constants.qrc_runset_version:
-        substitutions.append(
-            (constants.qrc_runset_version, "[[qrc_runset_version]]")
-        )
+    if tool == "calibre":
+        # Rewrite the rules-file basename inline. We do this before path
+        # substitutions so the rules-file dirname stays as a single token
+        # for the calibre_lvs_dir replacement.
+        basename = _extract_calibre_lvs_basename(body)
+        if basename:
+            body = re.sub(
+                r"(\*lvsRulesFile:\s+\S*?)"
+                + re.escape(basename)
+                + r"(\.[^/.\s]+\.qcilvs)",
+                r"\1[[calibre_lvs_basename]]\2",
+                body,
+            )
+        d = constants.paths.get("calibre_lvs_dir")
+        if d:
+            substitutions.append((d, "[[calibre_lvs_dir]]"))
+    if tool in ("calibre", "quantus"):
+        d = constants.paths.get("qrc_deck_dir")
+        if d:
+            substitutions.append((d, "[[qrc_deck_dir]]"))
 
     substitutions.sort(key=lambda p: -len(p[0]))
     for raw, placeholder in substitutions:
-        pattern = re.compile(
-            r"(?<![A-Za-z0-9_])" + re.escape(raw) + r"(?![A-Za-z0-9_])"
-        )
+        if "$" in raw:
+            pattern = _compile_path_substitution_re(raw)
+        else:
+            pattern = re.compile(
+                r"(?<![A-Za-z0-9_])" + re.escape(raw) + r"(?![A-Za-z0-9_])"
+            )
         body = pattern.sub(placeholder, body)
     return body

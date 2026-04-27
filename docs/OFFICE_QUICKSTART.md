@@ -65,8 +65,8 @@ python3.11 -m pytest tests/ -v
 
 1. 4 个原始文件跑 import，抽出 identity（cell / library / views / ground_net / out_file）
 2. 跨工具校验 identity 必须一致（cell 在 calibre/si/quantus/jivaro 必须都指同一个，否则报 `identity mismatch` 拒绝写出）
-3. 把 4 个文件里的硬编码值聚合成 project 级常量：`tech_name`（`HN001`）/ `pdk_subdir`（`CFXXX`）/ `project_subdir`（`projB`）/ `runset_versions.lvs`（`Ver_Plus_1.0l_0.9`）/ `runset_versions.qrc`（`Ver_Plus_1.0a`）
-4. 把每份模板 body 里的这些值都换成 `[[tech_name]]` / `[[pdk_subdir]]` / 等占位符
+3. 从 4 个文件的锚点行抽出 project 级常量：`tech_name`（quantus 的 `-technology_name`）/ `paths.calibre_lvs_dir`（calibre `*lvsRulesFile` 行的 dirname）/ `paths.qrc_deck_dir`（calibre `*lvsPostTriggers` 的 query_input dirname，跟 quantus `-parasitic_blocking_device_cells_file` 的 dirname 交叉校验）
+4. 把每份模板 body 里的这些值都换成 `[[tech_name]]` / `[[calibre_lvs_dir]]` / `[[qrc_deck_dir]]` 等占位符
 5. 写出：
    - `Auto_ext_pro/config/project.yaml` — 填好 PDK 常量 + 4 个 template 指针
    - `Auto_ext_pro/config/tasks.yaml` — 一条基于检测 identity 的 skeleton 任务
@@ -103,11 +103,9 @@ init-project 写出的 project.yaml 长这样（节选）：
 
 ```yaml
 tech_name: HN001
-pdk_subdir: CFXXX
-project_subdir: projB
-runset_versions:
-  lvs: Ver_Plus_1.0l_0.9
-  qrc: Ver_Plus_1.0a
+paths:
+  calibre_lvs_dir: $VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck
 templates:
   calibre: Auto_ext_pro/templates/calibre/imported.qci.j2
   si: Auto_ext_pro/templates/si/imported.env.j2
@@ -117,7 +115,7 @@ templates:
 
 `work_root` / `verify_root` / `setup_root` / `employee_id` 全部**不写**就行 —— shell env 里有就用 shell 的，`employee_id` 不设就自动取 `$USER`。`layer_map` 默认是 `${PDK_LAYER_MAP_FILE}`，也从 shell 取。
 
-换 PDK / 换 tech？直接编辑上面那几个字段的值，模板完全不用动。这就是 init-project 的意义。
+`paths.<key>` 是 Phase 5.6.5 的新 schema：每个值是模板 `[[<key>]]` 引用的整条目录路径。可以用 `$X` env var、字面段、可选的 `|parent` 过滤器（参见 `docs/CONFIG_GLOSSARY.md#paths`）。换 PDK / 换 tech？直接编辑这两行，模板完全不用动。
 
 ### 4.4 单个模板的 ad-hoc import（不跑整个 init-project 时）
 
@@ -138,7 +136,7 @@ templates:
 - `my_tpl.qci.j2.manifest.yaml` — 空 `knobs: {}` 起步
 - `my_tpl.qci.j2.review.md` — 人读的 review 报告，列出 identity / 候选 knob 数量 / 残留硬编码
 
-**注意**：单文件 import **不会**跑跨文件的 PDK 聚合（那是 init-project 的活）；硬编码 `CFXXX` / `HN001` / `Ver_Plus_*` 会原样留在 body 里。如果目标 `project.yaml` 已经有 `tech_name` / `pdk_subdir` 等字段，手动在 body 里替换成 `[[tech_name]]` 等即可。
+**注意**：单文件 import **不会**跑跨文件的 PDK 聚合（那是 init-project 的活）；硬编码 `CFXXX` / `HN001` / `Ver_Plus_*` 会原样留在 body 里。如果目标 `project.yaml` 已经有 `tech_name` / `paths.*` 等字段，手动在 body 里替换成 `[[tech_name]]` / `[[calibre_lvs_dir]]` 等即可。
 
 #### 候选 knob + 提升
 
@@ -330,16 +328,16 @@ LVS 过了之后：
 | 原始字面量（示例） | 抽象成 | 存储在 |
 |-------------------|-------|-------|
 | `HN001` | `[[tech_name]]` | `project.yaml.tech_name` |
-| `CFXXX` | `[[pdk_subdir]]` | `project.yaml.pdk_subdir` |
-| `Ver_Plus_1.0l_0.9` / `Ver_Plus_1.0a` | `[[lvs_runset_version]]` / `[[qrc_runset_version]]` | `project.yaml.runset_versions.{lvs,qrc}` |
-| `projB`（`/data/RFIC3/projB/...` 里的） | `[[project_subdir]]` | `project.yaml.project_subdir` |
+| `$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_*/CF*` | `[[calibre_lvs_dir]]` | `project.yaml.paths.calibre_lvs_dir` |
+| `<dir>/CFXXX.<variant>.qcilvs` 中的 `CFXXX` | `[[calibre_lvs_basename]]` | 自动派生：`Path(calibre_lvs_dir).name` |
+| `$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_*/CF*/QCI_deck` | `[[qrc_deck_dir]]` | `project.yaml.paths.qrc_deck_dir` |
 | `/tmpdata/RFIC/rfic_share/alice/` + `/data/RFIC3/.../alice/` | `[[employee_id]]` | shell `$USER` 或 `project.yaml.employee_id` |
 
 换 PDK / tech / 项目 / 用户 = 编辑 `project.yaml` 的对应字段，模板完全不碰。
 
 ### 6.2 仓库自带的老模板
 
-仓库 `templates/` 下自带的 5 个模板（`calibre_lvs.qci.j2` / `ext.cmd.j2` / `dspf.cmd.j2` / `default.env.j2` 等）已经把 PDK 硬编码全部抽象成了 `[[tech_name]]` / `[[pdk_subdir]]` / `[[lvs_runset_version]]` / `[[qrc_runset_version]]` 占位符，所以直接用这些模板、让 `project.yaml` 填那几个字段就能跑。Calibre 模板还接受 `lvs_variant`（`wodio` / `widio`，默认 `wodio`）和 `connect_by_name`（默认 `false`） 两个 knob，可在 `project.yaml.knobs.calibre.*` 或 `tasks.yaml[i].knobs.calibre.*` 里覆盖。
+仓库 `templates/` 下自带的 5 个模板（`calibre_lvs.qci.j2` / `ext.cmd.j2` / `dspf.cmd.j2` / `default.env.j2` 等）已经把 PDK 硬编码全部抽象成了 `[[tech_name]]` / `[[calibre_lvs_dir]]` / `[[calibre_lvs_basename]]` / `[[qrc_deck_dir]]` 占位符，所以直接用这些模板、让 `project.yaml.paths` 填那两条 path 就能跑。Calibre 模板还接受 `lvs_variant`（`wodio` / `widio`，默认 `wodio`）和 `connect_by_name`（默认 `false`） 两个 knob，可在 `project.yaml.knobs.calibre.*` 或 `tasks.yaml[i].knobs.calibre.*` 里覆盖。
 
 `tech_name` 还支持**自动推导**：`project.yaml` 里不设 `tech_name` 时，runner 会依次从 `$PDK_TECH_FILE` / `$PDK_LAYER_MAP_FILE` / `$PDK_DISPLAY_FILE` 的父目录名推出来（第一个有值的 env var 生效）。默认候选列表也可以通过 `project.yaml.tech_name_env_vars` 覆盖。推不出来时 `check-env` 会给黄色警告。
 

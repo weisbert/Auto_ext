@@ -88,9 +88,15 @@ def test_init_project_projectA_writes_full_skeleton(
 
     project = load_project(cfg / "project.yaml")
     assert project.tech_name == "HN001"
-    assert project.pdk_subdir == "CFXXX"
-    assert project.runset_versions.lvs == "Ver_Plus_1.0l_0.9"
-    assert project.runset_versions.qrc == "Ver_Plus_1.0a"
+    # Phase 5.6.5: paths schema replaces pdk_subdir / runset_versions.
+    assert (
+        project.paths["calibre_lvs_dir"]
+        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
+    )
+    assert (
+        project.paths["qrc_deck_dir"]
+        == "$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
+    )
     # Template pointers resolve to the written .j2 files.
     assert project.templates.calibre == tpl / "calibre" / "imported.qci.j2"
     assert project.templates.jivaro == tpl / "jivaro" / "imported.xml.j2"
@@ -270,22 +276,23 @@ def test_init_project_cross_project_abstraction(
     assert resB.exit_code == 0, resB.output
 
     # Each per-tool body must contain the placeholders for every value
-    # aggregate_pdk_tokens was supposed to lift.
+    # aggregate_pdk_tokens was supposed to lift. Phase 5.6.5: per-segment
+    # placeholders ([[pdk_subdir]] / [[lvs_runset_version]]) are gone;
+    # the path holds the whole directory under one name.
     expected_placeholders = {
         "calibre": {
             "[[cell]]",
             "[[library]]",
             "[[lvs_layout_view]]",
             "[[lvs_source_view]]",
-            "[[pdk_subdir]]",
-            "[[lvs_runset_version]]",
+            "[[calibre_lvs_dir]]",
+            "[[calibre_lvs_basename]]",
+            "[[qrc_deck_dir]]",
         },
         "si": {
             "[[cell]]",
             "[[library]]",
             "[[lvs_source_view]]",
-            "[[pdk_subdir]]",
-            "[[lvs_runset_version]]",
         },
         "quantus": {
             "[[cell]]",
@@ -293,8 +300,7 @@ def test_init_project_cross_project_abstraction(
             "[[lvs_layout_view]]",
             "[[ground_net]]",
             "[[tech_name]]",
-            "[[pdk_subdir]]",
-            "[[qrc_runset_version]]",
+            "[[qrc_deck_dir]]",
             "[[employee_id]]",
         },
         "jivaro": {
@@ -305,10 +311,25 @@ def test_init_project_cross_project_abstraction(
     }
 
     # Raw values from each project that MUST NOT leak into the body of
-    # the other project — a sanity check that per-project constants did
-    # not bleed into a template.
-    raw_leak_A = {"INV1", "INV_LIB", "HN001", "CFXXX", "Ver_Plus_1.0l_0.9", "Ver_Plus_1.0a"}
-    raw_leak_B = {"AMP2", "AMP_LIB", "HN042", "CFBETA", "Ver_Minus_2.1a_0.3", "Ver_Minus_2.1c"}
+    # the other project. tech_name and the path strings get rewritten
+    # via apply_project_constants; identity values via the per-tool
+    # importer; the rest stays as-is in the imported template.
+    # Identity + tech_name leaks are checked across all tools. The path
+    # strings (LVS / QCI_deck dirs) are only substituted in calibre +
+    # quantus (paths.calibre_lvs_dir / paths.qrc_deck_dir scope); a
+    # literal LVS path in an si.env incFILE line is an artifact of the
+    # test fixture (real exports use $calibre_source_added_place), so
+    # don't enforce path leaks against si / jivaro bodies.
+    raw_leak_universal_A = {"INV1", "INV_LIB", "HN001"}
+    raw_leak_universal_B = {"AMP2", "AMP_LIB", "HN042"}
+    raw_leak_paths_A = {
+        "Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX",
+        "Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck",
+    }
+    raw_leak_paths_B = {
+        "Calibre_QRC/LVS/Ver_Minus_2.1a_0.3/CFBETA",
+        "Calibre_QRC/QRC/Ver_Minus_2.1c/CFBETA/QCI_deck",
+    }
 
     for tool, ext in (("calibre", "qci"), ("si", "env"), ("quantus", "cmd"), ("jivaro", "xml")):
         body_A = (out_A / "templates" / tool / f"imported.{ext}.j2").read_text(encoding="utf-8")
@@ -316,10 +337,15 @@ def test_init_project_cross_project_abstraction(
         for ph in expected_placeholders[tool]:
             assert ph in body_A, f"projectA {tool} body missing {ph}"
             assert ph in body_B, f"projectB {tool} body missing {ph}"
-        for raw in raw_leak_A:
+        for raw in raw_leak_universal_A:
             assert raw not in body_A, f"projectA {tool} body still contains raw {raw!r}"
-        for raw in raw_leak_B:
+        for raw in raw_leak_universal_B:
             assert raw not in body_B, f"projectB {tool} body still contains raw {raw!r}"
+        if tool in ("calibre", "quantus"):
+            for raw in raw_leak_paths_A:
+                assert raw not in body_A, f"projectA {tool} body still contains raw {raw!r}"
+            for raw in raw_leak_paths_B:
+                assert raw not in body_B, f"projectB {tool} body still contains raw {raw!r}"
 
     # project.yaml carries different constants.
     from auto_ext.core.config import load_project
@@ -328,12 +354,16 @@ def test_init_project_cross_project_abstraction(
     pB = load_project(out_B / "config" / "project.yaml")
     assert pA.tech_name == "HN001"
     assert pB.tech_name == "HN042"
-    assert pA.pdk_subdir == "CFXXX"
-    assert pB.pdk_subdir == "CFBETA"
-    assert pA.runset_versions.lvs == "Ver_Plus_1.0l_0.9"
-    assert pB.runset_versions.lvs == "Ver_Minus_2.1a_0.3"
-    assert pA.runset_versions.qrc == "Ver_Plus_1.0a"
-    assert pB.runset_versions.qrc == "Ver_Minus_2.1c"
+    assert (
+        pA.paths["calibre_lvs_dir"]
+        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
+    )
+    assert (
+        pB.paths["calibre_lvs_dir"]
+        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Minus_2.1a_0.3/CFBETA"
+    )
+    assert "QRC/Ver_Plus_1.0a/CFXXX/QCI_deck" in pA.paths["qrc_deck_dir"]
+    assert "QRC/Ver_Minus_2.1c/CFBETA/QCI_deck" in pB.paths["qrc_deck_dir"]
 
 
 def test_init_project_projectB_dry_run_passes(
@@ -387,8 +417,8 @@ def test_init_project_summary_shows_promoted_constants(
     result = _invoke_init(runner, raw_projectA_dir, tmp_path)
     assert result.exit_code == 0, result.output
     assert "tech_name" in result.output and "HN001" in result.output
-    assert "pdk_subdir" in result.output and "CFXXX" in result.output
-    assert "project_subdir" in result.output and "projB" in result.output
+    assert "calibre_lvs_dir" in result.output
+    assert "qrc_deck_dir" in result.output
     assert "Ver_Plus_1.0l_0.9" in result.output
     assert "Ver_Plus_1.0a" in result.output
 
@@ -398,30 +428,24 @@ def test_init_project_summary_surfaces_unclassified_on_conflict(
     raw_projectA_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """When fixtures produce a token that can't be promoted (here: a
-    synthetic project_subdir conflict), the summary flags it as
-    ``Unclassified`` so the user knows to hand-review.
+    """When fixtures produce a token that can't be promoted (here: HN... in
+    calibre, which only quantus is allowed to carry), the summary flags it
+    as ``Unclassified`` so the user knows to hand-review.
     """
     conflict_dir = tmp_path / "conflict_raw"
     conflict_dir.mkdir()
-    for name in ("calibre_sample.qci", "quantus_sample.cmd", "jivaro_sample.xml"):
+    for name in (
+        "calibre_sample.qci",
+        "quantus_sample.cmd",
+        "jivaro_sample.xml",
+        "si_sample.env",
+    ):
         (conflict_dir / name).write_bytes((raw_projectA_dir / name).read_bytes())
-    # Original si uses /data/RFIC3/projB/alice/. Calibre normally has no
-    # /data/RFIC3/... path; inject a conflicting projA reference in an
-    # unused Tcl trigger line so aggregate_pdk_tokens sees projA (calibre)
-    # vs projB (si) and unclassifies both.
     calibre_raw = (conflict_dir / "calibre_sample.qci").read_text(encoding="utf-8")
-    calibre_raw += (
-        "*lvsPostTriggers: {{cat /data/RFIC3/projA/bob/x/y} process 1}\n"
-    )
+    calibre_raw += "*lvsCustomComment: tech HN999 leftover\n"
     (conflict_dir / "calibre_sample.qci").write_text(calibre_raw, encoding="utf-8")
-    # Copy si unchanged so it still has projB.
-    (conflict_dir / "si_sample.env").write_bytes(
-        (raw_projectA_dir / "si_sample.env").read_bytes()
-    )
 
     result = _invoke_init(runner, conflict_dir, tmp_path / "out")
     assert result.exit_code == 0, result.output
     assert "Unclassified" in result.output
-    assert "projA" in result.output
-    assert "projB" in result.output
+    assert "HN999" in result.output
