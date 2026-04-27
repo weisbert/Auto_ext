@@ -195,6 +195,42 @@ def test_si_cross_validation_mismatch() -> None:
         import_template("si", raw)
 
 
+def test_si_injects_simrundir_when_missing() -> None:
+    """Some Cadence flows export si.env without simRunDir. Without that
+    line si writes netlist into cwd, breaking quantus downstream
+    (LBRCXM-756). The importer auto-appends the canonical line so the
+    imported template stays usable."""
+    raw = (
+        'simLibName = "MY_LIB"\n'
+        'simCellName = "MY_CELL"\n'
+        'simViewName = "schematic"\n'
+        'simSimulator = "auCdl"\n'
+        'incFILE = "$calibre_source_added_place"\n'
+    )
+    body = import_template("si", raw).template_body
+    assert 'simRunDir = "[[output_dir]]"' in body
+    # Identity substitution still ran on the lines that were present.
+    assert 'simLibName = "[[library]]"' in body
+    assert 'simCellName = "[[cell]]"' in body
+
+
+def test_si_does_not_duplicate_simrundir_when_present(si_raw: str) -> None:
+    """If the raw already carries a simRunDir line, the importer
+    substitutes it and doesn't append a second copy."""
+    body = import_template("si", si_raw).template_body
+    assert body.count('simRunDir =') == 1
+    assert 'simRunDir = "[[output_dir]]"' in body
+
+
+def test_si_inject_preserves_trailing_newline_shape() -> None:
+    """Body without a trailing newline gets one before the inject so
+    the resulting file is still well-formed (every line newline-ended)."""
+    raw = 'simLibName = "L"'  # no trailing newline at all
+    body = import_template("si", raw).template_body
+    assert body.endswith('simRunDir = "[[output_dir]]"\n')
+    assert '\n\nsimRunDir' not in body  # no double-blank-line at the join
+
+
 # ---- quantus ---------------------------------------------------------------
 
 

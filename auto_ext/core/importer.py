@@ -357,11 +357,24 @@ _SI_RULES: dict[str, list[_Rule]] = {
 }
 
 
+_SI_RUN_DIR_LINE_RE = re.compile(r"^simRunDir\s*=", re.MULTILINE)
+
+
 def _import_si(raw: str, overrides: Identity | None) -> ImportResult:
     preprocessed = _preprocess_employee_id(raw)
     identity, body, _aux = _apply_rules(
         "si", preprocessed, _SI_LINE_RE, _SI_RULES, overrides
     )
+    # Some Cadence flows export si.env without ``simRunDir = "..."`` —
+    # without that line si writes the netlist into its cwd instead of
+    # the output_dir, and Quantus then aborts (LBRCXM-756) because it
+    # can't find the netlist where the runner staged si.env. Inject the
+    # canonical line so the imported template behaves like the bundled
+    # one.
+    if not _SI_RUN_DIR_LINE_RE.search(body):
+        if body and not body.endswith("\n"):
+            body += "\n"
+        body += 'simRunDir = "[[output_dir]]"\n'
     return ImportResult(tool="si", identity=identity, template_body=body)
 
 
