@@ -125,14 +125,45 @@ def derive_parent_dir_from_env_candidates(
     the parent dir of the first one set. Returns ``None`` if no candidate
     resolves to something usable.
     """
+    return derive_ancestor_dir_from_env_candidates(
+        candidate_var_names, resolved_env, depth=1
+    )
 
+
+def derive_ancestor_dir_from_env_candidates(
+    candidate_var_names: list[str],
+    resolved_env: dict[str, str],
+    *,
+    depth: int,
+) -> str | None:
+    """Return the n-th ancestor directory name from the first env var that
+    resolves.
+
+    ``depth=1`` is the immediate parent (file's directory), ``depth=2`` is
+    its grandparent, etc. Used to extract structured PDK info from env
+    vars whose value points to a file *inside* the runset tree, e.g.::
+
+        $calibre_source_added_place
+            = $VERIFY_ROOT/runset/Calibre_QRC/LVS/<runset>/<pdk_subdir>/empty.cdl
+                                                            └── depth=1
+                                                  └────────── depth=2
+
+    so ``depth=1`` derives ``pdk_subdir`` and ``depth=2`` derives
+    ``lvs_runset_version``. Returns ``None`` if no candidate resolves to
+    a path with that many ancestors with non-empty names.
+    """
+    if depth < 1:
+        raise ValueError(f"depth must be >= 1, got {depth}")
     for var in candidate_var_names:
         value = resolved_env.get(var, "")
         if not value:
             continue
-        parent = Path(value).parent.name
-        if parent:
-            return parent
+        ancestor = Path(value)
+        for _ in range(depth):
+            ancestor = ancestor.parent
+        name = ancestor.name
+        if name:
+            return name
     return None
 
 

@@ -249,17 +249,43 @@ def test_hint_tech_name_no_candidate(monkeypatch) -> None:
     assert "no candidate" in hint
 
 
-def test_hint_pdk_subdir_no_fallback() -> None:
+def test_hint_pdk_subdir_falls_back_to_no_candidate_message() -> None:
+    """pdk_subdir has a default env var chain (calibre_source_added_place);
+    when the env is empty, hint surfaces the unresolved-candidates list
+    instead of the legacy "no fallback" string."""
     hint = _hint_for_field("pdk_subdir", _bare_project(), {})
+    assert "no candidate resolved" in hint
+    assert "calibre_source_added_place" in hint
+
+
+def test_hint_pdk_subdir_auto_derived_when_env_resolves() -> None:
+    """When pdk_subdir_env_vars resolve, hint shows the derived value —
+    same UX shape as tech_name's existing (auto-derived: HN001)."""
+    hint = _hint_for_field(
+        "pdk_subdir",
+        _bare_project(),
+        {"calibre_source_added_place": "/v/runset/x/Ver_1.0/CFXXX/empty.cdl"},
+    )
+    assert "auto-derived: CFXXX" in hint
+
+
+def test_hint_runset_versions_lvs_auto_derived() -> None:
+    """lvs_runset_version derives from grandparent of the env var path."""
+    hint = _hint_for_field(
+        "runset_versions.lvs",
+        _bare_project(),
+        {"calibre_source_added_place": "/v/runset/x/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"},
+    )
+    assert "auto-derived: Ver_Plus_1.0l_0.9" in hint
+
+
+def test_hint_runset_versions_qrc_no_default_env_chain() -> None:
+    """qrc_runset_version_env_vars defaults to empty (no industry
+    convention); hint preserves the legacy "no fallback" message so
+    users know they must fill it manually or extend the chain."""
+    hint = _hint_for_field("runset_versions.qrc", _bare_project(), {})
     assert "no fallback" in hint
-    assert "[[pdk_subdir]]" in hint
-
-
-def test_hint_runset_versions_specific_template_var() -> None:
-    hint_lvs = _hint_for_field("runset_versions.lvs", _bare_project(), {})
-    hint_qrc = _hint_for_field("runset_versions.qrc", _bare_project(), {})
-    assert "[[lvs_runset_version]]" in hint_lvs
-    assert "[[qrc_runset_version]]" in hint_qrc
+    assert "[[qrc_runset_version]]" in hint
 
 
 def test_hint_layer_map_default() -> None:

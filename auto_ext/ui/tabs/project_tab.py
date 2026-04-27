@@ -36,7 +36,11 @@ from PyQt5.QtWidgets import (
 )
 
 from auto_ext.core.config import ProjectConfig
-from auto_ext.core.env import derive_parent_dir_from_env_candidates, resolve_env
+from auto_ext.core.env import (
+    derive_ancestor_dir_from_env_candidates,
+    derive_parent_dir_from_env_candidates,
+    resolve_env,
+)
 from auto_ext.core.errors import AutoExtError
 from auto_ext.core.runner import _discover_env_vars
 from auto_ext.ui.config_controller import ConfigController
@@ -106,12 +110,43 @@ def _hint_for_field(
             return f"(auto-derived: {derived})"
         return f"(no candidate resolved from {candidates})"
 
-    if key in ("pdk_subdir", "project_subdir"):
-        return f"(no fallback — required if templates use [[{key}]])"
+    if key == "pdk_subdir":
+        candidates = list(project.pdk_subdir_env_vars)
+        resolution = resolve_env(set(candidates), effective_env)
+        derived = derive_ancestor_dir_from_env_candidates(
+            candidates, resolution.resolved, depth=1
+        )
+        if derived:
+            return f"(auto-derived: {derived})"
+        if candidates:
+            return f"(no candidate resolved from {candidates})"
+        return "(no fallback — required if templates use [[pdk_subdir]])"
+
+    if key == "project_subdir":
+        return "(no fallback — required if templates use [[project_subdir]])"
 
     if key == "runset_versions.lvs":
+        candidates = list(project.lvs_runset_version_env_vars)
+        resolution = resolve_env(set(candidates), effective_env)
+        derived = derive_ancestor_dir_from_env_candidates(
+            candidates, resolution.resolved, depth=2
+        )
+        if derived:
+            return f"(auto-derived: {derived})"
+        if candidates:
+            return f"(no candidate resolved from {candidates})"
         return "(no fallback — required if calibre/si use [[lvs_runset_version]])"
+
     if key == "runset_versions.qrc":
+        candidates = list(project.qrc_runset_version_env_vars)
+        resolution = resolve_env(set(candidates), effective_env)
+        derived = derive_ancestor_dir_from_env_candidates(
+            candidates, resolution.resolved, depth=2
+        )
+        if derived:
+            return f"(auto-derived: {derived})"
+        if candidates:
+            return f"(no candidate resolved from {candidates})"
         return "(no fallback — required if quantus uses [[qrc_runset_version]])"
 
     if key == "layer_map":
@@ -122,6 +157,97 @@ def _hint_for_field(
         return "(default: ${WORK_ROOT2})"
 
     return "(unset)"
+
+
+#: Static "What is this field, and where do I find the value?" reference
+#: shown in QLineEdit tooltips. Hover the field in GUI -> see this text.
+#: Live-derived hints (auto-derived / shell value) are appended at the
+#: top by ``_refresh_hints``; this map is the static documentation half.
+_FIELD_DOCS: dict[str, str] = {
+    "work_root": (
+        "Workarea root (parent of Auto_ext_pro/). EDA cwd.\n"
+        "Source: $WORK_ROOT (set by your project setup script).\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#work_root"
+    ),
+    "verify_root": (
+        "Calibre/QRC runset root.\n"
+        "Source: $VERIFY_ROOT.\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#verify_root"
+    ),
+    "setup_root": (
+        "Cadence assura_tech.lib root.\n"
+        "Source: $SETUP_ROOT.\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#setup_root"
+    ),
+    "employee_id": (
+        "Your employee/user id; substituted into [[employee_id]] in templates.\n"
+        "Source: $USER (auto-derived).\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#employee_id"
+    ),
+    "tech_name": (
+        "Cadence tech library name (e.g. HN001).\n"
+        "Auto-derived from parent dir of $PDK_TECH_FILE / $PDK_LAYER_MAP_FILE / $PDK_DISPLAY_FILE.\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#tech_name"
+    ),
+    "pdk_subdir": (
+        "PDK subdirectory name appearing in calibre/quantus runset paths:\n"
+        "  $VERIFY_ROOT/runset/Calibre_QRC/LVS/<runset>/<HERE>/...\n"
+        "Example: CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9\n"
+        "Where to find:\n"
+        "  - $calibre_source_added_place (parent dir name auto-derived from this)\n"
+        "  - or: ls $VERIFY_ROOT/runset/Calibre_QRC/LVS/*/\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#pdk_subdir"
+    ),
+    "project_subdir": (
+        "Project subdirectory in absolute /data/RFIC3/<HERE>/ paths.\n"
+        "Example: projB\n"
+        "Where to find: pwd | grep -oP '/data/RFIC3/\\K[^/]+'\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#project_subdir"
+    ),
+    "runset_versions.lvs": (
+        "Calibre LVS runset version segment in the rules-file path:\n"
+        "  $VERIFY_ROOT/runset/Calibre_QRC/LVS/<HERE>/<pdk_subdir>/...\n"
+        "Example: Ver_Plus_1.0l_0.9\n"
+        "Where to find:\n"
+        "  - $calibre_source_added_place (grandparent dir name auto-derived)\n"
+        "  - or: ls $VERIFY_ROOT/runset/Calibre_QRC/LVS/\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#runset_versions"
+    ),
+    "runset_versions.qrc": (
+        "Quantus QRC runset version segment in the QRC paths:\n"
+        "  $VERIFY_ROOT/runset/Calibre_QRC/QRC/<HERE>/<pdk_subdir>/QCI_deck/...\n"
+        "Example: Ver_Plus_1.0a\n"
+        "Where to find:\n"
+        "  - check the calibre lvsPostTriggers line in your raw .qci\n"
+        "  - or: ls $VERIFY_ROOT/runset/Calibre_QRC/QRC/\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#runset_versions"
+    ),
+    "layer_map": (
+        "GDS layer-map file used by strmout.\n"
+        "Default: ${PDK_LAYER_MAP_FILE} (resolved at run time).\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#layer_map"
+    ),
+    "extraction_output_dir": (
+        "Per-task output dir pattern. Substituted: $X env vars first,\n"
+        "then Python str.format keys: {cell} {library} {task_id}\n"
+        "{lvs_layout_view} {lvs_source_view}.\n"
+        "Default: ${WORK_ROOT}/cds/verify/QCI_PATH_{cell}\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#extraction_output_dir"
+    ),
+    "intermediate_dir": (
+        "Cwd for serial EDA invocations + temp si.env staging.\n"
+        "Default: ${WORK_ROOT2}\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#intermediate_dir"
+    ),
+}
+
+
+def _full_tooltip(key: str, live_hint: str) -> str:
+    """Compose the rich tooltip: live-derived hint + static field docs."""
+    static = _FIELD_DOCS.get(key, "")
+    if not static:
+        return live_hint
+    return f"{live_hint}\n\n{static}"
 
 
 class ProjectTab(QWidget):
@@ -283,7 +409,7 @@ class ProjectTab(QWidget):
         for key, line in self._fields.items():
             hint = _hint_for_field(key, project, effective)
             line.setPlaceholderText(hint)
-            line.setToolTip(hint)
+            line.setToolTip(_full_tooltip(key, hint))
 
     @staticmethod
     def _read_field_value(project: Any, key: str) -> str:

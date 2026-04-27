@@ -6,6 +6,7 @@ import pytest
 
 from auto_ext.core.env import (
     EnvResolution,
+    derive_ancestor_dir_from_env_candidates,
     derive_parent_dir_from_env_candidates,
     discover_required_vars,
     resolve_env,
@@ -224,3 +225,57 @@ def test_derive_parent_dir_returns_none_when_path_has_no_parent() -> None:
         derive_parent_dir_from_env_candidates(["PDK_TECH_FILE"], resolved)
         is None
     )
+
+
+# ---- derive_ancestor_dir_from_env_candidates -------------------------------
+
+
+def test_derive_ancestor_dir_depth_1_matches_parent() -> None:
+    """depth=1 is just the immediate parent dir name; same as
+    derive_parent_dir_from_env_candidates."""
+    resolved = {"V": "/a/b/c/file.txt"}
+    assert (
+        derive_ancestor_dir_from_env_candidates(["V"], resolved, depth=1) == "c"
+    )
+
+
+def test_derive_ancestor_dir_depth_2_extracts_grandparent() -> None:
+    """The user's $calibre_source_added_place pattern:
+    $VERIFY_ROOT/runset/Calibre_QRC/LVS/<runset>/<pdk_subdir>/empty.cdl
+                                        depth=2  depth=1
+    """
+    resolved = {
+        "calibre_source_added_place": (
+            "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/"
+            "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9/empty.cdl"
+        )
+    }
+    pdk = derive_ancestor_dir_from_env_candidates(
+        ["calibre_source_added_place"], resolved, depth=1
+    )
+    runset = derive_ancestor_dir_from_env_candidates(
+        ["calibre_source_added_place"], resolved, depth=2
+    )
+    assert pdk == "CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9"
+    assert runset == "Ver_Plus_1.0l_0.9"
+
+
+def test_derive_ancestor_dir_falls_through_to_next_candidate() -> None:
+    resolved = {"V1": "", "V2": "/a/b/c/file.txt"}
+    assert (
+        derive_ancestor_dir_from_env_candidates(["V1", "V2"], resolved, depth=2)
+        == "b"
+    )
+
+
+def test_derive_ancestor_dir_returns_none_when_too_shallow() -> None:
+    """Path doesn't have enough ancestors at the requested depth."""
+    resolved = {"V": "file.txt"}  # no ancestors
+    assert (
+        derive_ancestor_dir_from_env_candidates(["V"], resolved, depth=2) is None
+    )
+
+
+def test_derive_ancestor_dir_rejects_invalid_depth() -> None:
+    with pytest.raises(ValueError, match="depth must be >= 1"):
+        derive_ancestor_dir_from_env_candidates(["V"], {}, depth=0)

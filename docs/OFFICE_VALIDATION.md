@@ -11,6 +11,8 @@
 
 ---
 
+> 配置字段（pdk_subdir / runset_versions / 等）不知道是啥、去哪填的，看 [`CONFIG_GLOSSARY.md`](CONFIG_GLOSSARY.md)。Phase 5.6.4 起大多数字段会从 `$calibre_source_added_place` 等 env var **自动反解**，不用手填。
+
 ## Step 1 — 拉最新代码 + 跑测试
 
 ```bash

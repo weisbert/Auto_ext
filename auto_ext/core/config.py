@@ -164,6 +164,16 @@ class ProjectConfig(BaseModel):
     #: ``$VERIFY_ROOT/runset/...`` in calibre/quantus/si templates.
     pdk_subdir: str | None = None
 
+    #: Env vars consulted, in order, when ``pdk_subdir`` is ``None``. Each
+    #: var's value is interpreted as a path inside the runset tree
+    #: (``.../LVS/<runset>/<pdk_subdir>/<file>``); the immediate parent
+    #: dir name = ``pdk_subdir``. First candidate with a non-empty parent
+    #: wins. Default targets the LVS-side anchor most teams already
+    #: maintain; add other env vars per project as needed.
+    pdk_subdir_env_vars: list[str] = Field(
+        default_factory=lambda: ["calibre_source_added_place"]
+    )
+
     #: Project subdirectory name (e.g. ``projB``) that appears under
     #: ``/data/RFIC3/<project>/`` in absolute raw paths. Optional.
     project_subdir: str | None = None
@@ -172,6 +182,18 @@ class ProjectConfig(BaseModel):
     #: calibre/si rawfiles and ``qrc`` from quantus. Either side may be
     #: ``None`` when the corresponding stage is not imported.
     runset_versions: RunsetVersions = Field(default_factory=RunsetVersions)
+
+    #: Env vars consulted when ``runset_versions.lvs`` is ``None``. Same
+    #: shape as ``pdk_subdir_env_vars`` but takes the *grandparent* dir
+    #: name (the runset version segment sits one level above pdk_subdir).
+    lvs_runset_version_env_vars: list[str] = Field(
+        default_factory=lambda: ["calibre_source_added_place"]
+    )
+
+    #: Env vars consulted when ``runset_versions.qrc`` is ``None``. No
+    #: standard convention, leave empty by default; teams that maintain a
+    #: ``$quantus_source_added_place`` (or similar) can list it here.
+    qrc_runset_version_env_vars: list[str] = Field(default_factory=list)
 
     #: Default refers to the env var set by the PDK setup; override only if
     #: you need a specific file different from ``$PDK_LAYER_MAP_FILE``.
