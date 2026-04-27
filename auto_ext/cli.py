@@ -601,15 +601,23 @@ def import_cmd(
             existing_manifest = None
 
     merge_messages: list[str] = []
+    auto_knobs = dict(result.auto_knobs)
     if existing_manifest is not None and existing_manifest.knobs:
         outcome = merge_reimport(result, existing_manifest)
         body = outcome.body
-        final_manifest = outcome.manifest
+        # auto_knobs are the base; existing user-promoted knobs win on
+        # any key conflict (their description / range / source survive).
+        merged_knobs = {**auto_knobs, **outcome.manifest.knobs}
+        final_manifest = TemplateManifest(
+            template=output.name, knobs=merged_knobs
+        )
         # ``template`` was validated to match output.name by load_manifest.
         merge_messages = outcome.messages
     else:
         body = result.template_body
-        final_manifest = TemplateManifest(template=output.name, knobs={})
+        final_manifest = TemplateManifest(
+            template=output.name, knobs=auto_knobs
+        )
 
     backup_if_exists(output)
     backup_if_exists(manifest_path)

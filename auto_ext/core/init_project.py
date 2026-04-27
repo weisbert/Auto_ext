@@ -258,7 +258,9 @@ def dry_run(inputs: InitInputs) -> InitPreview:
         tpl_path = subdir / tpl_name
         manifest_path = subdir / (tpl_name + ".manifest.yaml")
 
-        manifest = TemplateManifest(template=tpl_name, knobs={})
+        manifest = TemplateManifest(
+            template=tpl_name, knobs=dict(result.auto_knobs)
+        )
         files.append(
             FileToWrite(
                 path=tpl_path,

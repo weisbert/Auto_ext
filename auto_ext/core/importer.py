@@ -104,6 +104,7 @@ class ImportResult:
     candidates: list[Candidate] = field(default_factory=list)
     pdk_tokens: list[PdkToken] = field(default_factory=list)
     raw_source: str = ""
+    auto_knobs: dict[str, KnobSpec] = field(default_factory=dict)
 
 
 # ---- public entry point ----------------------------------------------------
@@ -334,7 +335,114 @@ def _import_calibre(raw: str, overrides: Identity | None) -> ImportResult:
     identity, body, _aux = _apply_rules(
         "calibre", preprocessed, _CALIBRE_LINE_RE, _CALIBRE_RULES, overrides
     )
-    return ImportResult(tool="calibre", identity=identity, template_body=body)
+    auto_knobs: dict[str, KnobSpec] = {}
+    body, knob = _auto_calibre_connect_by_name(body)
+    if knob is not None:
+        auto_knobs["connect_by_name"] = knob
+    body, knob = _auto_calibre_lvs_variant(body)
+    if knob is not None:
+        auto_knobs["lvs_variant"] = knob
+    return ImportResult(
+        tool="calibre",
+        identity=identity,
+        template_body=body,
+        auto_knobs=auto_knobs,
+    )
+
+
+# Anchor lines for the connect_by_name auto-knob.
+#
+# The bundled template wraps the optional ``*cmnVConnectNamesState: ALL``
+# line in ``[% if connect_by_name %]...[% endif %]``. The two real-world
+# variants of a Calibre raw export are:
+#
+#   ON  — has a literal ``*cmnVConnectNamesState: ALL`` line. Wrap it.
+#   OFF — has no such line, but does carry ``*cmnShowOptions:``. Inject
+#         the wrapped line right after that anchor (default = False).
+#
+# If neither anchor is present we leave the body alone and emit no knob.
+_CALIBRE_CONNECT_ON_LINE = "*cmnVConnectNamesState: ALL\n"
+_CALIBRE_CONNECT_BLOCK = (
+    "[% if connect_by_name %]*cmnVConnectNamesState: ALL\n[% endif %]"
+)
+_CALIBRE_SHOW_OPTIONS_RE = re.compile(r"^\*cmnShowOptions:[^\n]*\n", re.MULTILINE)
+_CONNECT_BY_NAME_DESCRIPTION = (
+    "When true, emits *cmnVConnectNamesState ALL so Calibre LVS connects "
+    "nets by name across the layout."
+)
+
+
+def _auto_calibre_connect_by_name(body: str) -> tuple[str, KnobSpec | None]:
+    """Wrap (or inject) the *cmnVConnectNamesState ALL line under a
+    ``connect_by_name`` toggle.
+
+    Returns ``(new_body, knob_or_none)``. The knob is omitted when the
+    raw lacks both the ON-variant line and the ``*cmnShowOptions:``
+    anchor — there's nothing to parameterize.
+    """
+    if _CALIBRE_CONNECT_ON_LINE in body:
+        # ON variant: wrap the existing line.
+        new_body = body.replace(
+            _CALIBRE_CONNECT_ON_LINE, _CALIBRE_CONNECT_BLOCK, 1
+        )
+        spec = KnobSpec(
+            type="bool",
+            default=True,
+            description=_CONNECT_BY_NAME_DESCRIPTION,
+        )
+        return new_body, spec
+
+    m = _CALIBRE_SHOW_OPTIONS_RE.search(body)
+    if m is None:
+        # Neither anchor present — leave body alone, emit no knob.
+        return body, None
+
+    # OFF variant: inject the wrapped block right after *cmnShowOptions:.
+    insert_at = m.end()
+    new_body = body[:insert_at] + _CALIBRE_CONNECT_BLOCK + body[insert_at:]
+    spec = KnobSpec(
+        type="bool",
+        default=False,
+        description=_CONNECT_BY_NAME_DESCRIPTION,
+    )
+    return new_body, spec
+
+
+# *lvsRulesFile: ...<basename>.<variant>.qcilvs — capture only when the
+# variant is a recognised wodio/widio so a custom suffix doesn't get
+# silently swapped. The pattern anchors to the start of the lvsRulesFile
+# line so a literal "wodio" elsewhere in the body cannot trigger.
+_CALIBRE_LVS_VARIANT_RE = re.compile(
+    r"^(\*lvsRulesFile:[^\n]*?\.)(wodio|widio)(\.qcilvs)",
+    re.MULTILINE,
+)
+_LVS_VARIANT_DESCRIPTION = (
+    "Calibre LVS rules-file suffix; both variants live under "
+    "$VERIFY_ROOT/runset/Calibre_QRC/LVS/<lvs_runset_version>/<pdk_subdir>/."
+)
+
+
+def _auto_calibre_lvs_variant(body: str) -> tuple[str, KnobSpec | None]:
+    """Substitute the wodio/widio suffix on ``*lvsRulesFile`` for
+    ``[[lvs_variant]]`` and emit a matching enum knob.
+
+    Returns ``(new_body, knob_or_none)``. The knob is omitted when the
+    rules-file line is absent OR uses a suffix outside ``{wodio, widio}``.
+    """
+    m = _CALIBRE_LVS_VARIANT_RE.search(body)
+    if m is None:
+        return body, None
+    variant = m.group(2)
+    new_body = (
+        body[: m.start(2)] + "[[lvs_variant]]" + body[m.end(2) :]
+    )
+    spec = KnobSpec(
+        type="str",
+        default=variant,
+        choices=["wodio", "widio"],
+        description=_LVS_VARIANT_DESCRIPTION,
+    )
+    return new_body, spec
 
 
 # SI ``si.env`` uses SKILL-style ``<key> = <value>``. Identity values are
@@ -414,6 +522,14 @@ _QUANTUS_RULES: dict[str, list[_Rule]] = {
             "[[output_dir]]/query_output/Design.gds.map",
         ),
     ],
+    "device_properties_file": [
+        _simple(
+            "output_dir",
+            r"(?!/tmpdata/RFIC/rfic_share/)(.+?)/query_output/Design\.props",
+            "[[output_dir]]/query_output/Design.props",
+        ),
+    ],
+    "view_name": [_simple("out_file", r"(.+?)", "[[out_file]]")],
 }
 
 
@@ -468,6 +584,7 @@ _JIVARO_RULES: dict[str, list[_Rule]] = {
             replacement="[[library]]/[[cell]]/[[out_file]]",
         )
     ],
+    "outputView": [_simple("out_file", r"(.+?)_red", "[[out_file]]_red")],
     "frequencyLimit": [
         _simple(
             "jivaro_frequency_limit",

@@ -241,6 +241,7 @@ def test_quantus_identity_extraction(quantus_raw: str) -> None:
     assert result.identity.library == "INV_LIB"
     assert result.identity.lvs_layout_view == "layout"
     assert result.identity.ground_net == "vss"
+    assert result.identity.out_file == "av_ext"
 
 
 def test_quantus_template_body_substitutions(quantus_raw: str) -> None:
@@ -252,11 +253,24 @@ def test_quantus_template_body_substitutions(quantus_raw: str) -> None:
         '-layer_map_file "[[output_dir]]/query_output/Design.gds.map"'
         in body
     )
+    assert '-view_name "[[out_file]]"' in body
     # Numeric options pass through unmodified (candidate detector picks them up).
     assert "-exclude_floating_nets_limit 5000" in body
     assert "55.0" in body
     # Technology name is a PdkToken, not identity — stays as raw literal.
     assert '-technology_name "HN001"' in body
+
+
+def test_quantus_device_properties_file_substituted() -> None:
+    raw = (
+        '              -device_properties_file '
+        '"/work/cds/verify/QCI_PATH_INV1/query_output/Design.props"\n'
+    )
+    body = import_template("quantus", raw).template_body
+    assert (
+        '-device_properties_file "[[output_dir]]/query_output/Design.props"'
+        in body
+    )
 
 
 def test_quantus_cross_validation_mismatch_on_output_dir() -> None:
@@ -294,7 +308,7 @@ def test_jivaro_template_body_substitutions(jivaro_raw: str) -> None:
     )
     # Non-identity attrs like <cpu value="1"/> pass through.
     assert '<cpu value="1"/>' in body
-    assert '<outputView value="av_ext_red"/>' in body
+    assert '<outputView value="[[out_file]]_red"/>' in body
 
 
 def test_jivaro_preserves_non_matching_lines(jivaro_raw: str) -> None:
@@ -813,6 +827,100 @@ def test_apply_constants_si_body_untouched_by_paths() -> None:
     )
     out = apply_project_constants("si", body, constants)
     assert out == body
+
+
+# ---- auto-knobs (calibre connect_by_name + lvs_variant) -------------------
+
+
+def test_calibre_connect_by_name_off_variant_injects_block() -> None:
+    """Raw without ``*cmnVConnectNamesState`` but with ``*cmnShowOptions:``
+    gets the wrapped block injected after the ShowOptions anchor and a
+    knob defaulting to False (matches the ON-less raw byte-for-byte
+    when rendered with default=False)."""
+    raw = (
+        "*cmnShowOptions: 1\n"
+        "*cmnSpecifyLicenseWaitTime: 1\n"
+    )
+    result = import_template("calibre", raw)
+    body = result.template_body
+    assert "[% if connect_by_name %]*cmnVConnectNamesState: ALL\n[% endif %]" in body
+    assert "connect_by_name" in result.auto_knobs
+    assert result.auto_knobs["connect_by_name"].type == "bool"
+    assert result.auto_knobs["connect_by_name"].default is False
+
+
+def test_calibre_connect_by_name_on_variant_wraps_existing_line() -> None:
+    """Raw with the ON line gets that line wrapped in place; the knob
+    defaults to True so the rendered body matches the ON raw exactly."""
+    raw = (
+        "*cmnShowOptions: 1\n"
+        "*cmnVConnectNamesState: ALL\n"
+        "*cmnSpecifyLicenseWaitTime: 1\n"
+    )
+    result = import_template("calibre", raw)
+    body = result.template_body
+    assert "[% if connect_by_name %]*cmnVConnectNamesState: ALL\n[% endif %]" in body
+    # Original unwrapped line shouldn't survive.
+    assert "\n*cmnVConnectNamesState: ALL\n" not in body
+    assert result.auto_knobs["connect_by_name"].default is True
+
+
+def test_calibre_lvs_variant_wodio_substituted() -> None:
+    raw = "*lvsRulesFile: /pdk/runset/foo/CFXXX.wodio.qcilvs\n"
+    result = import_template("calibre", raw)
+    assert "[[lvs_variant]]" in result.template_body
+    assert ".wodio.qcilvs" not in result.template_body
+    spec = result.auto_knobs["lvs_variant"]
+    assert spec.type == "str"
+    assert spec.default == "wodio"
+    assert spec.choices == ["wodio", "widio"]
+
+
+def test_calibre_lvs_variant_widio_substituted() -> None:
+    raw = "*lvsRulesFile: /pdk/runset/foo/CFXXX.widio.qcilvs\n"
+    result = import_template("calibre", raw)
+    assert "[[lvs_variant]]" in result.template_body
+    assert result.auto_knobs["lvs_variant"].default == "widio"
+
+
+def test_calibre_lvs_variant_unrecognized_skipped() -> None:
+    """A custom suffix (neither wodio nor widio) gets no knob and the
+    body is left untouched — we never invent an enum value."""
+    raw = "*lvsRulesFile: /pdk/runset/foo/CFXXX.custom.qcilvs\n"
+    result = import_template("calibre", raw)
+    assert "[[lvs_variant]]" not in result.template_body
+    assert "lvs_variant" not in result.auto_knobs
+
+
+def test_calibre_no_anchor_no_connect_by_name_knob() -> None:
+    """A raw with no ``*cmnShowOptions:`` and no
+    ``*cmnVConnectNamesState:`` gets neither an injected block nor a
+    knob — there's nothing to parameterize."""
+    raw = "*lvsLayoutPrimary: SOMECELL\n"
+    result = import_template("calibre", raw)
+    assert "connect_by_name" not in result.auto_knobs
+
+
+def test_non_calibre_tools_have_empty_auto_knobs() -> None:
+    """Only the calibre importer auto-parameterizes knobs at present."""
+    cases = [
+        ("si", 'simLibName = "L"\nsimCellName = "C"\n'),
+        ("quantus", '              -ground_net "vss"\n'),
+        ("jivaro", '<inputView value="L/C/av"/>\n'),
+    ]
+    for tool, raw in cases:
+        result = import_template(tool, raw)
+        assert result.auto_knobs == {}, f"{tool} produced auto_knobs"
+
+
+def test_calibre_fixture_seeds_both_auto_knobs(calibre_raw: str) -> None:
+    """The bundled fixture has both anchors (`*cmnShowOptions:` for the
+    OFF variant and `*lvsRulesFile: ....wodio.qcilvs`), so a fresh
+    import of the fixture seeds both auto-knobs."""
+    result = import_template("calibre", calibre_raw)
+    assert set(result.auto_knobs) == {"connect_by_name", "lvs_variant"}
+    assert result.auto_knobs["connect_by_name"].default is False
+    assert result.auto_knobs["lvs_variant"].default == "wodio"
 
 
 def test_merge_cross_tool_source_is_skipped() -> None:
