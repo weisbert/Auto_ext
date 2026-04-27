@@ -57,6 +57,21 @@ def test_load_project_defaults(fixtures_dir: Path) -> None:
     assert project.templates.calibre is None
 
 
+def test_template_paths_normalizes_windows_separators() -> None:
+    """A YAML edited on Windows can carry backslash separators in template
+    paths (typed manually, or pasted from Windows Explorer). On Linux the
+    Path constructor would treat the whole string as one filename. The
+    field validator normalizes \\ -> / so the path resolves cleanly on
+    either OS."""
+    tp = TemplatePaths(si="templates\\si\\default.env.j2")  # type: ignore[arg-type]
+    assert tp.si == Path("templates/si/default.env.j2")
+    # Mixed-separator and pure-POSIX inputs survive unchanged in semantics.
+    tp_mixed = TemplatePaths(calibre="templates\\calibre/foo.qci.j2")  # type: ignore[arg-type]
+    assert tp_mixed.calibre == Path("templates/calibre/foo.qci.j2")
+    tp_posix = TemplatePaths(quantus="templates/quantus/ext.cmd.j2")  # type: ignore[arg-type]
+    assert tp_posix.quantus == Path("templates/quantus/ext.cmd.j2")
+
+
 def test_load_project_rejects_unknown_field(fixtures_dir: Path) -> None:
     with pytest.raises(ConfigError, match="bogus_field"):
         load_project(fixtures_dir / "project_bad_extra.yaml")

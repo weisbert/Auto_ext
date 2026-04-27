@@ -19,7 +19,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
@@ -89,6 +89,18 @@ class TemplatePaths(BaseModel):
     quantus: Path | None = None
     jivaro: Path | None = None
     si: Path | None = None
+
+    @field_validator("calibre", "quantus", "jivaro", "si", mode="before")
+    @classmethod
+    def _normalize_separators(cls, v: Any) -> Any:
+        # Project-internal template paths conventionally use POSIX
+        # separators. Accept Windows-style backslashes (a YAML edited on
+        # the dev box, deployed to Linux) by normalizing here, so the
+        # path string parses into a multi-component Path on Linux instead
+        # of one literal-backslash filename.
+        if isinstance(v, str):
+            return v.replace("\\", "/")
+        return v
 
 
 class RunsetVersions(BaseModel):
