@@ -203,3 +203,75 @@ def test_main_window_open_wizard_dirty_cancel(
 
     assert save_calls == [], "Cancel must NOT save"
     assert opened == [], "Cancel must NOT open the wizard"
+
+
+# ---- TaskSpec.label → LogTab header rendering ----------------------------
+
+
+def test_log_tab_header_includes_label_when_set(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """End-to-end: when a labelled spec is loaded and the user clicks
+    a stage row, the LogTab header reads ``"<label> — <path>"``. The
+    main_window threads the label-or-id via the new
+    ``RunTab.display_for_log_path`` helper so the existing
+    ``stage_selected`` signal payload stays a bare ``Path``."""
+    # Rewrite the tasks.yaml with a label.
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: WB_PLL_DCO\n"
+        "  cell: inv\n"
+        "  lvs_layout_view: layout\n"
+        "  lvs_source_view: schematic\n"
+        "  label: Pretty Display\n",
+        encoding="utf-8",
+    )
+    ae_root = tmp_path / "pr"
+    window = MainWindow(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    qtbot.addWidget(window)
+    window._controller.load(project_tools_config)
+
+    task_id = "WB_PLL_DCO__inv__layout__schematic"
+    log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
+    # Drive the slot directly — that's what stage_selected fires into.
+    window._on_stage_selected(log_path)
+
+    header = window._log_tab._header.text()
+    assert "Pretty Display" in header
+    assert "calibre.log" in header
+
+
+def test_log_tab_header_uses_task_id_when_label_unset(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """No label → header shows the canonical task_id verbatim
+    (existing behaviour unchanged)."""
+    ae_root = tmp_path / "pr"
+    window = MainWindow(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    qtbot.addWidget(window)
+    window._controller.load(project_tools_config)
+
+    task_id = "WB_PLL_DCO__inv__layout__schematic"
+    log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
+    window._on_stage_selected(log_path)
+
+    header = window._log_tab._header.text()
+    assert task_id in header
+
+
+def test_log_tab_set_active_log_display_id_default_none(qtbot, tmp_path: Path) -> None:
+    """``LogTab.set_active_log`` keeps the legacy 1-arg shape: when
+    ``display_id`` is omitted/None, the header is just the path. This
+    is the call-site contract used everywhere except the main_window
+    integration path."""
+    from auto_ext.ui.tabs.log_tab import LogTab
+
+    log = LogTab()
+    qtbot.addWidget(log)
+    p = tmp_path / "out.log"
+    log.set_active_log(p)
+    assert log._header.text() == str(p)
+    # Now with an explicit display_id, the header gains the prefix.
+    log.set_active_log(p, "FANCY")
+    header = log._header.text()
+    assert header.startswith("FANCY — ")
+    assert str(p) in header

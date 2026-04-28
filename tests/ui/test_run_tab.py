@@ -389,3 +389,184 @@ def test_phase59_a_auto_follow_off_does_not_emit(
     tab._on_stage_started("WB_PLL_DCO__inv__layout__schematic", "calibre")
 
     assert captured == []
+
+
+# ---- TaskSpec.label display fallback -------------------------------------
+
+
+def _label_seed_run_tree(
+    tab: RunTab, controller: ConfigController, project_tools_config: Path
+) -> None:
+    """Helper mirroring ``_phase59_bc_seed_run_tree`` — load the config
+    + manually populate the status tree without spinning up a worker so
+    we can inspect the rendered column-0 text + UserRole."""
+    controller.load(project_tools_config)
+    tab._reset_status_tree(controller.tasks, list(STAGE_ORDER))
+
+
+def test_label_status_tree_uses_task_id_when_label_unset(
+    qtbot, project_tools_config: Path
+) -> None:
+    """No ``label:`` in the spec → the Run-tab status-tree top-level
+    row's column 0 shows the canonical ``task_id`` and ``data(0,
+    UserRole)`` carries the same value (so internal lookups are stable
+    whether or not the user later assigns a label)."""
+    controller = ConfigController()
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    _label_seed_run_tree(tab, controller, project_tools_config)
+
+    assert tab._status_tree.topLevelItemCount() == 1
+    parent = tab._status_tree.topLevelItem(0)
+    expected_id = "WB_PLL_DCO__inv__layout__schematic"
+    assert parent.text(0) == expected_id
+    assert parent.data(0, Qt.UserRole) == expected_id
+
+
+def test_label_status_tree_uses_label_when_set(
+    qtbot, project_tools_config: Path
+) -> None:
+    """A spec carrying ``label: pretty name`` → column 0 shows the
+    label, but ``data(0, UserRole)`` keeps the canonical task_id so
+    the click handlers and on-disk paths still work."""
+    # Rewrite the fixture's tasks.yaml to add a label.
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: WB_PLL_DCO\n"
+        "  cell: inv\n"
+        "  lvs_layout_view: layout\n"
+        "  lvs_source_view: schematic\n"
+        "  label: PLL DCO inverter\n",
+        encoding="utf-8",
+    )
+    controller = ConfigController()
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    _label_seed_run_tree(tab, controller, project_tools_config)
+
+    parent = tab._status_tree.topLevelItem(0)
+    assert parent.text(0) == "PLL DCO inverter"
+    # The canonical task_id is preserved on UserRole so _on_tree_click
+    # and _on_tree_context_menu can still derive the right paths.
+    assert parent.data(0, Qt.UserRole) == "WB_PLL_DCO__inv__layout__schematic"
+
+
+def test_label_left_task_list_uses_label_when_set(
+    qtbot, project_tools_config: Path
+) -> None:
+    """The left task picker (QListWidget) follows the same display
+    fallback rule: visible text = label-or-id, UserRole = task_id."""
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: WB_PLL_DCO\n"
+        "  cell: inv\n"
+        "  lvs_layout_view: layout\n"
+        "  lvs_source_view: schematic\n"
+        "  label: my favourite inv\n",
+        encoding="utf-8",
+    )
+    controller = ConfigController()
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+
+    assert tab._task_list.count() == 1
+    item = tab._task_list.item(0)
+    assert item.text() == "my favourite inv"
+    assert item.data(Qt.UserRole) == "WB_PLL_DCO__inv__layout__schematic"
+
+
+def test_label_selected_tasks_uses_user_role(
+    qtbot, project_tools_config: Path
+) -> None:
+    """``_selected_tasks`` keys on UserRole, not the visible column —
+    so a labelled spec round-trips the right TaskConfig back."""
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: WB_PLL_DCO\n"
+        "  cell: inv\n"
+        "  lvs_layout_view: layout\n"
+        "  lvs_source_view: schematic\n"
+        "  label: pretty\n",
+        encoding="utf-8",
+    )
+    controller = ConfigController()
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+
+    selected = tab._selected_tasks()
+    assert len(selected) == 1
+    assert selected[0].task_id == "WB_PLL_DCO__inv__layout__schematic"
+    assert selected[0].label == "pretty"
+
+
+def test_label_tree_click_round_trips_via_user_role(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """Clicking a stage row under a labelled task row must compute the
+    log path from the canonical task_id (UserRole), not the visible
+    label — otherwise the path would land in
+    ``logs/task_<label>/...`` and miss the actual log file."""
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: WB_PLL_DCO\n"
+        "  cell: inv\n"
+        "  lvs_layout_view: layout\n"
+        "  lvs_source_view: schematic\n"
+        "  label: ignore me\n",
+        encoding="utf-8",
+    )
+    ae_root = tmp_path / "pr"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    _label_seed_run_tree(tab, controller, project_tools_config)
+
+    captured = _phase59_a_capture_stage_selected(tab)
+
+    # Drive the click handler on the calibre stage row (child of the
+    # labelled task row).
+    task_id = "WB_PLL_DCO__inv__layout__schematic"
+    calibre_item = tab._stage_items[(task_id, "calibre")]
+    tab._on_tree_click(calibre_item, 0)
+
+    assert len(captured) == 1
+    payload = captured[0]
+    assert isinstance(payload, Path)
+    # Path uses the canonical task_id, not the label.
+    assert payload == ae_root / "logs" / f"task_{task_id}" / "calibre.log"
+
+
+def test_label_display_for_log_path_returns_label(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """``RunTab.display_for_log_path`` reverse-maps a log path back to
+    the user-facing label-or-id string, which the main window threads
+    into ``LogTab.set_active_log`` so the log header can show the
+    pretty name alongside the path."""
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: WB_PLL_DCO\n"
+        "  cell: inv\n"
+        "  lvs_layout_view: layout\n"
+        "  lvs_source_view: schematic\n"
+        "  label: friendly name\n",
+        encoding="utf-8",
+    )
+    ae_root = tmp_path / "pr"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+
+    task_id = "WB_PLL_DCO__inv__layout__schematic"
+    log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
+    assert tab.display_for_log_path(log_path) == "friendly name"
+    # When no label, falls back to the task_id.
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: WB_PLL_DCO\n"
+        "  cell: inv\n"
+        "  lvs_layout_view: layout\n"
+        "  lvs_source_view: schematic\n",
+        encoding="utf-8",
+    )
+    controller.reload()
+    assert tab.display_for_log_path(log_path) == task_id
+    # None payload short-circuits.
+    assert tab.display_for_log_path(None) is None

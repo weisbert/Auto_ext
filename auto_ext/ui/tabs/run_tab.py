@@ -62,6 +62,34 @@ from auto_ext.ui.worker import RunWorker
 _UNSAFE_TASK_ID = re.compile(r"[^A-Za-z0-9_.-]")
 
 
+def _task_display(task: Any) -> str:
+    """Return the user-facing string for ``task`` — the optional
+    ``label`` when set, otherwise the canonical ``task_id``.
+
+    The label is a display sugar (see :attr:`TaskSpec.label`); the
+    canonical ``task_id`` always lives on the QTreeWidgetItem /
+    QListWidgetItem ``UserRole`` so internal lookups and on-disk paths
+    keep working even when the visible column differs.
+    """
+    label = getattr(task, "label", None)
+    if isinstance(label, str) and label:
+        return label
+    return task.task_id
+
+
+def _task_id_from_item(item: Any) -> str:
+    """Extract the canonical task_id from a QTreeWidgetItem.
+
+    Reads ``data(0, Qt.UserRole)`` first (set by
+    :meth:`RunTab._reset_status_tree`); falls back to ``text(0)`` for
+    older callers / tree items that pre-date the ``label`` feature.
+    """
+    tid = item.data(0, Qt.UserRole)
+    if isinstance(tid, str) and tid:
+        return tid
+    return item.text(0)
+
+
 class RunTab(QWidget):
     """Task picker + live status tree + Run/Cancel."""
 
@@ -114,6 +142,31 @@ class RunTab(QWidget):
         """
 
         return self._worker is not None
+
+    def display_for_log_path(self, log_path: Path | None) -> str | None:
+        """Return the user-facing display string for the task that owns
+        ``log_path`` (its ``label`` when set, else its canonical
+        ``task_id``). ``None`` when ``log_path`` is ``None`` or no
+        loaded task matches the embedded ``task_<safe_id>`` directory.
+
+        Used by :class:`auto_ext.ui.main_window.MainWindow` to thread
+        the display value into :meth:`LogTab.set_active_log` without
+        widening the ``stage_selected`` signal payload.
+        """
+        if log_path is None:
+            return None
+        # Path shape: ``<auto_ext_root>/logs/task_<safe_id>/<stage>.log``
+        safe_id: str | None = None
+        for part in log_path.parts:
+            if part.startswith("task_"):
+                safe_id = part[len("task_"):]
+                break
+        if safe_id is None:
+            return None
+        for t in self._controller.tasks:
+            if _UNSAFE_TASK_ID.sub("_", t.task_id) == safe_id:
+                return _task_display(t)
+        return None
 
     # ---- UI construction ---------------------------------------------
 
@@ -253,18 +306,27 @@ class RunTab(QWidget):
         # new default to Unchecked so the user opts in explicitly (changed
         # in Phase 5.4 — previously new ids defaulted to Checked, which
         # surprise-ran cells users had just added mid-edit).
+        # We key on the canonical task_id (UserRole) rather than the
+        # visible text so an added/removed ``label`` (display sugar)
+        # does not confuse the cross-reload state-preservation logic.
         previously_checked: set[str] = set()
         previously_unchecked: set[str] = set()
         for i in range(self._task_list.count()):
             item = self._task_list.item(i)
+            tid = item.data(Qt.UserRole) or item.text()
             if item.checkState() == Qt.Checked:
-                previously_checked.add(item.text())
+                previously_checked.add(tid)
             else:
-                previously_unchecked.add(item.text())
+                previously_unchecked.add(tid)
 
         self._task_list.clear()
         for t in self._controller.tasks:
-            lw_item = QListWidgetItem(t.task_id, self._task_list)
+            lw_item = QListWidgetItem(_task_display(t), self._task_list)
+            # Canonical task_id always lives on UserRole; the visible
+            # column may be the optional ``label`` instead.
+            lw_item.setData(Qt.UserRole, t.task_id)
+            if t.label and t.label != t.task_id:
+                lw_item.setToolTip(t.task_id)
             lw_item.setFlags(lw_item.flags() | Qt.ItemIsUserCheckable)
             if t.task_id in previously_checked:
                 state = Qt.Checked
@@ -288,7 +350,9 @@ class RunTab(QWidget):
         for i in range(self._task_list.count()):
             item = self._task_list.item(i)
             if item.checkState() == Qt.Checked:
-                want.add(item.text())
+                # The visible column may be the spec's ``label`` (display
+                # sugar); the canonical task_id lives on UserRole.
+                want.add(item.data(Qt.UserRole) or item.text())
         return [t for t in self._controller.tasks if t.task_id in want]
 
     def _selected_stages(self) -> list[str]:
@@ -386,7 +450,12 @@ class RunTab(QWidget):
         self._stage_items.clear()
         self._task_items.clear()
         for t in tasks:
-            parent = QTreeWidgetItem([t.task_id, TASK_DISPLAY["pending"]])
+            display = _task_display(t)
+            parent = QTreeWidgetItem([display, TASK_DISPLAY["pending"]])
+            # Stash the canonical task_id on the item so the click /
+            # context-menu handlers can round-trip back to the TaskConfig
+            # even when the visible label differs from the task_id.
+            parent.setData(0, Qt.UserRole, t.task_id)
             self._tint(parent, "pending")
             self._status_tree.addTopLevelItem(parent)
             self._task_items[t.task_id] = parent
@@ -483,7 +552,7 @@ class RunTab(QWidget):
         if parent is None:
             self.stage_selected.emit(None)
             return
-        task_id = parent.text(0)
+        task_id = _task_id_from_item(parent)
         stage = item.text(0)
 
         log_path = self._stage_log_path(task_id, stage)
@@ -518,7 +587,7 @@ class RunTab(QWidget):
         if parent is None:
             return  # task row, not a stage row — no menu
 
-        task_id = parent.text(0)
+        task_id = _task_id_from_item(parent)
         stage = item.text(0)
 
         task = next(

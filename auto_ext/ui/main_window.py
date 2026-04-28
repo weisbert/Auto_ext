@@ -95,7 +95,12 @@ class MainWindow(QMainWindow):
         dlg.exec_()
 
     def _on_stage_selected(self, log_path: Path | None) -> None:
-        self._log_tab.set_active_log(log_path)
+        # Compute the user-facing display label (label-or-id) for the
+        # task that owns this log so the LogTab header can show it
+        # alongside the path. Threading it via the run-tab helper keeps
+        # the ``stage_selected`` signal payload unchanged.
+        display_id = self._run_tab.display_for_log_path(log_path)
+        self._log_tab.set_active_log(log_path, display_id)
         if log_path is not None:
             self._tabs.setCurrentWidget(self._log_tab)
 

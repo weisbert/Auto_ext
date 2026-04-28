@@ -222,6 +222,28 @@ class TasksTab(QWidget):
         # Scalar group: ground_net / out_file / continue_on_lvs_fail.
         scalar_box = QGroupBox("Scalars", self._editor_body)
         scalar_form = QFormLayout(scalar_box)
+        # Optional human-readable display label. Shown at the top of
+        # the scalar group because it's the most-edited "what is this
+        # spec" knob — defaults empty, and an empty value round-trips
+        # to None (no ``label`` key written to YAML). The auto-derived
+        # task_id (library__cell__layout__source) is still the
+        # canonical identifier and what hits the on-disk paths.
+        self._label_edit = QLineEdit(scalar_box)
+        self._label_edit.setPlaceholderText(
+            "(optional — display name shown in Run tab + Log header)"
+        )
+        self._label_edit.setToolTip(
+            "Optional human-readable display label for this spec.\n"
+            "Shown in the Run-tab status tree, task picker, and Log\n"
+            "header instead of the auto-derived task_id\n"
+            "(library__cell__layout__source). The task_id is still the\n"
+            "canonical identifier on disk (runs/task_<id>/, logs/task_<id>/).\n"
+            "Leave empty to use the task_id verbatim."
+        )
+        self._label_edit.editingFinished.connect(
+            lambda: self._on_scalar_edited("label", self._label_edit.text())
+        )
+        scalar_form.addRow("label:", self._label_edit)
         self._ground_net_edit = QLineEdit(scalar_box)
         self._ground_net_edit.editingFinished.connect(
             lambda: self._on_scalar_edited("ground_net", self._ground_net_edit.text())
@@ -493,6 +515,7 @@ class TasksTab(QWidget):
                     values = []
                 self._axis_widgets[field].set_values(values)
 
+            self._label_edit.setText(spec.get("label") or "")
             self._ground_net_edit.setText(spec.get("ground_net", "vss"))
             self._out_file_edit.setText(spec.get("out_file") or "")
             self._continue_lvs_check.setChecked(bool(spec.get("continue_on_lvs_fail", False)))
@@ -632,6 +655,7 @@ class TasksTab(QWidget):
         try:
             for w in self._axis_widgets.values():
                 w.set_values([])
+            self._label_edit.setText("")
             self._ground_net_edit.setText("")
             self._out_file_edit.setText("")
             self._continue_lvs_check.setChecked(False)
@@ -1022,7 +1046,9 @@ class TasksTab(QWidget):
         def mutate(spec: dict[str, Any]) -> None:
             if isinstance(value, str):
                 stripped = value.strip()
-                if key == "out_file":
+                # Optional string fields: empty input drops the key so
+                # the YAML stays clean (no ``key:`` or ``key: null`` line).
+                if key in ("out_file", "label"):
                     if stripped:
                         spec[key] = stripped
                     else:
@@ -1323,8 +1349,13 @@ def _summarize_spec(index: int, spec: dict[str, Any]) -> str:
     libs = _count(spec.get("library"))
     cells = _count(spec.get("cell"))
     layouts = _count(spec.get("lvs_layout_view"))
+    # Surface the optional ``label`` in the spec-list row when set so
+    # the user can pick the right spec without expanding it.
+    label = spec.get("label")
+    label_prefix = f"[{label}] " if isinstance(label, str) and label else ""
     return (
         f"#{index}  "
+        f"{label_prefix}"
         f"{_axis_first(spec.get('library'))} × "
         f"{_axis_first(spec.get('cell'))}  "
         f"({libs}×{cells}×{layouts})"
