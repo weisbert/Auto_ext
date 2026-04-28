@@ -16,8 +16,11 @@ truth. The Open / Reload buttons on the top bar drive the controller;
 the tab listens on ``config_loaded`` / ``config_saved`` to refresh its
 task list.
 
-Emits :attr:`stage_selected` when the user clicks a stage row so the
-Log tab can switch to that stage's log file.
+Emits :attr:`stage_selected` when the user double-clicks a stage row so
+the Log tab can switch to that stage's log file. Single-click only
+selects the row (per Qt's default selection behaviour) so that users
+who want to right-click a row don't get the Log tab yanked from under
+them.
 """
 
 from __future__ import annotations
@@ -215,7 +218,11 @@ class RunTab(QWidget):
         self._status_tree = QTreeWidget(right)
         self._status_tree.setHeaderLabels(["task / stage", "status"])
         self._status_tree.setColumnWidth(0, 360)
-        self._status_tree.itemClicked.connect(self._on_tree_click)
+        # Feature #3: single-click only selects (Qt default highlight); the
+        # Log tab is switched on double-click so right-click doesn't lose
+        # the user's row mid-action. Auto-follow on stage_started is the
+        # other (decoupled) channel that emits stage_selected.
+        self._status_tree.itemDoubleClicked.connect(self._on_tree_double_click)
         # Phase 5.9 B+C: right-click on a stage row opens a context menu
         # with "Open rendered template" + (calibre only) "Open LVS report".
         self._status_tree.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -458,7 +465,7 @@ class RunTab(QWidget):
         self._cancel_btn.setText("✕ Cancel")
         self.worker_state_changed.emit(False)
 
-    # ---- stage row click → log switch --------------------------------
+    # ---- stage row double-click → log switch -------------------------
 
     def _stage_log_path(self, task_id: str, stage: str) -> Path | None:
         """Compute the on-disk log path for ``(task_id, stage)``.
@@ -477,7 +484,16 @@ class RunTab(QWidget):
     def _on_auto_follow_toggled(self, checked: bool) -> None:
         self._auto_follow_log = bool(checked)
 
-    def _on_tree_click(self, item: QTreeWidgetItem, column: int) -> None:
+    def _on_tree_double_click(
+        self, item: QTreeWidgetItem, column: int
+    ) -> None:
+        """Switch the Log tab to this stage's log on **double**-click.
+
+        Single-click intentionally does nothing here so the row only
+        gets the Qt default selection highlight — the user can then
+        right-click the row without the log viewer jumping out from
+        under their cursor (Feature #3 PINNED design).
+        """
         # Only stage rows (children of task rows) select a log file.
         parent = item.parent()
         if parent is None:
@@ -496,8 +512,12 @@ class RunTab(QWidget):
     def _on_tree_context_menu(self, pos: QPoint) -> None:
         """Build a right-click menu on a stage row.
 
-        Two actions:
+        Three actions:
 
+        - **View log file** — always present on a stage row; opens the
+          per-stage ``.log`` with the OS default handler. Disabled with
+          a tooltip until the file exists on disk (the worker creates it
+          when the stage starts running).
         - **Open rendered template** — always present on a stage row;
           disabled (with a tooltip) when the file does not exist yet
           (mid-run, dry-run-with-no-template-stage, or strmout which has
@@ -530,8 +550,22 @@ class RunTab(QWidget):
             return  # config out from under us — silently skip
 
         rendered = rendered_path_for(ae_root, task, stage, project)
+        log_path = self._stage_log_path(task_id, stage)
 
         menu = QMenu(self._status_tree)
+
+        # Feature #3: "View log file" sits at the top of the menu — it's
+        # the action the user most often wants on a stage row.
+        act_log = QAction("View log file", menu)
+        if log_path is None or not log_path.exists():
+            act_log.setEnabled(False)
+            act_log.setToolTip("Log not yet produced")
+        else:
+            act_log.setToolTip(str(log_path))
+            act_log.triggered.connect(
+                lambda _checked=False, p=log_path: self._open_path(p)
+            )
+        menu.addAction(act_log)
 
         act_rendered = QAction("Open rendered template", menu)
         if rendered is None or not rendered.exists():
