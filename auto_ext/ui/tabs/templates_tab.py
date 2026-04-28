@@ -24,10 +24,11 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QAction,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -38,6 +39,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -51,6 +53,7 @@ from PyQt5.QtWidgets import (
 from auto_ext.core.clone_template import (
     CloneTemplateError,
     clone_template,
+    delete_template,
     derive_clone_destination,
     validate_suffix,
 )
@@ -60,6 +63,7 @@ from auto_ext.core.manifest import (
     TemplateManifest,
     current_knob_value,
     load_manifest,
+    manifest_path_for,
 )
 from auto_ext.core.runner import _discover_env_vars
 from auto_ext.core.template import (
@@ -179,15 +183,6 @@ class TemplatesTab(QWidget):
             self._on_open_template_generator
         )
         toolbar.addWidget(self._template_generator_btn)
-        self._copy_template_btn = QPushButton("Copy template...", self)
-        self._copy_template_btn.setToolTip(
-            "Clone the currently-selected template (or pick one) into "
-            "the same stage directory under a new name, then open the "
-            "side-by-side editor for tweaks. The manifest sidecar is "
-            "copied alongside so knob declarations survive."
-        )
-        self._copy_template_btn.clicked.connect(self._on_copy_template)
-        toolbar.addWidget(self._copy_template_btn)
         toolbar.addStretch(1)
         root.addLayout(toolbar)
 
@@ -222,6 +217,13 @@ class TemplatesTab(QWidget):
         self._list = QListWidget(left)
         self._list.setSelectionMode(QAbstractItemView.SingleSelection)
         self._list.currentRowChanged.connect(self._on_list_row_changed)
+        # Right-click on a list row → "Copy..." / "Delete..." actions.
+        # The Copy entry replaces the old toolbar button (it's more
+        # discoverable when the source row is the one you just clicked).
+        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(
+            self._on_template_list_context_menu
+        )
         left_layout.addWidget(self._list, stretch=1)
         splitter.addWidget(left)
 
@@ -634,32 +636,127 @@ class TemplatesTab(QWidget):
         self._template_generator_dlg = dlg
         dlg.show()
 
-    # ---- Copy template flow (Feature #1) -----------------------------
+    # ---- Template right-click menu (Copy + Delete) -------------------
 
-    def _pick_clone_source(self) -> Path | None:
-        """Resolve the source ``.j2`` for the Copy-template flow.
+    def _on_template_list_context_menu(self, pos: QPoint) -> None:
+        """Build the right-click menu on a template list row.
 
-        Tries the currently-selected list entry first (resolved to its
-        on-disk absolute path); falls back to a :class:`QFileDialog`
-        rooted at ``<auto_ext_root>/templates/`` if no template is
-        selected or the resolved path doesn't exist (e.g. an
-        unresolvable env-var-relative path).
+        - **Copy...** — clone the row's template (.j2 + manifest)
+          under a new suffix and open the side-by-side editor.
+          Disabled (with tooltip) when the resolved path isn't on
+          disk (e.g. a project.templates entry pointing to a missing
+          file).
+        - **Delete...** — delete the .j2 + manifest sidecar after
+          confirmation. Disabled (with tooltip) when the entry is
+          bound (``project.templates.<tool>`` would dangle), when
+          the file lives outside ``<auto_ext_root>/templates/``
+          (we don't reach into shared filesystems), or when it
+          doesn't exist on disk.
+
+        Right-click on empty space (no item under the cursor) is a
+        no-op so users don't get a menu with disabled-everywhere
+        actions.
         """
-        resolved = self._resolved_selected_path()
-        if resolved is not None and resolved.is_file():
-            return resolved
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        row = self._list.row(item)
+        if not (0 <= row < len(self._entries)):
+            return
+        entry = self._entries[row]
+        resolved = resolve_template_path(
+            entry.path,
+            auto_ext_root=self._controller.auto_ext_root,
+            workarea=self._controller.workarea,
+        )
+
+        menu = QMenu(self._list)
+
+        copy_action = QAction("Copy...", menu)
+        if resolved is None or not resolved.is_file():
+            copy_action.setEnabled(False)
+            copy_action.setToolTip(
+                "Source file not on disk (resolve project.templates "
+                "first, or pick a discovered template)."
+            )
+        else:
+            copy_action.setToolTip(str(resolved))
+            copy_action.triggered.connect(
+                lambda _checked=False, p=resolved: self._invoke_copy_template(p)
+            )
+        menu.addAction(copy_action)
+
+        delete_action = QAction("Delete...", menu)
+        delete_reason = self._delete_blocked_reason(entry, resolved)
+        if delete_reason is not None:
+            delete_action.setEnabled(False)
+            delete_action.setToolTip(delete_reason)
+        else:
+            assert resolved is not None  # _delete_blocked_reason guarantees
+            delete_action.setToolTip(str(resolved))
+            delete_action.triggered.connect(
+                lambda _checked=False, p=resolved: self._invoke_delete_template(p)
+            )
+        menu.addAction(delete_action)
+
+        menu.exec_(self._list.viewport().mapToGlobal(pos))
+
+    def _delete_blocked_reason(
+        self, entry: TemplateEntry, resolved: Path | None
+    ) -> str | None:
+        """Return a user-facing tooltip explaining why Delete is
+        disabled, or ``None`` when delete is allowed.
+        """
+        if resolved is None or not resolved.is_file():
+            return "File not on disk."
+        if entry.tool is not None:
+            return (
+                f"Bound to project.templates.{entry.tool}; unbind it "
+                "via the path picker above first."
+            )
         root = self._controller.auto_ext_root
-        start_dir = (
-            str(root / "templates") if root is not None and (root / "templates").is_dir()
-            else str(Path.cwd())
+        if root is None:
+            return "Auto_ext root unknown — cannot verify safe location."
+        templates_dir = (root / "templates").resolve()
+        try:
+            resolved.resolve().relative_to(templates_dir)
+        except ValueError:
+            return (
+                f"Outside {templates_dir} — refusing to delete files "
+                "from shared / external locations."
+            )
+        return None
+
+    def _invoke_delete_template(self, target: Path) -> None:
+        """Confirm + delete a template's .j2 plus manifest sidecar."""
+        manifest = manifest_path_for(target)
+        files = [target]
+        if manifest.is_file():
+            files.append(manifest)
+        body = "Delete the following file(s)?\n\n" + "\n".join(
+            str(f) for f in files
         )
-        path_str, _ = QFileDialog.getOpenFileName(
-            self, "Select template to clone", start_dir,
-            "Jinja templates (*.j2)",
+        choice = QMessageBox.question(
+            self, "Delete template", body,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
-        if not path_str:
-            return None
-        return Path(path_str)
+        if choice != QMessageBox.Yes:
+            return
+        try:
+            delete_template(target)
+        except CloneTemplateError as exc:
+            QMessageBox.warning(self, "Delete failed", str(exc))
+            return
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Delete failed",
+                f"Could not delete {target}: {exc}",
+            )
+            return
+        self._refresh_template_list()
+        self.templates_changed.emit()
+
+    # ---- Copy template flow (Feature #1) -----------------------------
 
     def _prompt_clone_suffix(self, source: Path) -> Path | None:
         """Prompt for the suffix and return the validated destination
@@ -696,13 +793,14 @@ class TemplatesTab(QWidget):
                 continue
             return dest
 
-    def _on_copy_template(self) -> None:
+    def _invoke_copy_template(self, source: Path) -> None:
+        """Clone ``source`` under a user-chosen suffix and open the
+        side-by-side editor on the new pair. Called from the list's
+        right-click "Copy..." action with the resolved on-disk path.
+        """
         # Lazy import — same reasoning as the other toolbar tools.
         from auto_ext.ui.widgets.diff_editor import open_for_save_as_new
 
-        source = self._pick_clone_source()
-        if source is None:
-            return
         if not source.name.endswith(".j2"):
             QMessageBox.warning(
                 self, "Not a Jinja template",
@@ -715,7 +813,7 @@ class TemplatesTab(QWidget):
             return
 
         try:
-            _, manifest_dest = clone_template(source, dest)
+            _, _ = clone_template(source, dest)
         except CloneTemplateError as exc:
             QMessageBox.warning(self, "Clone failed", str(exc))
             return
@@ -729,11 +827,6 @@ class TemplatesTab(QWidget):
         dlg = open_for_save_as_new(source, dest, parent=self)
         # Keep a reference to keep the dialog alive while it's modal.
         self._copy_template_dlg = dlg
-        if manifest_dest is None:
-            # Caller may want to know; surface via a status hint after
-            # save. For now just log to the status banner of the Knobs
-            # pane the next time the user selects the new file.
-            pass
         dlg.exec_()
 
         # Whether the user accepted or rejected, the .j2 + sidecar are

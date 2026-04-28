@@ -9,6 +9,7 @@ import pytest
 from auto_ext.core.clone_template import (
     CloneTemplateError,
     clone_template,
+    delete_template,
     derive_clone_destination,
     validate_suffix,
 )
@@ -213,3 +214,48 @@ def test_clone_creates_parent_dir_if_needed(tmp_path: Path) -> None:
     out_j2, _ = clone_template(src, dest)
     assert out_j2.is_file()
     assert dest_dir.is_dir()
+
+
+# ---- delete_template ------------------------------------------------------
+
+
+def test_delete_template_removes_j2_and_manifest(tmp_path: Path) -> None:
+    stage = tmp_path / "templates" / "calibre"
+    stage.mkdir(parents=True)
+    src = _seed_pair(
+        stage, "calibre_lvs_v2.qci.j2", "body\n",
+        "template: calibre_lvs_v2.qci.j2\nknobs: {}\n",
+    )
+    sidecar = stage / "calibre_lvs_v2.qci.j2.manifest.yaml"
+    assert sidecar.is_file()
+
+    deleted_manifest = delete_template(src)
+
+    assert not src.exists()
+    assert not sidecar.exists()
+    assert deleted_manifest == sidecar
+
+
+def test_delete_template_returns_none_when_no_manifest(tmp_path: Path) -> None:
+    stage = tmp_path / "templates" / "presets"
+    stage.mkdir(parents=True)
+    src = _seed_pair(stage, "foo_v2.j2", "body\n", manifest=None)
+
+    deleted_manifest = delete_template(src)
+
+    assert not src.exists()
+    assert deleted_manifest is None
+
+
+def test_delete_template_rejects_non_j2(tmp_path: Path) -> None:
+    p = tmp_path / "calibre_lvs.qci"
+    p.write_text("x", encoding="utf-8")
+    with pytest.raises(CloneTemplateError):
+        delete_template(p)
+    # File untouched.
+    assert p.is_file()
+
+
+def test_delete_template_rejects_missing_target(tmp_path: Path) -> None:
+    with pytest.raises(CloneTemplateError):
+        delete_template(tmp_path / "nope.j2")

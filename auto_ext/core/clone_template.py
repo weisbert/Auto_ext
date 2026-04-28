@@ -167,10 +167,35 @@ def clone_template(
     return dest, dest_manifest
 
 
+def delete_template(template: Path) -> Path | None:
+    """Delete a ``.j2`` template and its manifest sidecar (if present).
+
+    Returns the deleted manifest path, or ``None`` when no sidecar
+    existed. Raises :class:`CloneTemplateError` if ``template`` does
+    not end in ``.j2`` or is not an existing file. The manifest is
+    only deleted after the ``.j2`` succeeds, so a partial failure
+    leaves the manifest untouched (caller can retry).
+    """
+    if not template.name.endswith(".j2"):
+        raise CloneTemplateError(
+            f"target must be a .j2 template, got {template.name!r}"
+        )
+    if not template.is_file():
+        raise CloneTemplateError(f"template not found: {template}")
+
+    manifest = manifest_path_for(template)
+    template.unlink()
+    if manifest.is_file():
+        manifest.unlink()
+        return manifest
+    return None
+
+
 __all__ = [
     "CloneTemplateError",
     "KNOWN_TOOL_EXTS",
     "clone_template",
+    "delete_template",
     "derive_clone_destination",
     "validate_suffix",
 ]

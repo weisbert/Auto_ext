@@ -1,13 +1,14 @@
-"""Tests for the Copy-template flow (Feature #1, 2026-04-28).
+"""Tests for the template-management right-click menu.
 
 Two layers:
 
 * :class:`CloneTemplateDialog` smoke (constructs, save writes the
   right pane to disk).
-* :class:`TemplatesTab._on_copy_template` integration: monkeypatching
-  ``QInputDialog.getText`` and walking the click path produces a new
-  ``.j2`` + manifest sidecar on disk and surfaces it in the Tasks
-  tab's per-stage combos.
+* :class:`TemplatesTab` integration: the list's right-click menu
+  exposes ``Copy...`` and ``Delete...``. Copy clones the .j2 +
+  manifest under a user-supplied suffix and refreshes Tasks-tab
+  combos. Delete removes both files after confirmation, blocked
+  when the template is bound or lives outside ``<auto_ext_root>/templates/``.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import pytest
 pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
+from PyQt5.QtCore import QPoint  # noqa: E402
+
 from auto_ext.ui.config_controller import ConfigController  # noqa: E402
 from auto_ext.ui.tabs.run_tab import RunTab  # noqa: E402
 from auto_ext.ui.tabs.tasks_tab import TasksTab  # noqa: E402
@@ -27,6 +30,35 @@ from auto_ext.ui.widgets.diff_editor import (  # noqa: E402
     CloneTemplateDialog,
     open_for_save_as_new,
 )
+
+
+def _capture_menu_actions(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """Patch ``QMenu.exec_`` so building the context menu records its
+    actions instead of blocking on user interaction. Returns the dict
+    that the patch will populate with key ``"actions"``.
+    """
+    captured: dict[str, object] = {}
+    from auto_ext.ui.tabs import templates_tab as tt_mod
+
+    real_exec = tt_mod.QMenu.exec_
+
+    def fake_exec(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["actions"] = list(self.actions())
+        return None
+
+    monkeypatch.setattr(tt_mod.QMenu, "exec_", fake_exec)
+    captured["_real_exec"] = real_exec
+    return captured
+
+
+def _select_row_with(tab: TemplatesTab, needle: str) -> int:
+    """Return the row index whose label contains ``needle`` (and select
+    it). Raises if no row matches — keeps tests honest."""
+    for i in range(tab._list.count()):
+        if needle in tab._list.item(i).text():
+            tab._list.setCurrentRow(i)
+            return i
+    raise AssertionError(f"no template row matched {needle!r}")
 
 
 # ---- fixtures --------------------------------------------------------------
@@ -152,41 +184,65 @@ def test_open_for_save_as_new_factory(qtbot, tmp_path: Path) -> None:
     assert isinstance(dlg, CloneTemplateDialog)
 
 
-# ---- Templates tab Copy template integration ------------------------------
+# ---- Templates tab right-click menu (Copy + Delete) ----------------------
 
 
-def test_copy_template_button_exists_and_enabled(qtbot, tmp_path: Path) -> None:
+def test_no_copy_template_toolbar_button(qtbot, tmp_path: Path) -> None:
+    """The toolbar button is gone — Copy lives on the list's right-click
+    menu instead."""
     cfg, root = _scaffold_project(tmp_path)
     tab, _, _ = _make_tab(qtbot, cfg, root)
-    assert tab._copy_template_btn.isEnabled() is True
+    assert not hasattr(tab, "_copy_template_btn")
 
 
-def test_copy_template_creates_clone_and_refreshes_tasks(
+def test_context_menu_has_copy_and_delete(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg, root = _scaffold_project(tmp_path)
+    tab, _, _ = _make_tab(qtbot, cfg, root)
+    row = _select_row_with(tab, "[calibre]")
+
+    captured = _capture_menu_actions(monkeypatch)
+    pos = tab._list.visualItemRect(tab._list.item(row)).center()
+    tab._on_template_list_context_menu(pos)
+
+    actions = captured["actions"]
+    texts = [a.text() for a in actions]
+    assert texts == ["Copy...", "Delete..."]
+
+
+def test_context_menu_no_op_on_empty_space(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg, root = _scaffold_project(tmp_path)
+    tab, _, _ = _make_tab(qtbot, cfg, root)
+
+    captured = _capture_menu_actions(monkeypatch)
+    # Pick a position well below the last row.
+    far_pos = QPoint(5, tab._list.height() + 200)
+    tab._on_template_list_context_menu(far_pos)
+
+    # No menu was opened — exec_ never called → captured stays empty.
+    assert "actions" not in captured
+
+
+def test_copy_action_creates_clone_and_refreshes_tasks(
     qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg, root = _scaffold_project(tmp_path)
     templates_tab, tasks_tab, _ = _make_tab(qtbot, cfg, root)
+    src = root / "templates" / "calibre" / "calibre_lvs.qci.j2"
 
-    # Select the calibre template so the source is pre-resolved.
-    for i in range(templates_tab._list.count()):
-        if "[calibre]" in templates_tab._list.item(i).text():
-            templates_tab._list.setCurrentRow(i)
-            break
-
-    # Mock the suffix prompt: user types "noconnect", clicks OK.
     monkeypatch.setattr(
         "auto_ext.ui.tabs.templates_tab.QInputDialog.getText",
         lambda *a, **kw: ("noconnect", True),
     )
-    # Skip the dialog's exec_() so the test doesn't block on the
-    # modal editor — clone_template has already written both files
-    # before exec_() is called, which is what we're checking.
     monkeypatch.setattr(
         "auto_ext.ui.widgets.diff_editor.CloneTemplateDialog.exec_",
         lambda self: None,
     )
 
-    templates_tab._on_copy_template()
+    templates_tab._invoke_copy_template(src)
 
     new_j2 = root / "templates" / "calibre" / "calibre_lvs_noconnect.qci.j2"
     new_manifest = (
@@ -195,39 +251,31 @@ def test_copy_template_creates_clone_and_refreshes_tasks(
     )
     assert new_j2.is_file()
     assert new_manifest.is_file()
-    # Manifest is byte-for-byte (knob declarations preserved).
     src_manifest = root / "templates" / "calibre" / "calibre_lvs.qci.j2.manifest.yaml"
     assert new_manifest.read_bytes() == src_manifest.read_bytes()
 
-    # Tasks tab combo for calibre now lists the new file.
     calibre_combo = tasks_tab._template_combos["calibre"]
     items = [calibre_combo.itemText(i) for i in range(calibre_combo.count())]
     assert "calibre_lvs_noconnect.qci.j2" in items
 
 
-def test_copy_template_rejects_existing_destination(
+def test_copy_action_rejects_existing_destination(
     qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cfg, root = _scaffold_project(tmp_path)
     templates_tab, _, _ = _make_tab(qtbot, cfg, root)
+    src = root / "templates" / "calibre" / "calibre_lvs.qci.j2"
 
-    # Pre-create the would-be destination so the second prompt fires.
     blocker = root / "templates" / "calibre" / "calibre_lvs_dup.qci.j2"
     blocker.write_text("existing\n", encoding="utf-8")
 
-    for i in range(templates_tab._list.count()):
-        if "[calibre]" in templates_tab._list.item(i).text():
-            templates_tab._list.setCurrentRow(i)
-            break
-
-    # First prompt: "dup" (collides). Second prompt: cancel.
     calls = {"n": 0}
 
     def fake_get_text(*a, **kw):
         calls["n"] += 1
         if calls["n"] == 1:
             return ("dup", True)
-        return ("", False)  # cancel
+        return ("", False)
 
     monkeypatch.setattr(
         "auto_ext.ui.tabs.templates_tab.QInputDialog.getText", fake_get_text,
@@ -242,47 +290,16 @@ def test_copy_template_rejects_existing_destination(
         lambda self: None,
     )
 
-    templates_tab._on_copy_template()
+    templates_tab._invoke_copy_template(src)
 
-    # User cancelled after the collision warning fired.
     assert any("already exists" in w for w in warnings)
-    # Existing file untouched.
     assert blocker.read_text(encoding="utf-8") == "existing\n"
 
 
-def test_copy_template_falls_back_to_file_dialog_when_no_selection(
+def test_copy_action_handles_missing_manifest_gracefully(
     qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg, root = _scaffold_project(tmp_path)
-    templates_tab, _, _ = _make_tab(qtbot, cfg, root)
-
-    # Force "no selection" path by clearing current row.
-    templates_tab._list.setCurrentRow(-1)
-    templates_tab._selected_path = None
-
-    # Mock QFileDialog.getOpenFileName to return our quantus template.
-    quantus_src = str(root / "templates" / "quantus" / "ext.cmd.j2")
-    monkeypatch.setattr(
-        "auto_ext.ui.tabs.templates_tab.QFileDialog.getOpenFileName",
-        lambda *a, **kw: (quantus_src, "Jinja templates (*.j2)"),
-    )
-    monkeypatch.setattr(
-        "auto_ext.ui.tabs.templates_tab.QInputDialog.getText",
-        lambda *a, **kw: ("fast", True),
-    )
-    monkeypatch.setattr(
-        "auto_ext.ui.widgets.diff_editor.CloneTemplateDialog.exec_",
-        lambda self: None,
-    )
-
-    templates_tab._on_copy_template()
-    assert (root / "templates" / "quantus" / "ext_fast.cmd.j2").is_file()
-
-
-def test_copy_template_handles_missing_manifest_gracefully(
-    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cloning a preset (no .manifest.yaml sidecar) should still succeed."""
+    """Cloning a preset (no .manifest.yaml sidecar) still succeeds."""
     auto_ext_root = tmp_path / "Auto_ext"
     config_dir = auto_ext_root / "config"
     config_dir.mkdir(parents=True)
@@ -292,7 +309,6 @@ def test_copy_template_handles_missing_manifest_gracefully(
 
     preset = presets_dir / "noseed.j2"
     preset.write_text("body\n", encoding="utf-8")
-    # No manifest sidecar.
 
     (config_dir / "project.yaml").write_text("tech_name: X\n", encoding="utf-8")
     (config_dir / "tasks.yaml").write_text(
@@ -301,11 +317,6 @@ def test_copy_template_handles_missing_manifest_gracefully(
     )
 
     templates_tab, _, _ = _make_tab(qtbot, config_dir, auto_ext_root)
-    # Find and select the preset row.
-    for i in range(templates_tab._list.count()):
-        if "noseed.j2" in templates_tab._list.item(i).text():
-            templates_tab._list.setCurrentRow(i)
-            break
 
     monkeypatch.setattr(
         "auto_ext.ui.tabs.templates_tab.QInputDialog.getText",
@@ -316,7 +327,130 @@ def test_copy_template_handles_missing_manifest_gracefully(
         lambda self: None,
     )
 
-    templates_tab._on_copy_template()
-    # New .j2 created; no manifest expected (none existed for source).
+    templates_tab._invoke_copy_template(preset)
+
     assert (presets_dir / "noseed_v2.j2").is_file()
     assert not (presets_dir / "noseed_v2.j2.manifest.yaml").exists()
+
+
+# ---- Delete action -------------------------------------------------------
+
+
+def test_delete_action_disabled_for_bound_template(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The calibre template is bound via project.templates.calibre, so
+    Delete must stay disabled with an explanatory tooltip."""
+    cfg, root = _scaffold_project(tmp_path)
+    tab, _, _ = _make_tab(qtbot, cfg, root)
+    row = _select_row_with(tab, "[calibre]")
+
+    captured = _capture_menu_actions(monkeypatch)
+    pos = tab._list.visualItemRect(tab._list.item(row)).center()
+    tab._on_template_list_context_menu(pos)
+
+    actions = captured["actions"]
+    delete_action = next(a for a in actions if a.text() == "Delete...")
+    assert delete_action.isEnabled() is False
+    assert "Bound to project.templates.calibre" in delete_action.toolTip()
+
+
+def test_delete_action_enabled_for_unbound_template(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A discovered-but-not-bound template can be deleted."""
+    cfg, root = _scaffold_project(tmp_path)
+    # Add a stray template not referenced anywhere.
+    stray = root / "templates" / "calibre" / "stray.qci.j2"
+    stray.write_text("body\n", encoding="utf-8")
+
+    tab, _, _ = _make_tab(qtbot, cfg, root)
+    row = _select_row_with(tab, "stray.qci.j2")
+
+    captured = _capture_menu_actions(monkeypatch)
+    pos = tab._list.visualItemRect(tab._list.item(row)).center()
+    tab._on_template_list_context_menu(pos)
+
+    actions = captured["actions"]
+    delete_action = next(a for a in actions if a.text() == "Delete...")
+    assert delete_action.isEnabled() is True
+    assert delete_action.toolTip() == str(stray)
+
+
+def test_delete_action_removes_files_after_confirmation(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg, root = _scaffold_project(tmp_path)
+    stray = root / "templates" / "calibre" / "stray.qci.j2"
+    stray.write_text("body\n", encoding="utf-8")
+    stray_manifest = root / "templates" / "calibre" / "stray.qci.j2.manifest.yaml"
+    stray_manifest.write_text("knobs: {}\n", encoding="utf-8")
+
+    tab, tasks_tab, _ = _make_tab(qtbot, cfg, root)
+    _select_row_with(tab, "stray.qci.j2")
+
+    from PyQt5.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        "auto_ext.ui.tabs.templates_tab.QMessageBox.question",
+        lambda *a, **kw: QMessageBox.Yes,
+    )
+
+    tab._invoke_delete_template(stray)
+
+    assert not stray.exists()
+    assert not stray_manifest.exists()
+
+    # Tasks tab combos refreshed — the stray no longer appears.
+    calibre_combo = tasks_tab._template_combos["calibre"]
+    items = [calibre_combo.itemText(i) for i in range(calibre_combo.count())]
+    assert "stray.qci.j2" not in items
+
+
+def test_delete_action_aborts_on_cancel(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg, root = _scaffold_project(tmp_path)
+    stray = root / "templates" / "calibre" / "stray.qci.j2"
+    stray.write_text("body\n", encoding="utf-8")
+
+    tab, _, _ = _make_tab(qtbot, cfg, root)
+
+    from PyQt5.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        "auto_ext.ui.tabs.templates_tab.QMessageBox.question",
+        lambda *a, **kw: QMessageBox.No,
+    )
+
+    tab._invoke_delete_template(stray)
+    assert stray.is_file()
+
+
+def test_delete_action_blocked_outside_templates_dir(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A template discovered via project.templates pointing OUTSIDE
+    ``<auto_ext_root>/templates/`` must have Delete disabled even
+    when unbound — we don't reach into shared filesystems from the GUI.
+    """
+    cfg, root = _scaffold_project(tmp_path)
+
+    # Drop an out-of-tree template and bind it loosely (we'll check
+    # the disabled-tooltip code path by simulating the entry's
+    # off-tree resolved path).
+    outside = tmp_path / "shared" / "foreign.qci.j2"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("body\n", encoding="utf-8")
+
+    tab, _, _ = _make_tab(qtbot, cfg, root)
+
+    # Build a synthetic TemplateEntry with no tool binding pointing to
+    # the foreign file. This is the same shape collect_template_entries
+    # would produce for an unbound discovered template that happened to
+    # live outside templates/ (rare but possible if a symlink farm).
+    from auto_ext.ui.templates_view import TemplateEntry
+    entry = TemplateEntry(path=outside, tool=None, in_project=False)
+    reason = tab._delete_blocked_reason(entry, outside)
+    assert reason is not None
+    assert "Outside" in reason
