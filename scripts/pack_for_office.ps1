@@ -5,8 +5,13 @@
 # non-hidden tarball sidesteps that bug -- the transfer tool only sees
 # Auto_ext_bundle.tar.gz.
 #
-# Usage (from anywhere):
-#     powershell -ExecutionPolicy Bypass -File scripts\pack_for_office.ps1
+# Usage:
+#   From VS Code terminal (cwd = repo root):
+#       .\scripts\pack_for_office.ps1
+#   From any Windows shell or File Explorer double-click:
+#       scripts\pack.bat
+#   If PowerShell ExecutionPolicy blocks the .ps1 directly, use pack.bat
+#   instead -- it always passes -ExecutionPolicy Bypass.
 #
 # Output: ..\Auto_ext_bundle.tar.gz (one level above repo root, so the bundle
 # never includes itself if you re-run pack).
