@@ -1,4 +1,4 @@
-"""Run tab: pick tasks/stages, start a run, watch live status.
+"""Run tab: pick tasks/stages, start a run, watch live status, view logs.
 
 Owns:
 
@@ -8,6 +8,9 @@ Owns:
 - Run / Cancel buttons,
 - a QTreeWidget showing live per-task / per-stage status that updates
   in response to :class:`QtProgressReporter` signals,
+- an embedded :class:`LogTab` underneath the status tree (Feature #4),
+  driven by the same ``stage_selected`` signal that auto-follow + the
+  double-click handler emit,
 - the :class:`RunWorker` lifecycle (one at a time).
 
 Config state (``config_dir`` / ``project`` / ``tasks``) lives on the
@@ -16,8 +19,11 @@ truth. The Open / Reload buttons on the top bar drive the controller;
 the tab listens on ``config_loaded`` / ``config_saved`` to refresh its
 task list.
 
-Emits :attr:`stage_selected` when the user clicks a stage row so the
-Log tab can switch to that stage's log file.
+Emits :attr:`stage_selected` when the user double-clicks a stage row so
+the embedded :class:`LogTab` can switch to that stage's log file.
+Single-click only selects the row (per Qt's default selection
+behaviour) so that users who want to right-click a row don't get the
+log viewer yanked from under them.
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import STAGE_DISPLAY, STATUS_COLOR, TASK_DISPLAY
 from auto_ext.ui.os_open import open_in_os
 from auto_ext.ui.qt_reporter import QtProgressReporter
+from auto_ext.ui.tabs.log_tab import LogTab
 from auto_ext.ui.worker import RunWorker
 
 
@@ -168,6 +175,13 @@ class RunTab(QWidget):
                 return _task_display(t)
         return None
 
+    def _on_stage_selected_for_log(self, log_path: Path | None) -> None:
+        # Internal slot bridging stage_selected to the embedded LogTab
+        # so the user-facing display label (label-or-id) reaches the log
+        # header without widening the public signal payload.
+        display_id = self.display_for_log_path(log_path)
+        self._log_tab.set_active_log(log_path, display_id)
+
     # ---- UI construction ---------------------------------------------
 
     def _build_ui(self) -> None:
@@ -261,23 +275,48 @@ class RunTab(QWidget):
 
         splitter.addWidget(left)
 
-        right = QWidget(self)
-        lright = QVBoxLayout(right)
+        # Feature #4: the right column is itself a vertical splitter so
+        # the live status tree (top) and the embedded LogTab (bottom)
+        # share the available height. Drag the handle to 0 on either
+        # side to focus on the other — no separate "hide log" toggle.
+        right_splitter = QSplitter(Qt.Vertical, self)
+
+        right_top = QWidget(right_splitter)
+        lright = QVBoxLayout(right_top)
         lright.setContentsMargins(0, 0, 0, 0)
-        lright.addWidget(QLabel("Live status", right))
-        self._status_tree = QTreeWidget(right)
+        lright.addWidget(QLabel("Live status", right_top))
+        self._status_tree = QTreeWidget(right_top)
         self._status_tree.setHeaderLabels(["task / stage", "status"])
         self._status_tree.setColumnWidth(0, 360)
-        self._status_tree.itemClicked.connect(self._on_tree_click)
+        # Feature #3: single-click only selects (Qt default highlight); the
+        # Log tab is switched on double-click so right-click doesn't lose
+        # the user's row mid-action. Auto-follow on stage_started is the
+        # other (decoupled) channel that emits stage_selected.
+        self._status_tree.itemDoubleClicked.connect(self._on_tree_double_click)
         # Phase 5.9 B+C: right-click on a stage row opens a context menu
-        # with "Open rendered template" + (calibre only) "Open LVS report".
+        # with "View log file" + "Open rendered template" + (calibre only)
+        # "Open LVS report".
         self._status_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._status_tree.customContextMenuRequested.connect(
             self._on_tree_context_menu
         )
         lright.addWidget(self._status_tree)
 
-        splitter.addWidget(right)
+        # Feature #4: the LogTab widget gets embedded directly under the
+        # status tree. Subscribing to our own stage_selected signal keeps
+        # the auto-follow + double-click paths working through a single
+        # public API (also still consumable by MainWindow if the user
+        # ever wants the log somewhere else).
+        self._log_tab = LogTab(right_splitter)
+        self.stage_selected.connect(self._on_stage_selected_for_log)
+
+        right_splitter.addWidget(right_top)
+        right_splitter.addWidget(self._log_tab)
+        right_splitter.setStretchFactor(0, 1)
+        right_splitter.setStretchFactor(1, 1)
+        right_splitter.setSizes([400, 400])
+
+        splitter.addWidget(right_splitter)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([400, 800])
@@ -527,7 +566,7 @@ class RunTab(QWidget):
         self._cancel_btn.setText("✕ Cancel")
         self.worker_state_changed.emit(False)
 
-    # ---- stage row click → log switch --------------------------------
+    # ---- stage row double-click → log switch -------------------------
 
     def _stage_log_path(self, task_id: str, stage: str) -> Path | None:
         """Compute the on-disk log path for ``(task_id, stage)``.
@@ -546,7 +585,16 @@ class RunTab(QWidget):
     def _on_auto_follow_toggled(self, checked: bool) -> None:
         self._auto_follow_log = bool(checked)
 
-    def _on_tree_click(self, item: QTreeWidgetItem, column: int) -> None:
+    def _on_tree_double_click(
+        self, item: QTreeWidgetItem, column: int
+    ) -> None:
+        """Switch the Log tab to this stage's log on **double**-click.
+
+        Single-click intentionally does nothing here so the row only
+        gets the Qt default selection highlight — the user can then
+        right-click the row without the log viewer jumping out from
+        under their cursor (Feature #3 PINNED design).
+        """
         # Only stage rows (children of task rows) select a log file.
         parent = item.parent()
         if parent is None:
@@ -565,8 +613,12 @@ class RunTab(QWidget):
     def _on_tree_context_menu(self, pos: QPoint) -> None:
         """Build a right-click menu on a stage row.
 
-        Two actions:
+        Three actions:
 
+        - **View log file** — always present on a stage row; opens the
+          per-stage ``.log`` with the OS default handler. Disabled with
+          a tooltip until the file exists on disk (the worker creates it
+          when the stage starts running).
         - **Open rendered template** — always present on a stage row;
           disabled (with a tooltip) when the file does not exist yet
           (mid-run, dry-run-with-no-template-stage, or strmout which has
@@ -599,8 +651,22 @@ class RunTab(QWidget):
             return  # config out from under us — silently skip
 
         rendered = rendered_path_for(ae_root, task, stage, project)
+        log_path = self._stage_log_path(task_id, stage)
 
         menu = QMenu(self._status_tree)
+
+        # Feature #3: "View log file" sits at the top of the menu — it's
+        # the action the user most often wants on a stage row.
+        act_log = QAction("View log file", menu)
+        if log_path is None or not log_path.exists():
+            act_log.setEnabled(False)
+            act_log.setToolTip("Log not yet produced")
+        else:
+            act_log.setToolTip(str(log_path))
+            act_log.triggered.connect(
+                lambda _checked=False, p=log_path: self._open_path(p)
+            )
+        menu.addAction(act_log)
 
         act_rendered = QAction("Open rendered template", menu)
         if rendered is None or not rendered.exists():

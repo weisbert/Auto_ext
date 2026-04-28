@@ -205,18 +205,79 @@ def test_main_window_open_wizard_dirty_cancel(
     assert opened == [], "Cancel must NOT open the wizard"
 
 
-# ---- TaskSpec.label → LogTab header rendering ----------------------------
+# ---- Feature #4: Log tab merged into Run tab ---------------------------
+
+
+def test_feature4_main_window_has_four_tabs(qtbot) -> None:
+    """Feature #4 dropped the standalone Log tab in favour of an embedded
+    LogTab inside RunTab. MainWindow now exposes 4 tabs, not 5.
+    """
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._tabs.count() == 4
+    titles = [window._tabs.tabText(i) for i in range(window._tabs.count())]
+    assert "Log" not in titles, (
+        "Standalone Log tab must be removed; the log viewer lives "
+        "inside the Run tab now."
+    )
+    # All four expected tabs are still present.
+    assert set(titles) == {"Run", "Project", "Tasks", "Templates"}
+
+
+def test_feature4_run_tab_owns_embedded_log_tab(qtbot) -> None:
+    """RunTab now owns its own LogTab and wires stage_selected straight
+    into ``set_active_log``. MainWindow no longer holds a separate
+    LogTab reference."""
+    from auto_ext.ui.tabs.log_tab import LogTab
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert hasattr(window._run_tab, "_log_tab")
+    assert isinstance(window._run_tab._log_tab, LogTab)
+    # MainWindow no longer holds a top-level _log_tab attribute.
+    assert not hasattr(window, "_log_tab")
+
+
+def test_feature4_stage_selected_drives_embedded_log_tab(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """Emitting ``stage_selected`` from the Run tab must route the path
+    into the embedded LogTab's ``set_active_log``. The connection lives
+    inside RunTab._build_ui — this test pins it so a future refactor
+    can't silently disconnect the two."""
+    from auto_ext.ui.config_controller import ConfigController
+    from auto_ext.ui.tabs.run_tab import RunTab
+
+    ae_root = tmp_path / "pr"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+
+    task_id = controller.tasks[0].task_id
+    log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
+
+    # No log selected yet.
+    assert tab._log_tab._path is None
+
+    # Emit and check that the embedded LogTab took the path.
+    tab.stage_selected.emit(log_path)
+    assert tab._log_tab._path == log_path
+
+
+# ---- TaskSpec.label → LogTab header rendering (Features #2 + #4) ---------
 
 
 def test_log_tab_header_includes_label_when_set(
     qtbot, project_tools_config: Path, tmp_path: Path
 ) -> None:
-    """End-to-end: when a labelled spec is loaded and the user clicks
-    a stage row, the LogTab header reads ``"<label> — <path>"``. The
-    main_window threads the label-or-id via the new
-    ``RunTab.display_for_log_path`` helper so the existing
+    """End-to-end: when a labelled spec is loaded and stage_selected
+    fires, the embedded LogTab header reads ``"<label> — <path>"``.
+    RunTab's internal slot threads the display value via
+    :meth:`RunTab.display_for_log_path` so the public
     ``stage_selected`` signal payload stays a bare ``Path``."""
-    # Rewrite the tasks.yaml with a label.
     (project_tools_config / "tasks.yaml").write_text(
         "- library: WB_PLL_DCO\n"
         "  cell: inv\n"
@@ -232,10 +293,9 @@ def test_log_tab_header_includes_label_when_set(
 
     task_id = "WB_PLL_DCO__inv__layout__schematic"
     log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
-    # Drive the slot directly — that's what stage_selected fires into.
-    window._on_stage_selected(log_path)
+    window._run_tab.stage_selected.emit(log_path)
 
-    header = window._log_tab._header.text()
+    header = window._run_tab._log_tab._header.text()
     assert "Pretty Display" in header
     assert "calibre.log" in header
 
@@ -252,17 +312,15 @@ def test_log_tab_header_uses_task_id_when_label_unset(
 
     task_id = "WB_PLL_DCO__inv__layout__schematic"
     log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
-    window._on_stage_selected(log_path)
+    window._run_tab.stage_selected.emit(log_path)
 
-    header = window._log_tab._header.text()
+    header = window._run_tab._log_tab._header.text()
     assert task_id in header
 
 
 def test_log_tab_set_active_log_display_id_default_none(qtbot, tmp_path: Path) -> None:
     """``LogTab.set_active_log`` keeps the legacy 1-arg shape: when
-    ``display_id`` is omitted/None, the header is just the path. This
-    is the call-site contract used everywhere except the main_window
-    integration path."""
+    ``display_id`` is omitted/None, the header is just the path."""
     from auto_ext.ui.tabs.log_tab import LogTab
 
     log = LogTab()

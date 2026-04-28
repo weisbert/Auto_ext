@@ -176,9 +176,15 @@ def test_phase59_bc_context_menu_on_stage_row(
     finally:
         run_tab_mod.QMenu.exec_ = real_qmenu_exec  # type: ignore[method-assign]
 
-    assert captured["actions"] == ["Open rendered template", "Open LVS report"]
-    # Both should be enabled given the on-disk fixtures we set up.
-    assert captured["enabled"] == [True, True]
+    # Feature #3 added "View log file" at the top of the menu. Without
+    # an on-disk log file it stays disabled; the rendered + report
+    # entries enable as before given the .qci + .report fixtures.
+    assert captured["actions"] == [
+        "View log file",
+        "Open rendered template",
+        "Open LVS report",
+    ]
+    assert captured["enabled"] == [False, True, True]
     # Sanity: the rendered helper agrees with what the menu pointed at.
     assert qci.exists()
 
@@ -213,9 +219,15 @@ def test_phase59_bc_context_menu_disabled_when_file_missing(
         run_tab_mod.QMenu.exec_ = real_exec  # type: ignore[method-assign]
 
     actions = captured["actions"]
-    assert [a.text() for a in actions] == ["Open rendered template"]
-    assert actions[0].isEnabled() is False
-    assert actions[0].toolTip()  # non-empty hint for the user
+    # si has no rendered template (dry-runner returns None) and no log
+    # on disk yet — only the two stage-agnostic entries appear, both
+    # disabled with a tooltip explaining why.
+    assert [a.text() for a in actions] == [
+        "View log file",
+        "Open rendered template",
+    ]
+    assert all(a.isEnabled() is False for a in actions)
+    assert all(a.toolTip() for a in actions)  # non-empty hints
 
 
 def test_phase59_bc_context_menu_only_on_stage_rows(
@@ -429,7 +441,6 @@ def test_label_status_tree_uses_label_when_set(
     """A spec carrying ``label: pretty name`` → column 0 shows the
     label, but ``data(0, UserRole)`` keeps the canonical task_id so
     the click handlers and on-disk paths still work."""
-    # Rewrite the fixture's tasks.yaml to add a label.
     (project_tools_config / "tasks.yaml").write_text(
         "- library: WB_PLL_DCO\n"
         "  cell: inv\n"
@@ -445,8 +456,6 @@ def test_label_status_tree_uses_label_when_set(
 
     parent = tab._status_tree.topLevelItem(0)
     assert parent.text(0) == "PLL DCO inverter"
-    # The canonical task_id is preserved on UserRole so _on_tree_click
-    # and _on_tree_context_menu can still derive the right paths.
     assert parent.data(0, Qt.UserRole) == "WB_PLL_DCO__inv__layout__schematic"
 
 
@@ -501,9 +510,9 @@ def test_label_selected_tasks_uses_user_role(
 def test_label_tree_click_round_trips_via_user_role(
     qtbot, project_tools_config: Path, tmp_path: Path
 ) -> None:
-    """Clicking a stage row under a labelled task row must compute the
-    log path from the canonical task_id (UserRole), not the visible
-    label — otherwise the path would land in
+    """Double-clicking a stage row under a labelled task row must
+    compute the log path from the canonical task_id (UserRole), not
+    the visible label — otherwise the path would land in
     ``logs/task_<label>/...`` and miss the actual log file."""
     (project_tools_config / "tasks.yaml").write_text(
         "- library: WB_PLL_DCO\n"
@@ -521,16 +530,14 @@ def test_label_tree_click_round_trips_via_user_role(
 
     captured = _phase59_a_capture_stage_selected(tab)
 
-    # Drive the click handler on the calibre stage row (child of the
-    # labelled task row).
     task_id = "WB_PLL_DCO__inv__layout__schematic"
     calibre_item = tab._stage_items[(task_id, "calibre")]
-    tab._on_tree_click(calibre_item, 0)
+    # Feature #3: stage_selected fires on double-click, not single-click.
+    tab._on_tree_double_click(calibre_item, 0)
 
     assert len(captured) == 1
     payload = captured[0]
     assert isinstance(payload, Path)
-    # Path uses the canonical task_id, not the label.
     assert payload == ae_root / "logs" / f"task_{task_id}" / "calibre.log"
 
 
@@ -538,9 +545,8 @@ def test_label_display_for_log_path_returns_label(
     qtbot, project_tools_config: Path, tmp_path: Path
 ) -> None:
     """``RunTab.display_for_log_path`` reverse-maps a log path back to
-    the user-facing label-or-id string, which the main window threads
-    into ``LogTab.set_active_log`` so the log header can show the
-    pretty name alongside the path."""
+    the user-facing label-or-id string, which the embedded LogTab uses
+    to render the header alongside the path."""
     (project_tools_config / "tasks.yaml").write_text(
         "- library: WB_PLL_DCO\n"
         "  cell: inv\n"
@@ -570,3 +576,148 @@ def test_label_display_for_log_path_returns_label(
     assert tab.display_for_log_path(log_path) == task_id
     # None payload short-circuits.
     assert tab.display_for_log_path(None) is None
+
+
+# ---- Feature #3: click semantics + extended right-click menu ------------
+
+
+def test_feature3_single_click_does_not_emit_stage_selected(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """Single-click on a stage row must NOT emit ``stage_selected``.
+
+    Pre-Feature-#3, ``itemClicked`` jumped the Log tab on every click,
+    which made right-clicking a row impossible without losing focus.
+    The signal is now wired to ``itemDoubleClicked`` instead.
+    """
+    ae_root = tmp_path / "pr"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+    tab._reset_status_tree(controller.tasks, list(STAGE_ORDER))
+
+    # Auto-follow is the OTHER channel — turn it off so we isolate the
+    # click path. Without this, an in-flight stage_started could pollute
+    # the captured list and mask a regression.
+    tab._auto_follow_check.setChecked(False)
+
+    captured = _phase59_a_capture_stage_selected(tab)
+
+    task_id = controller.tasks[0].task_id
+    calibre_item = tab._stage_items[(task_id, "calibre")]
+    tab._status_tree.itemClicked.emit(calibre_item, 0)
+
+    qtbot.wait(50)
+    assert captured == [], (
+        "Single-click must not emit stage_selected; only double-click "
+        "(or auto-follow) is allowed to switch the Log tab."
+    )
+
+
+def test_feature3_double_click_emits_stage_selected(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """Double-click on a stage row emits ``stage_selected(log_path)`` —
+    the in-GUI quick-switch users had pre-Feature-#3, just bumped to a
+    less aggressive trigger."""
+    ae_root = tmp_path / "pr"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+    tab._reset_status_tree(controller.tasks, list(STAGE_ORDER))
+
+    tab._auto_follow_check.setChecked(False)
+
+    captured = _phase59_a_capture_stage_selected(tab)
+
+    task_id = controller.tasks[0].task_id
+    calibre_item = tab._stage_items[(task_id, "calibre")]
+    tab._status_tree.itemDoubleClicked.emit(calibre_item, 0)
+
+    assert len(captured) == 1
+    assert captured[0] == ae_root / "logs" / f"task_{task_id}" / "calibre.log"
+
+
+def test_feature3_view_log_file_disabled_when_log_missing(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """The 'View log file' entry exists on every stage row but stays
+    disabled with a tooltip until the worker actually writes the log.
+    """
+    ae_root = tmp_path / "ae_root"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    _phase59_bc_seed_run_tree(tab, controller, project_tools_config)
+    task_id = controller.tasks[0].task_id
+
+    captured: dict[str, object] = {}
+    from auto_ext.ui.tabs import run_tab as run_tab_mod
+
+    real_exec = run_tab_mod.QMenu.exec_
+
+    def fake_exec(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["actions"] = list(self.actions())
+        return None
+
+    run_tab_mod.QMenu.exec_ = fake_exec  # type: ignore[method-assign]
+    try:
+        item = tab._stage_items[(task_id, "calibre")]
+        pos = tab._status_tree.visualItemRect(item).center()
+        tab._on_tree_context_menu(pos)
+    finally:
+        run_tab_mod.QMenu.exec_ = real_exec  # type: ignore[method-assign]
+
+    actions = captured["actions"]
+    log_action = next(a for a in actions if a.text() == "View log file")
+    assert log_action.isEnabled() is False
+    assert log_action.toolTip() == "Log not yet produced"
+
+
+def test_feature3_view_log_file_opens_log_when_present(
+    qtbot, project_tools_config: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """When the log file exists, 'View log file' is enabled and triggers
+    :func:`open_in_os` with the resolved log path on click."""
+    ae_root = tmp_path / "ae_root"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    _phase59_bc_seed_run_tree(tab, controller, project_tools_config)
+    task_id = controller.tasks[0].task_id
+
+    log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("calibre stdout\n", encoding="utf-8")
+
+    opened: list[Path] = []
+    from auto_ext.ui.tabs import run_tab as run_tab_mod
+
+    monkeypatch.setattr(
+        run_tab_mod, "open_in_os", lambda p: opened.append(Path(p))
+    )
+
+    captured: dict[str, object] = {}
+    real_exec = run_tab_mod.QMenu.exec_
+
+    def fake_exec(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["actions"] = list(self.actions())
+        return None
+
+    run_tab_mod.QMenu.exec_ = fake_exec  # type: ignore[method-assign]
+    try:
+        item = tab._stage_items[(task_id, "calibre")]
+        pos = tab._status_tree.visualItemRect(item).center()
+        tab._on_tree_context_menu(pos)
+    finally:
+        run_tab_mod.QMenu.exec_ = real_exec  # type: ignore[method-assign]
+
+    actions = captured["actions"]
+    log_action = next(a for a in actions if a.text() == "View log file")
+    assert log_action.isEnabled() is True
+    assert log_action.toolTip() == str(log_path)
+
+    log_action.trigger()
+    assert opened == [log_path]
