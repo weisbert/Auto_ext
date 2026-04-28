@@ -282,6 +282,64 @@ def run_tasks(
 # ---- per-task / per-stage --------------------------------------------------
 
 
+def _task_run_dirs(auto_ext_root: Path, task: TaskConfig) -> tuple[Path, Path, Path]:
+    """Return ``(task_base, rendered_dir, log_dir)`` for ``task``.
+
+    Single source of truth for the runner's path conventions:
+    ``<auto_ext_root>/runs/task_<safe_id>/`` for the per-task workdir,
+    ``rendered/`` underneath for rendered templates, and
+    ``<auto_ext_root>/logs/task_<safe_id>/`` for stage logs. Both serial
+    and parallel modes use this layout (parallel additionally treats
+    ``task_base`` as the cwd; serial uses the shared workarea).
+    """
+    safe_id = _UNSAFE_TASK_ID.sub("_", task.task_id)
+    task_base = auto_ext_root / "runs" / f"task_{safe_id}"
+    rendered_dir = task_base / "rendered"
+    log_dir = auto_ext_root / "logs" / f"task_{safe_id}"
+    return task_base, rendered_dir, log_dir
+
+
+def rendered_path_for(
+    auto_ext_root: Path,
+    task: TaskConfig,
+    stage: str,
+    project: ProjectConfig,
+) -> Path | None:
+    """Return where the runner writes (or would write) the rendered template.
+
+    Mirrors the per-stage path math in :func:`_run_single_stage` so the
+    GUI's "Open rendered template" action and the runner stay in sync.
+
+    Returns:
+        - The absolute path under
+          ``<auto_ext_root>/runs/task_<safe_id>/rendered/<template_stem>``
+          for stages that render a template (``si`` / ``calibre`` /
+          ``quantus`` / ``jivaro``).
+        - ``None`` for ``strmout`` (the strmout tool has
+          ``has_template=False``; it consumes ``output_dir`` /
+          ``layer_map`` directly and produces no rendered input file).
+        - ``None`` for any stage that has neither a per-task override nor
+          a project default configured — the runner would also error in
+          this case, and the GUI should disable the action.
+
+    Per-stage template resolution is per-task override → project default,
+    matching :func:`_resolve_template_path`. ``project`` is currently
+    unused at runtime (template fields are merged into ``task.templates``
+    upstream by :func:`auto_ext.core.config.load_tasks`) but kept in the
+    signature so future per-stage routing changes don't ripple through
+    every caller.
+    """
+    if stage not in STAGE_ORDER:
+        return None
+    if stage == "strmout":
+        return None
+    template_path = _resolve_template_path(task, stage, auto_ext_root=auto_ext_root)
+    if template_path is None:
+        return None
+    _, rendered_dir, _ = _task_run_dirs(auto_ext_root, task)
+    return rendered_dir / template_path.stem
+
+
 def _run_single_task(
     *,
     project: ProjectConfig,
@@ -299,10 +357,7 @@ def _run_single_task(
     reporter: ProgressReporter,
     cancel_token: CancelToken,
 ) -> TaskResult:
-    safe_id = _UNSAFE_TASK_ID.sub("_", task.task_id)
-    task_base = auto_ext_root / "runs" / f"task_{safe_id}"
-    rendered_dir = task_base / "rendered"
-    log_dir = auto_ext_root / "logs" / f"task_{safe_id}"
+    _, rendered_dir, log_dir = _task_run_dirs(auto_ext_root, task)
 
     if parallel:
         # prepare_parallel_workdir does rmtree-on-exist + fresh symlinks,

@@ -778,3 +778,124 @@ def test_discover_env_vars_strips_synthetic_path_tokens(
     assert "custom_path" not in required
     # But real shell vars referenced inside paths.* values still surface.
     assert "VERIFY_ROOT" in required
+
+
+# ---- Phase 5.9 B+C: rendered_path_for ------------------------------------
+
+
+def _phase59_bc_load(config_dir: Path):
+    project = load_project(config_dir / "project.yaml")
+    tasks = load_tasks(config_dir / "tasks.yaml", project=project)
+    return project, tasks
+
+
+@pytest.mark.parametrize(
+    "stage,expected_stem",
+    [
+        ("si", "default.env"),
+        ("calibre", "calibre_lvs.qci"),
+        ("quantus", "ext.cmd"),
+        ("jivaro", "default.xml"),
+    ],
+)
+def test_phase59_bc_rendered_path_for_each_templated_stage(
+    project_tools_config: Path, tmp_path: Path, stage: str, expected_stem: str
+) -> None:
+    """rendered_path_for returns the same per-stage location the runner
+    writes to: ``<auto_ext_root>/runs/task_<safe_id>/rendered/<template_stem>``.
+    """
+    from auto_ext.core.runner import rendered_path_for
+
+    project, tasks = _phase59_bc_load(project_tools_config)
+    ae_root = tmp_path / "ae_root"
+    path = rendered_path_for(ae_root, tasks[0], stage, project)
+    assert path is not None
+    assert path == (
+        ae_root / "runs" / f"task_{tasks[0].task_id}" / "rendered" / expected_stem
+    )
+
+
+def test_phase59_bc_rendered_path_for_strmout_returns_none(
+    project_tools_config: Path, tmp_path: Path
+) -> None:
+    """strmout has has_template=False — runner does not render anything,
+    so the GUI must disable "Open rendered template" for that row.
+    """
+    from auto_ext.core.runner import rendered_path_for
+
+    project, tasks = _phase59_bc_load(project_tools_config)
+    assert rendered_path_for(tmp_path / "ae_root", tasks[0], "strmout", project) is None
+
+
+def test_phase59_bc_rendered_path_for_unknown_stage_returns_none(
+    project_tools_config: Path, tmp_path: Path
+) -> None:
+    """A stage name outside STAGE_ORDER (defensive — the GUI shouldn't
+    feed one in, but worth a guard) returns None rather than crashing.
+    """
+    from auto_ext.core.runner import rendered_path_for
+
+    project, tasks = _phase59_bc_load(project_tools_config)
+    assert rendered_path_for(tmp_path / "ae_root", tasks[0], "bogus", project) is None
+
+
+def test_phase59_bc_rendered_path_for_per_task_override_beats_project_default(
+    project_tools_config: Path, tmp_path: Path, templates_root: Path
+) -> None:
+    """If a task overrides ``templates.calibre`` to a non-default path,
+    rendered_path_for must follow the override (the runner does too)."""
+    from auto_ext.core.runner import rendered_path_for
+
+    # Drop a per-task override pointing at a same-named template at a
+    # *different* location — easier to use a real template stem so the
+    # stem comparison is meaningful. Use the production calibre template
+    # but make sure the override is honored even if pointed at a copy.
+    override_dir = tmp_path / "custom_templates"
+    override_dir.mkdir()
+    custom = override_dir / "my_custom_calibre.qci.j2"
+    src = templates_root / "calibre" / "calibre_lvs.qci.j2"
+    custom.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+    (project_tools_config / "tasks.yaml").write_text(
+        f"""\
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout
+  lvs_source_view: schematic
+  templates:
+    calibre: {custom.as_posix()}
+""",
+        encoding="utf-8",
+    )
+
+    project, tasks = _phase59_bc_load(project_tools_config)
+    path = rendered_path_for(tmp_path / "ae_root", tasks[0], "calibre", project)
+    assert path is not None
+    # Stem follows the override's filename, not the project default.
+    assert path.name == "my_custom_calibre.qci"
+
+
+def test_phase59_bc_rendered_path_for_matches_runner_actual_writes(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """Cross-validate: after a real (mocked) run, rendered_path_for must
+    point at a file that exists. Catches regressions where the runner's
+    inline path math drifts from the helper.
+    """
+    from auto_ext.core.runner import rendered_path_for
+
+    project, tasks = _phase59_bc_load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["si", "calibre", "quantus", "jivaro"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+    )
+    for stage in ("si", "calibre", "quantus", "jivaro"):
+        path = rendered_path_for(ae_root, tasks[0], stage, project)
+        assert path is not None and path.is_file(), f"{stage}: {path}"

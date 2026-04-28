@@ -26,9 +26,10 @@ import re
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
+    QAction,
     QCheckBox,
     QFileDialog,
     QFrame,
@@ -37,6 +38,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -48,9 +50,11 @@ from PyQt5.QtWidgets import (
 )
 
 from auto_ext.core.progress import CancelToken
-from auto_ext.core.runner import STAGE_ORDER
+from auto_ext.core.runner import STAGE_ORDER, rendered_path_for
+from auto_ext.tools.calibre import lvs_report_path_from_runset
 from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import STAGE_DISPLAY, STATUS_COLOR, TASK_DISPLAY
+from auto_ext.ui.os_open import open_in_os
 from auto_ext.ui.qt_reporter import QtProgressReporter
 from auto_ext.ui.worker import RunWorker
 
@@ -212,6 +216,12 @@ class RunTab(QWidget):
         self._status_tree.setHeaderLabels(["task / stage", "status"])
         self._status_tree.setColumnWidth(0, 360)
         self._status_tree.itemClicked.connect(self._on_tree_click)
+        # Phase 5.9 B+C: right-click on a stage row opens a context menu
+        # with "Open rendered template" + (calibre only) "Open LVS report".
+        self._status_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._status_tree.customContextMenuRequested.connect(
+            self._on_tree_context_menu
+        )
         lright.addWidget(self._status_tree)
 
         splitter.addWidget(right)
@@ -480,3 +490,100 @@ class RunTab(QWidget):
         if log_path is None:
             return
         self.stage_selected.emit(log_path)
+
+    # ---- stage row context menu (Phase 5.9 B+C) ----------------------
+
+    def _on_tree_context_menu(self, pos: QPoint) -> None:
+        """Build a right-click menu on a stage row.
+
+        Two actions:
+
+        - **Open rendered template** — always present on a stage row;
+          disabled (with a tooltip) when the file does not exist yet
+          (mid-run, dry-run-with-no-template-stage, or strmout which has
+          no rendered template at all).
+        - **Open LVS report** — calibre stage only; disabled until the
+          rendered ``.qci`` declares a report path AND that report file
+          exists on disk.
+
+        Clicking outside any item, or on a top-level task row, suppresses
+        the menu (no-op return). The actions never raise to the Qt
+        event loop — failures from :func:`open_in_os` are surfaced via
+        :class:`QMessageBox.warning` so the user can copy-paste the path.
+        """
+        item = self._status_tree.itemAt(pos)
+        if item is None:
+            return  # clicked on empty space
+        parent = item.parent()
+        if parent is None:
+            return  # task row, not a stage row — no menu
+
+        task_id = parent.text(0)
+        stage = item.text(0)
+
+        task = next(
+            (t for t in self._controller.tasks if t.task_id == task_id), None
+        )
+        ae_root = self._controller.auto_ext_root
+        project = self._controller.project
+        if task is None or ae_root is None or project is None:
+            return  # config out from under us — silently skip
+
+        rendered = rendered_path_for(ae_root, task, stage, project)
+
+        menu = QMenu(self._status_tree)
+
+        act_rendered = QAction("Open rendered template", menu)
+        if rendered is None or not rendered.exists():
+            act_rendered.setEnabled(False)
+            act_rendered.setToolTip(
+                "Rendered file not yet produced"
+                if rendered is not None
+                else "Stage does not produce a rendered template"
+            )
+        else:
+            act_rendered.setToolTip(str(rendered))
+            act_rendered.triggered.connect(
+                lambda _checked=False, p=rendered: self._open_path(p)
+            )
+        menu.addAction(act_rendered)
+
+        if stage == "calibre":
+            act_report = QAction("Open LVS report", menu)
+            report = (
+                lvs_report_path_from_runset(rendered)
+                if rendered is not None and rendered.exists()
+                else None
+            )
+            if report is None or not report.exists():
+                act_report.setEnabled(False)
+                act_report.setToolTip("LVS report not yet produced")
+            else:
+                act_report.setToolTip(str(report))
+                act_report.triggered.connect(
+                    lambda _checked=False, p=report: self._open_path(p)
+                )
+            menu.addAction(act_report)
+
+        menu.exec_(self._status_tree.viewport().mapToGlobal(pos))
+
+    def _open_path(self, path: Path) -> None:
+        """Wrapper around :func:`open_in_os` that surfaces failures via
+        :class:`QMessageBox`. The rendered/report path is included so the
+        user can copy-paste it into a terminal even if the OS handler
+        won't launch.
+        """
+        try:
+            open_in_os(path)
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self,
+                "File not found",
+                f"The file no longer exists:\n{path}",
+            )
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Could not open file",
+                f"Failed to open:\n{path}\n\n{exc}",
+            )

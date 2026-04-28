@@ -208,6 +208,99 @@ def test_calibre_parse_missing_qci_passes_result_through(tmp_path: Path) -> None
     assert out is raw
 
 
+# ---- Phase 5.9 B+C: lvs_report_path_from_runset --------------------------
+
+
+def _phase59_bc_make_qci(
+    path: Path, run_dir: str | Path, report_name: str
+) -> None:
+    """Write a minimal ``.qci`` with the two LVS directives the helper
+    parses (everything else is irrelevant — calibre would also accept
+    extra fields in real files)."""
+    path.write_text(
+        f"*lvsRunDir: {run_dir}\n*lvsReportFile: {report_name}\n",
+        encoding="utf-8",
+    )
+
+
+def test_phase59_bc_lvs_report_path_from_runset_parses_qci(tmp_path: Path) -> None:
+    """Happy path: absolute lvsRunDir + existing report file → resolved path."""
+    from auto_ext.tools.calibre import lvs_report_path_from_runset
+
+    run_dir = tmp_path / "calibre_run"
+    run_dir.mkdir()
+    (run_dir / "inv.lvs.report").write_text("CORRECT\n", encoding="utf-8")
+    qci = tmp_path / "rendered.qci"
+    _phase59_bc_make_qci(qci, run_dir, "inv.lvs.report")
+
+    out = lvs_report_path_from_runset(qci)
+    assert out == run_dir / "inv.lvs.report"
+
+
+def test_phase59_bc_lvs_report_path_from_runset_missing_directives(
+    tmp_path: Path,
+) -> None:
+    """A .qci with neither ``lvsRunDir`` nor ``lvsReportFile`` → None
+    (the helper's contract — caller disables the menu action)."""
+    from auto_ext.tools.calibre import lvs_report_path_from_runset
+
+    qci = tmp_path / "rendered.qci"
+    qci.write_text(
+        "# misc field\n*foo: bar\n*lvsLayoutFile: /path/to/layout\n",
+        encoding="utf-8",
+    )
+    assert lvs_report_path_from_runset(qci) is None
+
+
+def test_phase59_bc_lvs_report_path_from_runset_missing_runset_file(
+    tmp_path: Path,
+) -> None:
+    """The .qci itself doesn't exist → None (don't raise)."""
+    from auto_ext.tools.calibre import lvs_report_path_from_runset
+
+    assert lvs_report_path_from_runset(tmp_path / "no_such.qci") is None
+
+
+def test_phase59_bc_lvs_report_path_from_runset_report_file_missing(
+    tmp_path: Path,
+) -> None:
+    """Both directives present, but the report file isn't on disk yet
+    (mid-run, or calibre crashed). Helper returns None — caller still
+    disables the action."""
+    from auto_ext.tools.calibre import lvs_report_path_from_runset
+
+    qci = tmp_path / "rendered.qci"
+    _phase59_bc_make_qci(qci, tmp_path / "calibre_run", "inv.lvs.report")
+    # tmp_path/"calibre_run" never created → report file definitely absent
+    assert lvs_report_path_from_runset(qci) is None
+
+
+def test_phase59_bc_lvs_report_path_from_runset_relative_runset_dir(
+    tmp_path: Path,
+) -> None:
+    """A relative lvsRunDir is anchored on the .qci's parent directory.
+
+    Documented edge case: production runsets always carry an absolute
+    path, but rendered fixtures sometimes use relative ones, and we
+    need a deterministic anchor.
+    """
+    from auto_ext.tools.calibre import lvs_report_path_from_runset
+
+    rendered_dir = tmp_path / "rendered"
+    rendered_dir.mkdir()
+    # Sibling dir to where the .qci lives.
+    sibling_run = tmp_path / "rendered" / "subrun"
+    sibling_run.mkdir()
+    (sibling_run / "out.lvs.report").write_text("CORRECT\n", encoding="utf-8")
+
+    qci = rendered_dir / "calibre_lvs.qci"
+    # Note: relative path "subrun" — anchored on qci.parent = rendered_dir.
+    _phase59_bc_make_qci(qci, "subrun", "out.lvs.report")
+
+    out = lvs_report_path_from_runset(qci)
+    assert out == sibling_run / "out.lvs.report"
+
+
 # ---- render_template smoke on the real production templates -------------
 
 

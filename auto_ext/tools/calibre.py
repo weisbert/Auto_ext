@@ -27,6 +27,41 @@ def _qci_field(text: str, name: str) -> str | None:
     return None
 
 
+def lvs_report_path_from_runset(runset: Path) -> Path | None:
+    """Parse ``runset`` (a rendered ``.qci`` file) for the LVS report path.
+
+    Returns the resolved path to ``lvsReportFile`` (joined with
+    ``lvsRunDir``) when both directives are present and the report file
+    exists on disk. Returns ``None`` for any of:
+
+    - ``runset`` itself is missing or not a regular file,
+    - the ``.qci`` lacks ``*lvsRunDir`` or ``*lvsReportFile``,
+    - the resolved report file does not exist.
+
+    A relative ``lvsRunDir`` inside the ``.qci`` is anchored on
+    ``runset.parent`` (the rendered file's directory) — production
+    runsets always carry an absolute path here, but rendered fixtures
+    sometimes use relative ones, and anchoring on the runset's dir is
+    the only sensible default.
+    """
+    if not runset.is_file():
+        return None
+
+    text = runset.read_text(encoding="utf-8", errors="replace")
+    run_dir = _qci_field(text, "lvsRunDir")
+    report_name = _qci_field(text, "lvsReportFile")
+    if not run_dir or not report_name:
+        return None
+
+    run_dir_path = Path(run_dir)
+    if not run_dir_path.is_absolute():
+        run_dir_path = runset.parent / run_dir_path
+    report_path = run_dir_path / report_name
+    if not report_path.is_file():
+        return None
+    return report_path
+
+
 class CalibreTool(Tool):
     name = "calibre"
     executable = "calibre"
@@ -46,21 +81,30 @@ class CalibreTool(Tool):
         if not runset.is_file():
             return result
 
-        text = runset.read_text(encoding="utf-8", errors="replace")
-        run_dir = _qci_field(text, "lvsRunDir")
-        report_name = _qci_field(text, "lvsReportFile")
-        if not run_dir or not report_name:
-            return result
+        # Re-parse for the directive presence check so we can distinguish
+        # "missing report" (runset declares one but file is gone) from
+        # "no directive at all" (passthrough). The shared helper handles
+        # the happy path; on miss we fall back to the inline parse to
+        # build a richer diagnostic.
+        report_path = lvs_report_path_from_runset(runset)
+        if report_path is None:
+            text = runset.read_text(encoding="utf-8", errors="replace")
+            run_dir = _qci_field(text, "lvsRunDir")
+            report_name = _qci_field(text, "lvsReportFile")
+            if not run_dir or not report_name:
+                return result
 
-        report_path = Path(run_dir) / report_name
-        if not report_path.is_file():
+            run_dir_path = Path(run_dir)
+            if not run_dir_path.is_absolute():
+                run_dir_path = runset.parent / run_dir_path
+            missing_path = run_dir_path / report_name
             return ToolResult(
                 success=False,
                 stdout_path=result.stdout_path,
                 artifact_paths=list(result.artifact_paths),
                 diagnostics={
                     **result.diagnostics,
-                    "lvs_report_missing": str(report_path),
+                    "lvs_report_missing": str(missing_path),
                 },
             )
 

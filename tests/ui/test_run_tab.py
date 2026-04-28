@@ -16,6 +16,7 @@ pytest.importorskip("pytestqt")
 
 from PyQt5.QtCore import Qt  # noqa: E402
 
+from auto_ext.core.runner import STAGE_ORDER  # noqa: E402
 from auto_ext.ui.config_controller import ConfigController  # noqa: E402
 from auto_ext.ui.tabs.run_tab import RunTab  # noqa: E402
 
@@ -102,6 +103,162 @@ def test_new_task_id_defaults_unchecked_on_reload(
     new_idx = labels.index("NEW_LIB__new_cell__layout__schematic")
     assert tab._task_list.item(original_idx).checkState() == Qt.Checked
     assert tab._task_list.item(new_idx).checkState() == Qt.Unchecked
+
+
+# ---- Phase 5.9 B+C: stage-row context menu --------------------------------
+
+
+def _phase59_bc_seed_run_tree(
+    tab: RunTab, controller: ConfigController, project_tools_config: Path
+) -> None:
+    """Helper: load config + manually seed the status tree so we can
+    target a stage row without spinning up a worker. The dry-run helper
+    works too but takes ~5s; the context-menu tests don't need that."""
+    controller.load(project_tools_config)
+    tab._reset_status_tree(controller.tasks, list(STAGE_ORDER))
+
+
+def _phase59_bc_make_rendered_calibre(
+    ae_root: Path, task_id: str, content: str = "*lvsRunDir: /tmp/run\n*lvsReportFile: r.report\n"
+) -> Path:
+    """Materialize a fake rendered calibre runset on disk so the menu's
+    "Open rendered template" action enables for the calibre row."""
+    rendered_dir = ae_root / "runs" / f"task_{task_id}" / "rendered"
+    rendered_dir.mkdir(parents=True, exist_ok=True)
+    qci = rendered_dir / "calibre_lvs.qci"
+    qci.write_text(content, encoding="utf-8")
+    return qci
+
+
+def test_phase59_bc_context_menu_on_stage_row(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """Right-click on the calibre stage row builds a menu with both the
+    "Open rendered template" and "Open LVS report" actions."""
+    ae_root = tmp_path / "ae_root"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    _phase59_bc_seed_run_tree(tab, controller, project_tools_config)
+
+    # Materialize fake rendered .qci + report so both actions enable.
+    task_id = controller.tasks[0].task_id
+    qci = _phase59_bc_make_rendered_calibre(
+        ae_root,
+        task_id,
+        f"*lvsRunDir: {(ae_root / 'lvs_run').as_posix()}\n*lvsReportFile: out.report\n",
+    )
+    (ae_root / "lvs_run").mkdir()
+    (ae_root / "lvs_run" / "out.report").write_text("CORRECT\n", encoding="utf-8")
+
+    # Capture the QMenu instance built by the slot. Patch QMenu.exec_ to
+    # avoid blocking; we read .actions() afterwards.
+    captured: dict[str, object] = {}
+
+    from auto_ext.ui.tabs import run_tab as run_tab_mod
+
+    real_qmenu_exec = run_tab_mod.QMenu.exec_
+
+    def fake_exec(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["menu"] = self
+        captured["actions"] = [a.text() for a in self.actions()]
+        captured["enabled"] = [a.isEnabled() for a in self.actions()]
+        return None
+
+    run_tab_mod.QMenu.exec_ = fake_exec  # type: ignore[method-assign]
+    try:
+        # Find the calibre stage row and trigger the context-menu signal.
+        calibre_item = tab._stage_items[(task_id, "calibre")]
+        rect = tab._status_tree.visualItemRect(calibre_item)
+        # Pos must lie inside the stage-row rect so itemAt(pos) returns it.
+        pos = rect.center()
+        tab._on_tree_context_menu(pos)
+    finally:
+        run_tab_mod.QMenu.exec_ = real_qmenu_exec  # type: ignore[method-assign]
+
+    assert captured["actions"] == ["Open rendered template", "Open LVS report"]
+    # Both should be enabled given the on-disk fixtures we set up.
+    assert captured["enabled"] == [True, True]
+    # Sanity: the rendered helper agrees with what the menu pointed at.
+    assert qci.exists()
+
+
+def test_phase59_bc_context_menu_disabled_when_file_missing(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """No rendered file on disk → "Open rendered template" disabled with
+    a tooltip; on the si row there's no LVS-report action at all."""
+    ae_root = tmp_path / "ae_root"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    _phase59_bc_seed_run_tree(tab, controller, project_tools_config)
+    task_id = controller.tasks[0].task_id
+
+    captured: dict[str, object] = {}
+    from auto_ext.ui.tabs import run_tab as run_tab_mod
+
+    real_exec = run_tab_mod.QMenu.exec_
+
+    def fake_exec(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        captured["actions"] = list(self.actions())
+        return None
+
+    run_tab_mod.QMenu.exec_ = fake_exec  # type: ignore[method-assign]
+    try:
+        si_item = tab._stage_items[(task_id, "si")]
+        pos = tab._status_tree.visualItemRect(si_item).center()
+        tab._on_tree_context_menu(pos)
+    finally:
+        run_tab_mod.QMenu.exec_ = real_exec  # type: ignore[method-assign]
+
+    actions = captured["actions"]
+    assert [a.text() for a in actions] == ["Open rendered template"]
+    assert actions[0].isEnabled() is False
+    assert actions[0].toolTip()  # non-empty hint for the user
+
+
+def test_phase59_bc_context_menu_only_on_stage_rows(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """Right-clicking on the top-level task row (no parent) yields no
+    menu at all — exec_ never runs."""
+    ae_root = tmp_path / "ae_root"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    _phase59_bc_seed_run_tree(tab, controller, project_tools_config)
+    task_id = controller.tasks[0].task_id
+
+    called: list[bool] = []
+    from auto_ext.ui.tabs import run_tab as run_tab_mod
+
+    real_exec = run_tab_mod.QMenu.exec_
+
+    def fake_exec(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        called.append(True)
+        return None
+
+    run_tab_mod.QMenu.exec_ = fake_exec  # type: ignore[method-assign]
+    try:
+        # Task row has no parent — the slot should bail out early.
+        task_item = tab._task_items[task_id]
+        pos = tab._status_tree.visualItemRect(task_item).center()
+        tab._on_tree_context_menu(pos)
+
+        # Empty space (well outside the tree) — itemAt returns None.
+        tab._on_tree_context_menu(QPoint_off_screen())
+    finally:
+        run_tab_mod.QMenu.exec_ = real_exec  # type: ignore[method-assign]
+
+    assert called == []
+
+
+def QPoint_off_screen():  # noqa: N802 — helper used inline above
+    """Build a QPoint clearly outside the tree's visible area."""
+    from PyQt5.QtCore import QPoint as _QPoint
+
+    return _QPoint(-100, -100)
 
 
 def test_save_disables_when_run_starts_with_pending_edits(
