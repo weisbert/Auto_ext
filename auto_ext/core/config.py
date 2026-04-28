@@ -708,9 +708,12 @@ def apply_tasks_edits(raw: Any, specs: list[dict[str, Any]]) -> None:
     upstream by constructing ``TaskSpec(**spec)`` before calling).
 
     Semantics:
-    - overlapping indexes: ``seq[i]`` overwritten by ``specs[i]``. Inline
-      comments on the old entry's scalar fields are lost; top-level
-      container comments (file preamble, inter-spec blank lines) survive.
+    - overlapping indexes: ``seq[i]`` is mutated in place — keys not in
+      ``specs[i]`` are deleted and remaining keys are set/updated. This
+      preserves ruamel's CommentedMap container, including any end-of-
+      sequence trailing comment that ruamel attaches to the last item's
+      CommentedMap. Wholesale replacement (``seq[i] = plain_dict``) would
+      sever that link and drop the trailing comment.
     - ``i >= len(seq)``: ``specs[i]`` appended.
     - ``i >= len(specs)``: trailing entries in ``seq`` are popped.
 
@@ -736,7 +739,18 @@ def apply_tasks_edits(raw: Any, specs: list[dict[str, Any]]) -> None:
 
     for i, spec in enumerate(specs):
         if i < len(seq):
-            seq[i] = spec
+            existing = seq[i]
+            if isinstance(existing, dict):
+                # In-place mutation preserves ruamel CommentedMap.ca data,
+                # including the trailing comment of the whole sequence
+                # (which ruamel attaches to the last item's CommentedMap).
+                for k in list(existing.keys()):
+                    if k not in spec:
+                        del existing[k]
+                for k, v in spec.items():
+                    existing[k] = v
+            else:
+                seq[i] = spec
         else:
             seq.append(spec)
     while len(seq) > len(specs):

@@ -391,33 +391,18 @@ def test_yaml_rt_unusual_comment_no_space_after_hash(tmp_path: Path) -> None:
 # ---- 7. extra: apply_tasks_edits round-trip preserves wrapper comments -----
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "ROUND-TRIP BUG surfaced by this test: apply_tasks_edits drops the "
-        "file's *trailing* comment when seq[i] is overwritten with a plain "
-        "dict. ruamel attaches the post-sequence comment to the last item's "
-        "trailing-end token; replacing the item with a CommentedMap-less "
-        "dict severs that link. The preamble + inter-spec comments DO "
-        "survive (asserted below as positive evidence the test wiring works), "
-        "but the trailing comment is lost. config.py docstring says "
-        "'top-level container comments (file preamble, inter-spec blank "
-        "lines) survive' — note it carefully omits 'trailing comments', so "
-        "the loss may be intentional/known. Marked xfail strict=False so a "
-        "future fix (e.g. preserve the seq's end-comment via "
-        "raw.ca.comment) flips this to XPASS and surfaces the change."
-    ),
-)
 def test_yaml_rt_apply_tasks_edits_preserves_wrapper_comments(
     tmp_path: Path,
 ) -> None:
-    """``apply_tasks_edits`` overwrites spec entries but the file's
-    top-level comment block (preamble) AND trailing comment should survive.
+    """``apply_tasks_edits`` overwrites spec values but every wrapper
+    comment (preamble, inter-spec, trailing) must survive.
 
-    Documented behavior (see config.py): "top-level container comments
-    (file preamble, inter-spec blank lines) survive". This tests that
-    contract end-to-end via the public dump path — and surfaces that the
-    trailing comment is in fact NOT preserved (see xfail reason above).
+    Regression: previously ``apply_tasks_edits`` did ``seq[i] =
+    plain_dict``, which severed the link to ruamel's CommentedMap.ca
+    metadata — the trailing comment (attached to the last item's
+    end-token) was lost. Fixed by mutating the existing CommentedMap
+    in place (delete-keys-not-in-spec + set-keys-from-spec) so the
+    container's ``.ca`` data persists.
     """
     src = (
         "# tasks.yaml preamble\n"
@@ -449,11 +434,9 @@ def test_yaml_rt_apply_tasks_edits_preserves_wrapper_comments(
     assert "cell: NEW_CELL" in dumped
     assert "OLD_LIB" not in dumped
     assert "OLD_CELL" not in dumped
-    # The bug: trailing comment is dropped. This is the assertion that XFAILs.
-    assert "# trailing comment" in dumped, (
-        "trailing comment lost when apply_tasks_edits overwrites the "
-        "last sequence element with a plain dict"
-    )
+    # Trailing comment survives because we now mutate the CommentedMap
+    # in place rather than replacing it with a plain dict.
+    assert "# trailing comment" in dumped
 
 
 # ---- 8. extra: idempotent round-trip (zero-edit) ---------------------------

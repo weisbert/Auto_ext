@@ -107,20 +107,13 @@ def test_eda_simrundir_commented_out_still_injects() -> None:
     assert '# simRunDir = "/old/path"' in body
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Tab-indented ``\\tsimRunDir = ...`` is not recognized as the live "
-        "config because ``_SI_RUN_DIR_LINE_RE`` anchors at ``^simRunDir`` "
-        "with no leading-whitespace allowance. The importer therefore "
-        "appends a duplicate canonical line, leaving two assignments. "
-        "Real-world raw exports keep simRunDir at column 0 so this has "
-        "not bitten anyone yet, but if it does the fix is to relax the "
-        "anchor to ``^\\s*simRunDir\\s*=`` (mirroring the count helper "
-        "in this file)."
-    ),
-    strict=True,
-)
 def test_eda_simrundir_tab_indented_not_duplicated() -> None:
+    """Tab-indented ``\\tsimRunDir = ...`` must still be recognized as
+    the live config so the importer doesn't append a duplicate canonical
+    line. Regression: previously ``_SI_RUN_DIR_LINE_RE`` anchored at
+    ``^simRunDir`` (no leading-whitespace allowance), causing duplicate
+    injection on tab-indented input. Anchor relaxed to ``^\\s*simRunDir``.
+    """
     raw = 'simLibName = "L"\n\tsimRunDir = "/some/path"\n'
     body = import_template("si", raw).template_body
     assert _eda_count_simrundir_lines(body) == 1

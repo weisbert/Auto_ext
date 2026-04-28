@@ -465,7 +465,7 @@ _SI_RULES: dict[str, list[_Rule]] = {
 }
 
 
-_SI_RUN_DIR_LINE_RE = re.compile(r"^simRunDir\s*=", re.MULTILINE)
+_SI_RUN_DIR_LINE_RE = re.compile(r"^\s*simRunDir\s*=", re.MULTILINE)
 
 
 def _import_si(raw: str, overrides: Identity | None) -> ImportResult:
