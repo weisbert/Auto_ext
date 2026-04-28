@@ -228,3 +228,88 @@ def test_task_specs_raw_returns_pending_when_staged(
     controller.stage_tasks_edits(staged)
     got = controller.task_specs_raw()
     assert got == staged
+
+
+# ---- has_external_change direct unit tests -----------------------------
+
+
+def test_has_external_change_false_after_load(
+    qtbot, project_tools_config: Path
+) -> None:
+    """A fresh load with no further filesystem activity must report no
+    external change. The autosave skip relies on this False return so
+    a steady-state GUI does not block its own writes."""
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    assert controller.has_external_change() is False
+
+
+def test_has_external_change_detects_project_yaml_touch(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Bumping project.yaml's mtime via os.utime must flip the flag —
+    no need to actually rewrite the contents. This is the exact path
+    a sister-process editor would take."""
+    import os
+
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    project_path = project_tools_config / "project.yaml"
+    st = project_path.stat()
+    os.utime(
+        project_path,
+        ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
+    )
+    assert controller.has_external_change() is True
+
+
+def test_has_external_change_detects_tasks_yaml_touch(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Same touch-only mtime bump but on tasks.yaml — the flag spans
+    both files."""
+    import os
+
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    tasks_path = project_tools_config / "tasks.yaml"
+    st = tasks_path.stat()
+    os.utime(
+        tasks_path,
+        ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
+    )
+    assert controller.has_external_change() is True
+
+
+def test_has_external_change_resets_after_internal_save(
+    qtbot, project_tools_config: Path
+) -> None:
+    """After a successful internal save, the controller must track the
+    new mtime — has_external_change should be False again. Without
+    this, autosave would skip every subsequent stage because the file
+    we just wrote would always look "external" to us."""
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    controller.stage_edits({"tech_name": "HN_INTERNAL_SAVE"})
+    assert controller.save() is True
+    assert controller.has_external_change() is False
+
+
+def test_has_external_change_resets_after_reload(
+    qtbot, project_tools_config: Path
+) -> None:
+    """``reload()`` re-records the mtime even if external edits had
+    already flipped the flag — the flag is False after reload."""
+    import os
+
+    controller = ConfigController()
+    controller.load(project_tools_config)
+    project_path = project_tools_config / "project.yaml"
+    st = project_path.stat()
+    os.utime(
+        project_path,
+        ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
+    )
+    assert controller.has_external_change() is True
+    controller.reload()
+    assert controller.has_external_change() is False

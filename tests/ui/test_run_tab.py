@@ -102,3 +102,49 @@ def test_new_task_id_defaults_unchecked_on_reload(
     new_idx = labels.index("NEW_LIB__new_cell__layout__schematic")
     assert tab._task_list.item(original_idx).checkState() == Qt.Checked
     assert tab._task_list.item(new_idx).checkState() == Qt.Unchecked
+
+
+def test_save_disables_when_run_starts_with_pending_edits(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Symmetry partner of ``test_save_button_recovers_after_run_finishes``.
+
+    The existing test covers run-end re-enabling Save. This one covers
+    the run-START side: if the user has pending edits and a run kicks
+    off, the Save button must flip disabled. The
+    ``worker_state_changed(True)`` signal is the contract; ProjectTab
+    listens on it and re-evaluates ``_save_btn.setEnabled``.
+    """
+    from auto_ext.ui.tabs.project_tab import ProjectTab
+
+    controller = ConfigController()
+    run_tab = RunTab(controller)
+    project_tab = ProjectTab(controller, run_tab)
+    project_tab._autosave_enabled = False
+    qtbot.addWidget(run_tab)
+    qtbot.addWidget(project_tab)
+    controller.load(project_tools_config)
+
+    # Stage an edit while no run is active → Save should be enabled.
+    controller.stage_edits({"tech_name": "HN_PRE_RUN"})
+    assert controller.is_dirty is True
+    assert project_tab._save_btn.isEnabled() is True
+
+    # Pretend the run just started: flip is_worker_active() then emit
+    # worker_state_changed(True) like _start_run() does. ProjectTab's
+    # _on_worker_state_changed should disable Save even though dirty
+    # is still True.
+    worker_active = {"value": True}
+    run_tab.is_worker_active = lambda: worker_active["value"]  # type: ignore[method-assign]
+    run_tab.worker_state_changed.emit(True)
+
+    assert controller.is_dirty is True  # edits still pending
+    assert project_tab._save_btn.isEnabled() is False  # Save grey during run
+
+    # And when the run finishes (worker_state_changed(False)) Save
+    # comes back IF still dirty — already covered by
+    # test_save_button_recovers_after_run_finishes, replicate the
+    # final assertion as a sanity check.
+    worker_active["value"] = False
+    run_tab.worker_state_changed.emit(False)
+    assert project_tab._save_btn.isEnabled() is True
