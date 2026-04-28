@@ -145,6 +145,11 @@ def run_subprocess(
             if item is None:
                 break
             log.write(item)
+            # Flush per-line so the GUI's LogTab (QFileSystemWatcher +
+            # 1s poll) sees fresh content immediately. Without this the
+            # default ~4 KB stdio buffer can withhold output for the
+            # entire stage, defeating live tailing.
+            log.flush()
 
         if cancelled:
             log.write("\n# CANCELLED: terminating subprocess...\n")

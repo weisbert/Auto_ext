@@ -148,3 +148,87 @@ def test_save_disables_when_run_starts_with_pending_edits(
     worker_active["value"] = False
     run_tab.worker_state_changed.emit(False)
     assert project_tab._save_btn.isEnabled() is True
+
+
+# ---- Phase 5.9 A: auto-follow live log streaming -------------------------
+
+
+def _phase59_a_capture_stage_selected(tab: RunTab) -> list[object]:
+    """Subscribe to ``tab.stage_selected`` and return the captured payloads.
+
+    Avoids QSignalSpy so the assertion shape stays trivial (regular list).
+    """
+
+    captured: list[object] = []
+    tab.stage_selected.connect(lambda payload: captured.append(payload))
+    return captured
+
+
+def test_phase59_a_auto_follow_default_is_on(qtbot) -> None:
+    """Default-ON contract: the user shouldn't have to opt in to live
+    log streaming — the EDA flows are long enough that auto-follow
+    "just works" is the right baseline.
+    """
+
+    controller = ConfigController()
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+
+    assert tab._auto_follow_log is True
+    assert tab._auto_follow_check.isChecked() is True
+
+
+def test_phase59_a_auto_follow_emits_stage_selected_on_start(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """When auto-follow is ON, the worker's ``stage_started`` event must
+    propagate as ``stage_selected(log_path)`` so the Log tab switches
+    immediately rather than waiting for the user to click the row.
+    """
+
+    ae_root = tmp_path / "pr"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+
+    # Sanity: default-on and the project_tools_config task is loaded.
+    assert tab._auto_follow_log is True
+    task_id = "WB_PLL_DCO__inv__layout__schematic"
+
+    captured = _phase59_a_capture_stage_selected(tab)
+
+    # Simulate a worker fanning out a stage_started event. _on_stage_started
+    # is a public-ish slot (named like a Qt slot) so calling it directly
+    # mirrors how QtProgressReporter dispatches the signal on the GUI thread.
+    tab._on_stage_started(task_id, "calibre")
+
+    assert len(captured) == 1
+    payload = captured[0]
+    assert isinstance(payload, Path)
+    # Path shape must match the existing _on_tree_click derivation so the
+    # Log tab tails the same file the user would hit by clicking.
+    assert payload == ae_root / "logs" / f"task_{task_id}" / "calibre.log"
+
+
+def test_phase59_a_auto_follow_off_does_not_emit(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """Toggling auto-follow OFF must suppress the auto-emission so the
+    user keeps manual control of which stage's log they're watching.
+    """
+
+    ae_root = tmp_path / "pr"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+
+    # Toggle the checkbox OFF and verify the bound flag flipped.
+    tab._auto_follow_check.setChecked(False)
+    assert tab._auto_follow_log is False
+
+    captured = _phase59_a_capture_stage_selected(tab)
+    tab._on_stage_started("WB_PLL_DCO__inv__layout__schematic", "calibre")
+
+    assert captured == []

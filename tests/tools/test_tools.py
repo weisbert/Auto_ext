@@ -8,6 +8,9 @@ integration. End-to-end subprocess execution is covered by
 
 from __future__ import annotations
 
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -261,3 +264,108 @@ def test_production_templates_render(
     # Explicit placeholders we care about are gone.
     assert "__CELL_NAME__" not in text
     assert "user_defined_" not in text
+
+
+# ---- Phase 5.9 A: per-line flush so live log streaming works -------------
+
+
+def _phase59_a_poll_for_substring(
+    log_path: Path, needle: str, timeout: float
+) -> bool:
+    """Poll ``log_path`` until ``needle`` appears or ``timeout`` elapses.
+
+    Returns ``True`` when found mid-execution, ``False`` on timeout.
+    """
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if log_path.exists():
+            try:
+                content = log_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+            if needle in content:
+                return True
+        time.sleep(0.05)
+    return False
+
+
+def test_phase59_a_run_subprocess_flushes_per_line(tmp_path: Path) -> None:
+    """The on-disk log must show new lines DURING the subprocess run, not
+    only after it exits — that is the contract the GUI's LogTab
+    (QFileSystemWatcher + 1 s poll) relies on for live tailing. Prior to
+    Phase 5.9 A, ``log.write(item)`` was not followed by ``log.flush()``,
+    so Python's ~8 KB text-mode buffer on the *parent's* log file could
+    hold the entire stage's output until close.
+
+    Strategy: launch a child that writes one marker, sleeps long enough
+    for a watcher thread to inspect the on-disk file, writes a second
+    marker, then sleeps again. We assert the second marker becomes
+    visible while the child is still running. The two-phase sleep
+    guards against false positives where the OS happens to flush the
+    page cache once at process start.
+    """
+
+    from auto_ext.tools.base import run_subprocess
+
+    log_path = tmp_path / "logs" / "stream.log"
+    # The audit header prepended by run_subprocess includes the literal
+    # argv (so the source code of -c is verbatim in the log header).
+    # That means any string baked into the script source — even via
+    # f-strings — also lands in the header instantly. To dodge that,
+    # build the marker at child-side runtime via chr() so it does NOT
+    # appear textually in argv but DOES appear in the printed line.
+    script = (
+        "import sys, time\n"
+        # Reconstruct the marker token from chr() codes so the literal
+        # bytes 'STREAM-MID' are never in the argv string.
+        "tok = ''.join(chr(c) for c in "
+        "[83,84,82,69,65,77,45,77,73,68])\n"  # 'STREAM-MID'
+        "print('PHASE59A-START', flush=True)\n"
+        "time.sleep(0.4)\n"
+        "print(f'phase59a:{tok}', flush=True)\n"
+        "time.sleep(0.6)\n"
+    )
+    argv = [sys.executable, "-c", script]
+
+    saw_mid_during_run: dict[str, bool] = {"value": False}
+
+    def watcher() -> None:
+        # Wait until the child has emitted the obfuscated marker (after
+        # the +0.4 s sleep), then check disk while the child still has
+        # 0.6 s of sleep ahead.
+        deadline = time.time() + 0.95
+        while time.time() < deadline:
+            if log_path.exists():
+                try:
+                    text = log_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    text = ""
+                if "STREAM-MID" in text:
+                    saw_mid_during_run["value"] = True
+                    return
+            time.sleep(0.05)
+
+    t = threading.Thread(target=watcher, daemon=True)
+    t.start()
+
+    exit_code = run_subprocess(
+        argv,
+        cwd=tmp_path,
+        env={"PATH": str(Path(sys.executable).parent)},
+        log_path=log_path,
+    )
+    t.join(timeout=2.0)
+
+    assert exit_code == 0
+    # The mid marker MUST have hit disk before the child exited and
+    # the `with log_path.open(...)` block closed/flushed implicitly.
+    assert saw_mid_during_run["value"] is True, (
+        "mid-run marker did not reach disk before subprocess exit; "
+        "per-line log.flush() in run_subprocess is missing or broken"
+    )
+    # Sanity: final content has both markers in expected order.
+    final = log_path.read_text(encoding="utf-8")
+    assert "PHASE59A-START" in final
+    assert "phase59a:STREAM-MID" in final
+    assert final.index("PHASE59A-START") < final.index("phase59a:STREAM-MID")

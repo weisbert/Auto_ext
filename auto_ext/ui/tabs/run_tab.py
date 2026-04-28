@@ -82,6 +82,11 @@ class RunTab(QWidget):
         self._worker: RunWorker | None = None
         self._reporter: QtProgressReporter | None = None
 
+        # Auto-follow: when True, _on_stage_started auto-points the Log
+        # tab at the freshly-started stage's log so the user sees live
+        # output without clicking. Default ON per Phase 5.9 UX.
+        self._auto_follow_log: bool = True
+
         # Map of (task_id, stage) → QTreeWidgetItem for fast status updates.
         self._stage_items: dict[tuple[str, str], QTreeWidgetItem] = {}
         self._task_items: dict[str, QTreeWidgetItem] = {}
@@ -179,6 +184,13 @@ class RunTab(QWidget):
         # Dry run toggle + Run / Cancel
         self._dry_run_check = QCheckBox("Dry run (render only, no subprocesses)", left)
         lleft.addWidget(self._dry_run_check)
+
+        # Auto-follow: switch the Log tab to the running stage as soon as
+        # it starts so the user does not have to click each stage row.
+        self._auto_follow_check = QCheckBox("Auto-follow current stage", left)
+        self._auto_follow_check.setChecked(self._auto_follow_log)
+        self._auto_follow_check.toggled.connect(self._on_auto_follow_toggled)
+        lleft.addWidget(self._auto_follow_check)
 
         btn_row = QHBoxLayout()
         self._run_btn = QPushButton("▶ Run", left)
@@ -396,6 +408,12 @@ class RunTab(QWidget):
         if item is not None:
             item.setText(1, STAGE_DISPLAY["running"])
             self._tint(item, "running")
+        # Auto-follow: point the Log tab at the freshly-started stage so
+        # the user sees live output without clicking the stage row.
+        if self._auto_follow_log:
+            log_path = self._stage_log_path(task_id, stage)
+            if log_path is not None:
+                self.stage_selected.emit(log_path)
 
     def _on_stage_finished(
         self, task_id: str, stage: str, status: str, error: object
@@ -432,6 +450,23 @@ class RunTab(QWidget):
 
     # ---- stage row click → log switch --------------------------------
 
+    def _stage_log_path(self, task_id: str, stage: str) -> Path | None:
+        """Compute the on-disk log path for ``(task_id, stage)``.
+
+        Returns ``None`` when ``auto_ext_root`` is unresolved (no config
+        loaded yet). Centralised so the manual click handler and the
+        auto-follow ``_on_stage_started`` slot stay in sync.
+        """
+
+        ae_root = self._controller.auto_ext_root
+        if ae_root is None:
+            return None
+        safe_id = _UNSAFE_TASK_ID.sub("_", task_id)
+        return ae_root / "logs" / f"task_{safe_id}" / f"{stage}.log"
+
+    def _on_auto_follow_toggled(self, checked: bool) -> None:
+        self._auto_follow_log = bool(checked)
+
     def _on_tree_click(self, item: QTreeWidgetItem, column: int) -> None:
         # Only stage rows (children of task rows) select a log file.
         parent = item.parent()
@@ -441,9 +476,7 @@ class RunTab(QWidget):
         task_id = parent.text(0)
         stage = item.text(0)
 
-        ae_root = self._controller.auto_ext_root
-        if ae_root is None:
+        log_path = self._stage_log_path(task_id, stage)
+        if log_path is None:
             return
-        safe_id = _UNSAFE_TASK_ID.sub("_", task_id)
-        log_path = ae_root / "logs" / f"task_{safe_id}" / f"{stage}.log"
         self.stage_selected.emit(log_path)
