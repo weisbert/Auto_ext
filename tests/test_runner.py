@@ -531,3 +531,160 @@ def test_jivaro_without_out_file_rejected(
             workarea=workarea,
             dry_run=True,
         )
+
+
+# ---- dspf_out_path resolution in _build_context ---------------------------
+
+
+def _make_dspf_task(**overrides):
+    """Helper: build a TaskConfig for dspf_out_path resolution tests."""
+    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
+
+    library = overrides.pop("library", "L")
+    cell = overrides.pop("cell", "c")
+    layout = overrides.pop("lvs_layout_view", "layout")
+    src = overrides.pop("lvs_source_view", "schematic")
+    base = dict(
+        task_id=f"{library}__{cell}__{layout}__{src}",
+        library=library,
+        cell=cell,
+        lvs_source_view=src,
+        lvs_layout_view=layout,
+        templates=TemplatePaths(),
+        ground_net="vss",
+        out_file=None,
+        jivaro=JivaroConfig(),
+        continue_on_lvs_fail=False,
+        spec_index=0,
+        expansion_index=0,
+    )
+    base.update(overrides)
+    return TaskConfig(**base)
+
+
+def test_build_context_dspf_out_path_default(project_config) -> None:
+    """Default ``${WORK_ROOT2}/{cell}.dspf`` resolves cleanly."""
+    from auto_ext.core.runner import _build_context
+
+    task = _make_dspf_task(cell="myCell")
+    ctx = _build_context(
+        project_config,
+        task,
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/wkr2"},
+    )
+    assert ctx["dspf_out_path"] == "/wkr2/myCell.dspf"
+
+
+def test_build_context_dspf_out_path_references_output_dir(project_config) -> None:
+    """``${output_dir}`` resolves to the runner-computed output_dir."""
+    from auto_ext.core.runner import _build_context
+
+    project_config.dspf_out_path = "${output_dir}/{cell}.dspf"
+    task = _make_dspf_task(cell="inv")
+    ctx = _build_context(
+        project_config,
+        task,
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
+    )
+    # extraction_output_dir default = ${WORK_ROOT}/cds/verify/QCI_PATH_{cell}.
+    assert ctx["dspf_out_path"] == "/w/cds/verify/QCI_PATH_inv/inv.dspf"
+
+
+def test_build_context_dspf_out_path_references_intermediate_dir(
+    project_config,
+) -> None:
+    """``${intermediate_dir}`` resolves to the project's intermediate_dir."""
+    from auto_ext.core.runner import _build_context
+
+    project_config.intermediate_dir = "${WORK_ROOT2}/inter"
+    project_config.dspf_out_path = "${intermediate_dir}/{cell}.dspf"
+    task = _make_dspf_task(cell="cellX")
+    ctx = _build_context(
+        project_config,
+        task,
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w2"},
+    )
+    assert ctx["dspf_out_path"] == "/w2/inter/cellX.dspf"
+
+
+def test_build_context_dspf_out_path_references_paths_key(project_config) -> None:
+    """``${calibre_lvs_dir}`` resolves through project.paths."""
+    from auto_ext.core.runner import _build_context
+
+    project_config.paths = {"calibre_lvs_dir": "/v/runset/CFXXX"}
+    project_config.dspf_out_path = "${calibre_lvs_dir}/exports/{cell}.dspf"
+    task = _make_dspf_task(cell="inv")
+    ctx = _build_context(
+        project_config, task,
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
+    )
+    assert ctx["dspf_out_path"] == "/v/runset/CFXXX/exports/inv.dspf"
+
+
+def test_build_context_dspf_out_path_format_keys(project_config) -> None:
+    """{cell} {library} {task_id} all substitute correctly."""
+    from auto_ext.core.runner import _build_context
+
+    project_config.dspf_out_path = (
+        "${WORK_ROOT2}/{library}/{task_id}/{cell}.dspf"
+    )
+    task = _make_dspf_task(library="L1", cell="cellY")
+    ctx = _build_context(
+        project_config, task,
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
+    )
+    assert ctx["dspf_out_path"] == (
+        "/w/L1/L1__cellY__layout__schematic/cellY.dspf"
+    )
+
+
+def test_build_context_dspf_out_path_per_task_override_wins(project_config) -> None:
+    """task.dspf_out_path beats project.dspf_out_path when set."""
+    from auto_ext.core.runner import _build_context
+
+    project_config.dspf_out_path = "${WORK_ROOT2}/{cell}.dspf"
+    task = _make_dspf_task(
+        cell="cell_z",
+        dspf_out_path="/custom/path/{cell}.dspf",
+    )
+    ctx = _build_context(
+        project_config, task,
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
+    )
+    assert ctx["dspf_out_path"] == "/custom/path/cell_z.dspf"
+
+
+def test_build_context_dspf_out_path_unknown_env_passthrough(project_config) -> None:
+    """Unknown env vars pass through unchanged (matches substitute_env semantics)."""
+    from auto_ext.core.runner import _build_context
+
+    project_config.dspf_out_path = "${WORK_ROOT2}/${UNDEFINED_X}/{cell}.dspf"
+    task = _make_dspf_task(cell="c")
+    ctx = _build_context(
+        project_config, task,
+        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/wkr2"},
+    )
+    # ${UNDEFINED_X} is not in resolved_env so it passes through verbatim.
+    assert ctx["dspf_out_path"] == "/wkr2/${UNDEFINED_X}/c.dspf"
+
+
+def test_discover_env_vars_includes_dspf_out_path(project_tools_config: Path) -> None:
+    """Custom env refs in dspf_out_path (project + per-task) surface in
+    the discovered set so check-env catches missing ones up-front."""
+    from auto_ext.core.runner import _discover_env_vars
+
+    (project_tools_config / "project.yaml").write_text(
+        "dspf_out_path: \"${MY_DSPF_ROOT}/{cell}.dspf\"\n",
+        encoding="utf-8",
+    )
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: c\n"
+        "  lvs_layout_view: layout\n"
+        "  dspf_out_path: \"${PER_TASK_DSPF}/{cell}.dspf\"\n",
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    required = _discover_env_vars(project, tasks)
+    assert "MY_DSPF_ROOT" in required
+    assert "PER_TASK_DSPF" in required

@@ -593,3 +593,122 @@ def test_per_task_template_starts_folded_when_no_overrides(
     cfg, root = _templates_config(tmp_path)
     tab, _ = _make_tab(qtbot, cfg, auto_ext_root=root)
     assert tab._templates_box.isChecked() is False
+
+
+# ---- per-task dspf_out_path combo (Tasks tab) ----------------------------
+
+
+def _dspf_tasks_config(tmp_path: Path) -> Path:
+    """Build a config_dir with a project + tasks for dspf combo tests.
+    Includes env_overrides for the templates' substitution chain so the
+    preview resolver has live values to work with.
+    """
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text(
+        "env_overrides:\n"
+        "  WORK_ROOT: /w\n"
+        "  WORK_ROOT2: /wkr2\n"
+        "dspf_out_path: \"${WORK_ROOT2}/{cell}.dspf\"\n",
+        encoding="utf-8",
+    )
+    (d / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_dspf_combo_has_default_sentinel_at_index_0(
+    qtbot, tmp_path: Path
+) -> None:
+    """The tasks tab variant prepends a ``(default: <X>)`` sentinel at
+    index 0 whose label shows the project layer's resolved preview."""
+    cfg = _dspf_tasks_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    combo = tab._dspf_combo._combo
+    label0 = combo.itemText(0)
+    assert label0.startswith("(default:")
+    # Must show the resolved real path, not the template form.
+    assert "${" not in label0
+    assert "{cell}" not in label0
+    # Project layer resolves WORK_ROOT2 + cell A → /wkr2/A.dspf.
+    assert "/wkr2/A.dspf" in label0
+
+
+def test_dspf_combo_select_default_sentinel_clears_per_task_override(
+    qtbot, tmp_path: Path
+) -> None:
+    """A spec carrying a per-task override drops back to inheritance
+    when the user picks the ``(default: ...)`` sentinel."""
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text(
+        "env_overrides:\n  WORK_ROOT2: /wkr2\n"
+        "dspf_out_path: \"${WORK_ROOT2}/{cell}.dspf\"\n",
+        encoding="utf-8",
+    )
+    (d / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  dspf_out_path: \"/per/task/{cell}.dspf\"\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, d)
+    spec = tab._current_spec()
+    assert spec is not None
+    assert spec.get("dspf_out_path") == "/per/task/{cell}.dspf"
+    # Pick the default sentinel (index 0) → per-task override is removed.
+    tab._dspf_combo._combo.setCurrentIndex(0)
+    spec = tab._current_spec()
+    assert spec is not None
+    assert "dspf_out_path" not in spec
+
+
+def test_dspf_combo_select_preset_stores_per_task_override(
+    qtbot, tmp_path: Path
+) -> None:
+    """Selecting a preset in tasks tab stores the template form on the
+    spec (not the resolved real path)."""
+    cfg = _dspf_tasks_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    combo = tab._dspf_combo._combo
+    # Find the ${output_dir} preset.
+    idx = -1
+    for i in range(combo.count()):
+        if combo.itemData(i) == "${output_dir}/{cell}.dspf":
+            idx = i
+            break
+    assert idx >= 0
+    combo.setCurrentIndex(idx)
+    spec = tab._current_spec()
+    assert spec is not None
+    assert spec["dspf_out_path"] == "${output_dir}/{cell}.dspf"
+
+
+def test_dspf_combo_preview_reflects_per_task_value_when_set(
+    qtbot, tmp_path: Path
+) -> None:
+    """When a per-task override is set, the combo's preview resolves
+    that value; when unset, the (default: <X>) sentinel reflects the
+    project layer's value."""
+    cfg = _dspf_tasks_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    # Initially: spec has no override → combo selects index 0 (default sentinel).
+    combo = tab._dspf_combo._combo
+    assert combo.currentIndex() == 0
+    preview = tab._dspf_combo._preview_label.text()
+    # Default sentinel preview shows the resolved project default.
+    assert "/wkr2/A.dspf" in preview
+    # Now type a custom override and verify the preview tracks it.
+    line = combo.lineEdit()
+    line.setText("/over/{cell}.dspf")
+    line.editingFinished.emit()
+    spec = tab._current_spec()
+    assert spec is not None
+    assert spec["dspf_out_path"] == "/over/{cell}.dspf"
+    preview2 = tab._dspf_combo._preview_label.text()
+    assert "/over/A.dspf" in preview2

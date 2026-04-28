@@ -605,7 +605,113 @@ def _build_context(
     if "calibre_lvs_dir" in ctx and "calibre_lvs_basename" not in ctx:
         ctx["calibre_lvs_basename"] = PurePosixPath(ctx["calibre_lvs_dir"]).name
 
+    # dspf_out_path: resolve last so its value can reference any of the
+    # other path tokens (output_dir, intermediate_dir, layer_map,
+    # paths.* entries) via ``${X}`` syntax. Per-task override beats the
+    # project default.
+    ctx["dspf_out_path"] = _resolve_dspf_out_path(project, task, resolved_env, ctx)
+
     return ctx
+
+
+def _build_path_token_env(
+    resolved_env: dict[str, str], ctx_so_far: dict[str, Any]
+) -> dict[str, str]:
+    """Merge resolved env vars with already-resolved path-context values.
+
+    Used by :func:`_resolve_dspf_out_path` (and the GUI preview helper)
+    so a ``dspf_out_path`` value like ``${output_dir}/{cell}.dspf`` can
+    reach the resolved ``output_dir`` string through the same
+    :func:`substitute_env` machinery that handles ordinary env vars.
+    Path-token entries win over env-var entries on a name collision so
+    ``${output_dir}`` always picks the runner-resolved value rather than
+    a stray shell var with the same name.
+    """
+    merged: dict[str, str] = dict(resolved_env)
+    for key in (
+        "output_dir",
+        "intermediate_dir",
+        "layer_map",
+        "calibre_lvs_dir",
+        "calibre_lvs_basename",
+        "qrc_deck_dir",
+    ):
+        v = ctx_so_far.get(key)
+        if v is not None:
+            merged[key] = str(v)
+    # Surface every project.paths.* entry too — users can add custom keys.
+    for key, value in ctx_so_far.items():
+        if isinstance(value, str) and key not in merged:
+            merged[key] = value
+    return merged
+
+
+_DSPF_FORMAT_KEYS: frozenset[str] = frozenset({"cell", "library", "task_id"})
+
+# Match ``{name}`` / ``${name}`` so we can selectively escape the ones
+# that are not in :data:`_DSPF_FORMAT_KEYS` before invoking str.format.
+# Identifier-only — keeps the pattern unambiguous against legitimate
+# format-spec slots like ``{cell:>20}``.
+_DSPF_BRACE_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _resolve_dspf_out_path(
+    project: ProjectConfig,
+    task: TaskConfig,
+    resolved_env: dict[str, str],
+    ctx_so_far: dict[str, Any],
+) -> str:
+    """Resolve ``dspf_out_path`` (per-task override > project default).
+
+    Two-phase substitution:
+      1. :func:`substitute_env` against an extended env dict that
+         includes the already-resolved path-context values, so
+         ``${output_dir}`` / ``${intermediate_dir}`` / ``${calibre_lvs_dir}``
+         and any ``project.paths.*`` key resolve in addition to plain
+         env vars.
+      2. ``str.format(cell=..., library=..., task_id=...)`` so
+         ``{cell}`` / ``{library}`` / ``{task_id}`` are substituted.
+
+    Unknown ``${X}`` references pass through unchanged (matches
+    :func:`substitute_env` semantics) — including the literal braces,
+    so a leftover ``${UNDEFINED}`` does not poison the subsequent
+    ``str.format`` step (its ``{UNDEFINED}`` would otherwise raise
+    KeyError). Other unknown ``{X}`` literals (e.g. ``{foo}`` with no
+    ``$`` prefix) raise :class:`ConfigError` to mirror
+    :func:`_resolve_output_dir`.
+    """
+    raw = task.dspf_out_path or project.dspf_out_path
+    extended_env = _build_path_token_env(resolved_env, ctx_so_far)
+    after_env = substitute_env(raw, extended_env)
+
+    # Pre-escape unresolved ``${X}`` so the leftover ``{X}`` is not
+    # interpreted by str.format. Any other unknown ``{X}`` (no ``$``
+    # prefix) is a misconfiguration and surfaces as ConfigError below.
+    def _escape_unknown(m: re.Match[str]) -> str:
+        name = m.group(1)
+        if name in _DSPF_FORMAT_KEYS:
+            return m.group(0)
+        # Was this brace pair part of an unresolved ``${X}``? If so,
+        # restore the literal by doubling the braces so str.format emits
+        # them verbatim. Otherwise pass through and let .format raise.
+        start = m.start()
+        if start > 0 and after_env[start - 1] == "$":
+            return "{{" + name + "}}"
+        return m.group(0)
+
+    safe = _DSPF_BRACE_PATTERN.sub(_escape_unknown, after_env)
+
+    try:
+        return safe.format(
+            cell=task.cell,
+            library=task.library,
+            task_id=task.task_id,
+        )
+    except KeyError as exc:
+        raise ConfigError(
+            f"dspf_out_path uses unknown format key {exc.args[0]!r}; "
+            "supported: cell, library, task_id"
+        ) from exc
 
 
 def _discover_env_vars(
@@ -617,11 +723,16 @@ def _discover_env_vars(
     sources: list[str] = [
         project.extraction_output_dir,
         project.intermediate_dir,
+        project.dspf_out_path,
         str(project.layer_map),
     ]
     # paths.* values typically reference $X env vars; surface them so
     # check-env / preflight catches missing ones up-front.
     sources.extend(project.paths.values())
+    # Per-task dspf_out_path overrides may reference yet more env vars.
+    for task in tasks:
+        if task.dspf_out_path is not None:
+            sources.append(task.dspf_out_path)
     seen: set[Path] = set()
     for task in tasks:
         for stage in ("si", "calibre", "quantus", "jivaro"):

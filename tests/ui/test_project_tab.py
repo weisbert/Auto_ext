@@ -515,6 +515,133 @@ def test_templates_combo_autosaves_when_enabled(
     )
 
 
+# ---- dspf_out_path combo (Project tab) ------------------------------------
+
+
+def test_dspf_combo_lists_two_presets_plus_custom_sentinel(
+    qtbot, project_tools_config: Path
+) -> None:
+    """The project tab's dspf combo shows: preset 1 (default), preset 2
+    (output_dir), and a trailing ``Custom...`` sentinel — three items
+    total. None of the visible labels expose the templated form (no
+    ``${`` / ``[[`` / ``{cell}`` literals)."""
+    tab, _ = _make_tab(qtbot, project_tools_config)
+    combo = tab._dspf_combo._combo
+    assert combo.count() == 3
+    items = [combo.itemText(i) for i in range(combo.count())]
+    # Last item is the Custom sentinel.
+    assert items[-1] == "Custom..."
+    # First two are resolved real paths — no template syntax visible.
+    for label in items[:-1]:
+        assert "${" not in label
+        assert "[[" not in label
+        assert "{cell}" not in label
+        assert "{library}" not in label
+
+
+def test_dspf_combo_preview_shows_resolved_real_path(
+    qtbot, project_tools_config: Path
+) -> None:
+    """The italic preview label below the combo never contains any
+    template syntax — only the fully-resolved real path."""
+    tab, _ = _make_tab(qtbot, project_tools_config)
+    text = tab._dspf_combo._preview_label.text()
+    # Strip the leading "→ " arrow.
+    body = text.replace("→ ", "", 1)
+    assert "${" not in body
+    assert "[[" not in body
+    assert "{cell}" not in body
+    # Project tools fixture sets WORK_ROOT2 → workarea path; preview
+    # should land on that path with the task's first cell name appended.
+    assert ".dspf" in body
+
+
+def test_dspf_combo_select_output_dir_preset_stages_template_form(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Picking the ``${output_dir}`` preset stages that exact template
+    form into the YAML (NOT the resolved real path)."""
+    tab, controller = _make_tab(qtbot, project_tools_config)
+    combo = tab._dspf_combo._combo
+    # Preset 2 = ${output_dir}/{cell}.dspf (index 1 in the project tab,
+    # which has no default sentinel).
+    idx = -1
+    for i in range(combo.count()):
+        if combo.itemData(i) == "${output_dir}/{cell}.dspf":
+            idx = i
+            break
+    assert idx >= 0
+    combo.setCurrentIndex(idx)
+    assert controller.pending_edits == {
+        "dspf_out_path": "${output_dir}/{cell}.dspf"
+    }
+
+
+def test_dspf_combo_typing_custom_text_stores_text_verbatim(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Typing a custom expression into the editable combo stages the
+    raw template string verbatim, not its resolved preview."""
+    tab, controller = _make_tab(qtbot, project_tools_config)
+    line = tab._dspf_combo._combo.lineEdit()
+    line.setText("/totally/custom/{cell}.dspf")
+    line.editingFinished.emit()
+    assert controller.pending_edits == {
+        "dspf_out_path": "/totally/custom/{cell}.dspf"
+    }
+
+
+def test_dspf_combo_env_override_change_refreshes_preview(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Staging a new env override updates the resolved preview without
+    requiring a full reload."""
+    tab, controller = _make_tab(qtbot, project_tools_config)
+    combo = tab._dspf_combo._combo
+    # Capture the preview body for the default preset first.
+    before = combo.itemText(0)
+    # Stage a new WORK_ROOT2 so the default preset's preview moves.
+    controller.stage_edits({"env_overrides.WORK_ROOT2": "/staged/wkr2"})
+    tab._refresh_hints()  # triggers _dspf_combo.refresh()
+    after = combo.itemText(0)
+    assert before != after
+    assert "/staged/wkr2" in after
+
+
+def test_dspf_combo_preview_never_contains_template_literals(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Across every visible widget surface (combo items, preview label,
+    line edit text) the user never sees ``${`` / ``[[`` / ``{cell}`` etc."""
+    tab, _ = _make_tab(qtbot, project_tools_config)
+    combo = tab._dspf_combo._combo
+    # All combo item texts must be literal-free except the trailing
+    # Custom... sentinel (which is a static string, no template).
+    for i in range(combo.count() - 1):
+        label = combo.itemText(i)
+        assert "${" not in label, f"item {i} leaks template form: {label!r}"
+        assert "[[" not in label
+        assert "{cell}" not in label
+        assert "{library}" not in label
+        assert "{task_id}" not in label
+    # Preview label text (sans the arrow prefix).
+    body = tab._dspf_combo._preview_label.text().replace("→ ", "", 1)
+    assert "${" not in body
+    assert "[[" not in body
+    assert "{cell}" not in body
+
+
+def test_dspf_combo_autosaves_when_enabled(
+    qtbot, project_tools_config: Path
+) -> None:
+    tab, controller = _make_tab(qtbot, project_tools_config, autosave=True)
+    line = tab._dspf_combo._combo.lineEdit()
+    line.setText("${output_dir}/{cell}.dspf")
+    line.editingFinished.emit()
+    assert controller.is_dirty is False
+    assert controller.project.dspf_out_path == "${output_dir}/{cell}.dspf"
+
+
 def test_placeholder_updates_after_env_override(
     qtbot, project_tools_config: Path, monkeypatch
 ) -> None:

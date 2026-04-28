@@ -20,6 +20,11 @@ paths:
 
 tech_name: HN001
 
+# DSPF parasitic-output file path used by templates/quantus/dspf.cmd.j2.
+# Tokens: ${env}, ${output_dir}, ${intermediate_dir}, ${paths.*}, {cell},
+# {library}, {task_id}. Default = ${WORK_ROOT2}/{cell}.dspf.
+dspf_out_path: "${WORK_ROOT2}/{cell}.dspf"
+
 templates:
   si: templates/si/default.env.j2
   calibre: templates/calibre/calibre_lvs.qci.j2

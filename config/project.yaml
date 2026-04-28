@@ -48,6 +48,17 @@ paths:
 # To match the old flow (all cells share one dir):
 # extraction_output_dir: "${WORK_ROOT}/cds/verify/QCI_PATH"
 
+# DSPF parasitic-output file path (consumed by templates/quantus/dspf.cmd.j2
+# as ``-file_name``). Supported tokens:
+#     env vars: ${X} / $X / $env(X)
+#     path tokens: ${output_dir} ${intermediate_dir} ${calibre_lvs_dir}
+#         and any project.paths.* key
+#     format keys: {cell} {library} {task_id}
+# Default keeps the old ``intermediate_dir/<cell>.dspf`` layout:
+# dspf_out_path: "${WORK_ROOT2}/{cell}.dspf"
+# Land alongside the rest of the per-task EDA output:
+# dspf_out_path: "${output_dir}/{cell}.dspf"
+
 # Project-wide knob overrides. Each template's *.manifest.yaml declares
 # the knobs it accepts + defaults; entries here override those defaults
 # for every task in this project. Individual tasks can override again

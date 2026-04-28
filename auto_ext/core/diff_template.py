@@ -35,7 +35,7 @@ _IDENTITY_NAMES: frozenset[str] = frozenset(
     {
         "library", "cell", "lvs_layout_view", "lvs_source_view",
         "ground_net", "out_file", "task_id", "output_dir",
-        "intermediate_dir", "layer_map", "employee_id",
+        "intermediate_dir", "dspf_out_path", "layer_map", "employee_id",
         "jivaro_frequency_limit", "jivaro_error_max", "tech_name",
         "pdk_subdir", "project_subdir", "lvs_runset_version",
         "qrc_runset_version",

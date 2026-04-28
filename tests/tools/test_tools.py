@@ -231,6 +231,7 @@ def test_production_templates_render(
         "task_id": "LIB__inv__layout__schematic",
         "output_dir": "/w/cds/out",
         "intermediate_dir": "/w",
+        "dspf_out_path": "/w/inv.dspf",
         "employee_id": "alice",
         "jivaro_frequency_limit": 14,
         "jivaro_error_max": 2,

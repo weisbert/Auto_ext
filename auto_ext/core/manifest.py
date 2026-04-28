@@ -42,6 +42,7 @@ _IDENTITY_KEYS: frozenset[str] = frozenset(
         "task_id",
         "output_dir",
         "intermediate_dir",
+        "dspf_out_path",
         "layer_map",
         "employee_id",
         "jivaro_frequency_limit",

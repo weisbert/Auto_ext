@@ -187,6 +187,7 @@ env_overrides:
   calibre_source_added_place: {wa_posix}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl
 extraction_output_dir: "${{WORK_ROOT}}/cds/verify/QCI_PATH_{{cell}}"
 intermediate_dir: "${{WORK_ROOT2}}"
+dspf_out_path: "${{WORK_ROOT2}}/{{cell}}.dspf"
 templates:
   si: {(templates_root / 'si' / 'default.env.j2').as_posix()}
   calibre: {(templates_root / 'calibre' / 'calibre_lvs.qci.j2').as_posix()}

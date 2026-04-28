@@ -48,15 +48,21 @@ from auto_ext.core.config import (
     TaskSpec,
     _expand_spec,
 )
+from auto_ext.core.env import resolve_path_expr, substitute_env
 from auto_ext.core.errors import AutoExtError, ConfigError
 from auto_ext.core.manifest import (
     TemplateManifest,
     current_knob_value,
     load_manifest,
 )
+from auto_ext.core.runner import _build_path_token_env
 from auto_ext.core.template import enumerate_stage_templates, resolve_template_path
 from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import EXCLUDED_ROW_COLOR
+from auto_ext.ui.widgets.dspf_out_path_combo import (
+    DspfOutPathCombo,
+    resolve_dspf_template,
+)
 from auto_ext.ui.widgets.knob_editor import KnobEditor
 from auto_ext.ui.widgets.tag_list_edit import TagListEdit
 
@@ -231,6 +237,26 @@ class TasksTab(QWidget):
             lambda checked: self._on_scalar_edited("continue_on_lvs_fail", checked)
         )
         scalar_form.addRow(self._continue_lvs_check)
+
+        # Per-task dspf_out_path override. Index 0 = "(default: <X>)"
+        # sentinel that maps to None on save (= inherit project value);
+        # any other selection (preset or custom) becomes the per-task
+        # override string.
+        self._dspf_combo = DspfOutPathCombo(
+            resolver=self._resolve_dspf_for_preview,
+            include_default_sentinel=True,
+            parent=scalar_box,
+        )
+        self._dspf_combo.setToolTip(
+            "DSPF parasitic-output file path for this task.\n"
+            "Leave at the (default: ...) sentinel to inherit project layer.\n"
+            "Tokens: ${env}, ${output_dir}, ${intermediate_dir}, ${paths.*},\n"
+            "{cell}, {library}, {task_id}.\n"
+            "Docs: docs/CONFIG_GLOSSARY.md#dspf_out_path"
+        )
+        self._dspf_combo.value_changed.connect(self._on_dspf_value_changed)
+        scalar_form.addRow("dspf_out_path:", self._dspf_combo)
+
         self._editor_layout.addWidget(scalar_box)
 
         # jivaro default group.
@@ -475,11 +501,120 @@ class TasksTab(QWidget):
             self._jivaro_freq.setText(_fmt_num(j.get("frequency_limit")))
             self._jivaro_err.setText(_fmt_num(j.get("error_max")))
 
+            self._refresh_dspf_default_hint()
+            self._dspf_combo.set_value(spec.get("dspf_out_path"))
+
             self._rebuild_override_table(spec)
             self._rebuild_template_combos(spec)
             self._rebuild_knobs_form(spec)
         finally:
             self._populating = False
+
+    def _refresh_dspf_default_hint(self) -> None:
+        """Sync the dspf combo's ``(default: <X>)`` sentinel to the
+        project layer's current value. Called on populate + after a
+        spec mutation so the sentinel stays accurate."""
+        project = self._controller.project
+        if project is None:
+            self._dspf_combo.set_default_hint(None, "<no project>")
+            return
+        template = project.dspf_out_path
+        preview, _ = self._resolve_dspf_for_preview(template)
+        self._dspf_combo.set_default_hint(template, preview)
+
+    def _build_extended_env_for_preview(self) -> dict[str, str]:
+        """Same construction as ProjectTab — copied here rather than
+        imported across tabs to keep tabs.tasks free of project_tab
+        coupling. The duplication is small and the logic is
+        intentionally tab-local: each tab's preview uses its own
+        controller / context."""
+        controller = self._controller
+        project = controller.project
+        effective = controller.effective_env_overrides()
+        if project is None:
+            return dict(effective)
+        ctx_so_far: dict[str, object] = {}
+        spec = self._current_spec()
+        # Use the spec's first axis values for sample {cell}/{library} —
+        # mirrors what the runner would see for that spec's first task.
+        sample_cell = "<cell>"
+        sample_lib = "<library>"
+        sample_task = "<task_id>"
+        if spec is not None:
+            cell_axis = spec.get("cell")
+            lib_axis = spec.get("library")
+            if isinstance(cell_axis, list) and cell_axis:
+                sample_cell = str(cell_axis[0])
+            elif isinstance(cell_axis, str) and cell_axis:
+                sample_cell = cell_axis
+            if isinstance(lib_axis, list) and lib_axis:
+                sample_lib = str(lib_axis[0])
+            elif isinstance(lib_axis, str) and lib_axis:
+                sample_lib = lib_axis
+            sample_task = f"{sample_lib}__{sample_cell}__layout__schematic"
+        try:
+            output_dir = substitute_env(
+                project.extraction_output_dir, effective
+            ).format(
+                cell=sample_cell,
+                library=sample_lib,
+                task_id=sample_task,
+                lvs_layout_view="layout",
+                lvs_source_view="schematic",
+            )
+            ctx_so_far["output_dir"] = output_dir
+        except (KeyError, ValueError):
+            pass
+        try:
+            intermediate_dir = substitute_env(
+                project.intermediate_dir, effective
+            ).format(cell=sample_cell, library=sample_lib)
+            ctx_so_far["intermediate_dir"] = intermediate_dir
+        except (KeyError, ValueError):
+            pass
+        for key, expr in project.paths.items():
+            try:
+                ctx_so_far[key] = resolve_path_expr(expr, effective)
+            except ConfigError:
+                pass
+        return _build_path_token_env(effective, ctx_so_far)
+
+    def _resolve_dspf_for_preview(
+        self, template: str
+    ) -> tuple[str, str | None]:
+        """Resolver callback handed to the dspf combo."""
+        extended = self._build_extended_env_for_preview()
+        spec = self._current_spec()
+        cell = "<cell>"
+        lib = "<library>"
+        task_id = "<task_id>"
+        if spec is not None:
+            cell_axis = spec.get("cell")
+            lib_axis = spec.get("library")
+            if isinstance(cell_axis, list) and cell_axis:
+                cell = str(cell_axis[0])
+            elif isinstance(cell_axis, str) and cell_axis:
+                cell = cell_axis
+            if isinstance(lib_axis, list) and lib_axis:
+                lib = str(lib_axis[0])
+            elif isinstance(lib_axis, str) and lib_axis:
+                lib = lib_axis
+            task_id = f"{lib}__{cell}__layout__schematic"
+        return resolve_dspf_template(
+            template, extended, cell=cell, library=lib, task_id=task_id
+        )
+
+    def _on_dspf_value_changed(self, value: object) -> None:
+        if self._populating:
+            return
+
+        def mutate(spec: dict[str, Any]) -> None:
+            if value is None or (isinstance(value, str) and not value.strip()):
+                spec.pop("dspf_out_path", None)
+            else:
+                spec["dspf_out_path"] = str(value)
+
+        self._mutate_current_spec(mutate)
 
     def _clear_editor(self) -> None:
         self._populating = True
@@ -492,6 +627,7 @@ class TasksTab(QWidget):
             self._jivaro_enabled.setChecked(False)
             self._jivaro_freq.setText("")
             self._jivaro_err.setText("")
+            self._dspf_combo.set_value(None)
             self._override_table.setRowCount(0)
             for combo in self._template_combos.values():
                 combo.blockSignals(True)

@@ -290,6 +290,67 @@ def test_apply_project_edits_too_many_segments_raises(fixtures_dir: Path) -> Non
         apply_project_edits(project.raw, {"a.b.c.d": 1})
 
 
+# ---- dspf_out_path (project + per-task) ------------------------------------
+
+
+def test_load_project_dspf_out_path_default(fixtures_dir: Path) -> None:
+    """Loading a project.yaml without ``dspf_out_path`` falls back to the
+    legacy intermediate_dir-based default."""
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    assert project.dspf_out_path == "${WORK_ROOT2}/{cell}.dspf"
+
+
+def test_load_project_dspf_out_path_custom(tmp_path: Path) -> None:
+    p = tmp_path / "project.yaml"
+    p.write_text(
+        "dspf_out_path: \"${output_dir}/{cell}.dspf\"\n",
+        encoding="utf-8",
+    )
+    project = load_project(p)
+    assert project.dspf_out_path == "${output_dir}/{cell}.dspf"
+
+
+def test_load_tasks_per_task_dspf_out_path_override(tmp_path: Path) -> None:
+    p = tmp_path / "tasks.yaml"
+    p.write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  dspf_out_path: \"/custom/{cell}.dspf\"\n"
+        "- library: L\n"
+        "  cell: B\n"
+        "  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    tasks = load_tasks(p)
+    assert tasks[0].dspf_out_path == "/custom/{cell}.dspf"
+    # Second task left the field unset → None means "inherit project".
+    assert tasks[1].dspf_out_path is None
+
+
+def test_load_project_dspf_out_path_rejects_non_string(tmp_path: Path) -> None:
+    p = tmp_path / "project.yaml"
+    p.write_text("dspf_out_path: 42\n", encoding="utf-8")
+    # pydantic v2 coerces ints to str by default in str fields, so the
+    # cleaner "type rejection" is via a clearly-wrong shape — a list.
+    p.write_text("dspf_out_path:\n  - oops\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_project(p)
+
+
+def test_apply_project_edits_dspf_out_path_round_trip(fixtures_dir: Path) -> None:
+    project = load_project(fixtures_dir / "project_minimal.yaml")
+    apply_project_edits(
+        project.raw, {"dspf_out_path": "${output_dir}/{cell}.dspf"}
+    )
+    dumped = dump_project_yaml(project)
+    assert "dspf_out_path: ${output_dir}/{cell}.dspf" in dumped
+    # Round-trip None to confirm delete works through _EDIT_SCALAR_KEYS.
+    apply_project_edits(project.raw, {"dspf_out_path": None})
+    dumped2 = dump_project_yaml(project)
+    assert "dspf_out_path" not in dumped2
+
+
 # ---- load_tasks ------------------------------------------------------------
 
 

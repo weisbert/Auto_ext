@@ -179,6 +179,17 @@ class ProjectConfig(BaseModel):
     #: cell) to land in separate dirs.
     extraction_output_dir: str = "${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"
     intermediate_dir: str = "${WORK_ROOT2}"
+    #: Per-task DSPF output file path. Templated string supporting
+    #: env vars (``$X`` / ``${X}`` / ``$env(X)``), path tokens that
+    #: reference other resolved fields (``${output_dir}``,
+    #: ``${intermediate_dir}``, ``${calibre_lvs_dir}`` and any
+    #: ``project.paths.*`` key), and Python ``str.format`` keys
+    #: (``{cell}``, ``{library}``, ``{task_id}``). The runner resolves
+    #: env + path tokens first, then applies ``.format(...)`` so the
+    #: final value lands in the Jinja context as ``[[dspf_out_path]]``.
+    #: Per-task overrides via :attr:`TaskSpec.dspf_out_path` win when set.
+    #: Default reproduces the legacy ``intermediate_dir/<cell>.dspf`` output.
+    dspf_out_path: str = "${WORK_ROOT2}/{cell}.dspf"
     templates: TemplatePaths = Field(default_factory=TemplatePaths)
 
     #: Project-wide knob overrides keyed by stage name, e.g.
@@ -207,6 +218,10 @@ class TaskSpec(BaseModel):
     out_file: str | None = None
     jivaro: JivaroConfig = Field(default_factory=JivaroConfig)
     continue_on_lvs_fail: bool = False
+    #: Per-task override for :attr:`ProjectConfig.dspf_out_path`. ``None``
+    #: (default) inherits the project value. Same templating grammar as
+    #: the project field.
+    dspf_out_path: str | None = None
     #: Per-task knob overrides. Same shape as :attr:`ProjectConfig.knobs`.
     #: Precedence is applied at render time (task > project > manifest).
     knobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -236,6 +251,7 @@ class TaskConfig(BaseModel):
     out_file: str | None
     jivaro: JivaroConfig
     continue_on_lvs_fail: bool
+    dspf_out_path: str | None = None
     knobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     spec_index: int
     expansion_index: int
@@ -421,6 +437,7 @@ def _expand_spec(
                             out_file=spec.out_file,
                             jivaro=jivaro,
                             continue_on_lvs_fail=spec.continue_on_lvs_fail,
+                            dspf_out_path=spec.dspf_out_path,
                             knobs=copy.deepcopy(spec.knobs),
                             spec_index=spec_index,
                             expansion_index=expansion_index,
@@ -508,6 +525,7 @@ _EDIT_SCALAR_KEYS = frozenset(
         "layer_map",
         "extraction_output_dir",
         "intermediate_dir",
+        "dspf_out_path",
     }
 )
 

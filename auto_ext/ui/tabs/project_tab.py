@@ -50,9 +50,10 @@ from auto_ext.core.env import (
     derive_parent_dir_from_env_candidates,
     resolve_env,
     resolve_path_expr,
+    substitute_env,
 )
 from auto_ext.core.errors import AutoExtError, ConfigError
-from auto_ext.core.runner import _discover_env_vars
+from auto_ext.core.runner import _build_path_token_env, _discover_env_vars
 from auto_ext.core.template import (
     VarReference,
     collect_var_references,
@@ -61,6 +62,10 @@ from auto_ext.core.template import (
 )
 from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import ENV_SOURCE_COLOR, ENV_SOURCE_DISPLAY
+from auto_ext.ui.widgets.dspf_out_path_combo import (
+    DspfOutPathCombo,
+    resolve_dspf_template,
+)
 
 if TYPE_CHECKING:
     from auto_ext.ui.tabs.run_tab import RunTab
@@ -132,6 +137,10 @@ def _hint_for_field(
         return "(default: ${WORK_ROOT}/cds/verify/QCI_PATH_{cell})"
     if key == "intermediate_dir":
         return "(default: ${WORK_ROOT2})"
+    if key == "dspf_out_path":
+        # Resolved preview lives below the combo; this hint is purely
+        # the static fallback so the field tooltip stays informative.
+        return "(default: ${WORK_ROOT2}/{cell}.dspf)"
 
     return "(unset)"
 
@@ -194,6 +203,14 @@ _FIELD_DOCS: dict[str, str] = {
         "Cwd for serial EDA invocations + temp si.env staging.\n"
         "Default: ${WORK_ROOT2}\n"
         "Docs: docs/CONFIG_GLOSSARY.md#intermediate_dir"
+    ),
+    "dspf_out_path": (
+        "DSPF parasitic-output file path (templates/quantus/dspf.cmd.j2).\n"
+        "Tokens: env vars ($X / ${X} / $env(X)), path tokens\n"
+        "(${output_dir} ${intermediate_dir} ${calibre_lvs_dir} ${paths.*}),\n"
+        "format keys ({cell} {library} {task_id}).\n"
+        "Default: ${WORK_ROOT2}/{cell}.dspf\n"
+        "Docs: docs/CONFIG_GLOSSARY.md#dspf_out_path"
     ),
 }
 
@@ -336,6 +353,17 @@ class ProjectTab(QWidget):
             else:
                 groups[group_name].addRow(QLabel(label + ":", self), line)
 
+        # dspf_out_path: editable combo + preview label, lives in the
+        # Output group alongside intermediate_dir / extraction_output_dir.
+        # Built last so its preview resolver can also surface other
+        # path-token resolutions (output_dir, paths.*).
+        self._dspf_combo = DspfOutPathCombo(
+            resolver=self._resolve_dspf_for_preview, parent=self
+        )
+        self._dspf_combo.setToolTip(_FIELD_DOCS["dspf_out_path"])
+        self._dspf_combo.value_changed.connect(self._on_dspf_value_changed)
+        groups["Output"].addRow(QLabel("dspf_out_path:", self), self._dspf_combo)
+
         # Paths group: dynamic key/value rows for project.paths. Each row
         # carries an edit field plus a "Used by" annotation derived from
         # scanning the configured templates.
@@ -425,6 +453,12 @@ class ProjectTab(QWidget):
 
             self._rebuild_paths_rows(project)
             self._rebuild_template_combos(project)
+
+            # Populate the dspf combo from the loaded project value.
+            if project is not None:
+                self._dspf_combo.set_value(project.dspf_out_path)
+            else:
+                self._dspf_combo.set_value(None)
 
             self._refresh_env_table()
             self._refresh_hints()
@@ -627,6 +661,108 @@ class ProjectTab(QWidget):
         used_by_index = self._collect_used_by_index(project)
         for key in self._path_fields:
             self._refresh_path_row(key, used_by_index.get(key, []))
+
+        # dspf_out_path combo previews depend on env + paths; refresh on
+        # any hint change so the dropdown items stay live.
+        self._dspf_combo.refresh()
+
+    def _build_extended_env_for_preview(self) -> dict[str, str]:
+        """Compose the env dict used by ``dspf_out_path`` preview.
+
+        Mirrors the runner's ``_build_path_token_env`` extension by
+        layering resolved ``project.paths.*`` entries and a synthesised
+        ``output_dir`` / ``intermediate_dir`` on top of effective env
+        overrides. Errors during ``paths.*`` resolution are swallowed
+        (the field is preview-only — surfacing the error inline keeps
+        the combo usable while the user fixes the misconfiguration).
+        """
+        controller = self._controller
+        project = controller.project
+        effective = controller.effective_env_overrides()
+        if project is None:
+            return dict(effective)
+        # Resolve env then layer in path tokens. This is preview only
+        # so we tolerate missing resolutions silently — the combo will
+        # render the unresolved literal which is then flagged inline.
+        ctx_so_far: dict[str, object] = {}
+        # output_dir uses extraction_output_dir + a sample cell. Fall
+        # back to literal {cell} if there are no tasks (rare in GUI flow).
+        sample_cell = "<cell>"
+        sample_lib = "<library>"
+        sample_task = "<task_id>"
+        try:
+            tasks = controller.tasks
+        except Exception:  # noqa: BLE001
+            tasks = []
+        if tasks:
+            sample_cell = tasks[0].cell
+            sample_lib = tasks[0].library
+            sample_task = tasks[0].task_id
+        try:
+            output_dir = substitute_env(
+                project.extraction_output_dir, effective
+            ).format(
+                cell=sample_cell,
+                library=sample_lib,
+                task_id=sample_task,
+                lvs_layout_view=getattr(tasks[0], "lvs_layout_view", "<lvs_layout_view>")
+                if tasks
+                else "<lvs_layout_view>",
+                lvs_source_view=getattr(tasks[0], "lvs_source_view", "<lvs_source_view>")
+                if tasks
+                else "<lvs_source_view>",
+            )
+            ctx_so_far["output_dir"] = output_dir
+        except (KeyError, ValueError):
+            pass
+        try:
+            intermediate_dir = substitute_env(
+                project.intermediate_dir, effective
+            ).format(cell=sample_cell, library=sample_lib)
+            ctx_so_far["intermediate_dir"] = intermediate_dir
+        except (KeyError, ValueError):
+            pass
+        for key, expr in project.paths.items():
+            try:
+                ctx_so_far[key] = resolve_path_expr(expr, effective)
+            except ConfigError:
+                pass
+        return _build_path_token_env(effective, ctx_so_far)
+
+    def _resolve_dspf_for_preview(
+        self, template: str
+    ) -> tuple[str, str | None]:
+        """Resolver callback handed to the dspf combo.
+
+        Pulls the live env state + project paths, then runs
+        :func:`resolve_dspf_template` so the combo's preview matches
+        what the runner would produce.
+        """
+        extended = self._build_extended_env_for_preview()
+        # Use first task's identity for the preview if any tasks exist.
+        try:
+            tasks = self._controller.tasks
+        except Exception:  # noqa: BLE001
+            tasks = []
+        if tasks:
+            return resolve_dspf_template(
+                template,
+                extended,
+                cell=tasks[0].cell,
+                library=tasks[0].library,
+                task_id=tasks[0].task_id,
+            )
+        return resolve_dspf_template(template, extended)
+
+    def _on_dspf_value_changed(self, value: object) -> None:
+        if self._populating:
+            return
+        # value is str (template form) or None (only valid via tasks-tab
+        # default sentinel, which the project tab does not use). Stage
+        # the edit and autosave.
+        edit: object = value if isinstance(value, str) and value else None
+        self._controller.stage_edits({"dspf_out_path": edit})
+        self._maybe_autosave()
 
     @staticmethod
     def _read_field_value(project: Any, key: str) -> str:

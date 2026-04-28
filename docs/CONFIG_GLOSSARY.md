@@ -21,6 +21,7 @@
 | `layer_map` | 否 | `$PDK_LAYER_MAP_FILE` | `/software/PDK/.../layers.map` |
 | `extraction_output_dir` | 否 | 默认 `${WORK_ROOT}/cds/verify/QCI_PATH_{cell}` | — |
 | `intermediate_dir` | 否 | 默认 `${WORK_ROOT2}` | — |
+| [`dspf_out_path`](#dspf_out_path) | 否 | 默认 `${WORK_ROOT2}/{cell}.dspf` | — |
 
 ---
 
@@ -142,6 +143,40 @@ GDS export 用的 layer 映射文件。strmout 阶段必需。
 **默认**：`${WORK_ROOT2}` —— 你的 workarea 根目录。
 
 **何时改**：基本不用改。除非有特殊的 si.env 共享需求。
+
+参见 [`dspf_out_path`](#dspf_out_path)：以前 dspf 输出文件硬编码在 `intermediate_dir/<cell>.dspf`，现在用专门字段控制。
+
+---
+
+### dspf_out_path
+
+`templates/quantus/dspf.cmd.j2` 里 `-file_name` 落盘的位置——也就是 Quantus 写出的 DSPF 寄生参数文件的完整路径。每个 task 独立一份。
+
+**默认**：`${WORK_ROOT2}/{cell}.dspf` —— 复用旧版行为（落在 workarea 根，文件名 = cell 名）。
+
+**支持的 token**：
+- env vars: `${X}` / `$X` / `$env(X)` —— 普通 shell 环境变量
+- 路径 token: `${output_dir}` / `${intermediate_dir}` / `${calibre_lvs_dir}` / `${qrc_deck_dir}` / 任意 `project.paths.<key>` —— 这些是 runner 解析过的真实路径
+- format key: `{cell}` / `{library}` / `{task_id}` —— Python `str.format` 替换
+
+**解析顺序**：先 env 替换（含路径 token），再 `.format(...)`。所以 `${output_dir}/{cell}.dspf` 会先把 `${output_dir}` 换成实际的 `extraction_output_dir`，再把 `{cell}` 换成本 task 的 cell 名。
+
+**例子**：
+
+```yaml
+# (1) 默认行为：落在 workarea 根
+dspf_out_path: "${WORK_ROOT2}/{cell}.dspf"
+
+# (2) 落在每个 task 自己的 extraction 输出目录里（推荐）
+dspf_out_path: "${output_dir}/{cell}.dspf"
+
+# (3) 自定义子目录
+dspf_out_path: "${WORK_ROOT}/dspf_export/{library}/{cell}.dspf"
+```
+
+**何时改**：想让 dspf 文件和其它 EDA 输出物（map/、ihnl/ 等）放一起→改成 `${output_dir}/{cell}.dspf`；想集中收集到独立目录→自定义路径。
+
+**per-task override**：在 `tasks.yaml` 里某个 spec 写 `dspf_out_path: ...` 就只覆盖那个 spec；留空（不写）则继承 project 层的默认值。
 
 ---
 
