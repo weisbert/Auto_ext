@@ -910,3 +910,165 @@ def test_exclude_selector_also_matches_by_source_view(tmp_path: Path) -> None:
     )
     tasks = load_tasks(p)
     assert [t.lvs_source_view for t in tasks] == ["schematic"]
+
+
+# ---- TaskSpec.label (display sugar) ---------------------------------------
+
+
+def test_task_spec_label_default_none(tmp_path: Path) -> None:
+    """A spec without ``label:`` accepts cleanly and the field defaults
+    to ``None`` (not the empty string) so the GUI fallback knows to
+    render the auto-derived ``task_id``."""
+    p = _write_tasks(
+        tmp_path, "- library: L\n  cell: c\n  lvs_layout_view: lay\n"
+    )
+    tasks = load_tasks(p)
+    assert len(tasks) == 1
+    assert tasks[0].label is None
+
+
+def test_task_spec_label_explicit_string_accepted(tmp_path: Path) -> None:
+    """An explicit ``label: foo`` survives load + reaches every expanded
+    TaskConfig. ``label`` is per-spec, NOT an expansion axis."""
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: [c1, c2]\n"
+        "  lvs_layout_view: [lay, lay_t]\n"
+        "  label: amp regression\n",
+    )
+    tasks = load_tasks(p)
+    # 1 lib × 2 cells × 2 layouts × 1 src = 4 expanded tasks.
+    assert len(tasks) == 4
+    # Same label on every child of the spec.
+    assert all(t.label == "amp regression" for t in tasks)
+    # task_id remains the canonical auto-derived value (not the label).
+    ids = {t.task_id for t in tasks}
+    assert ids == {
+        "L__c1__lay__schematic",
+        "L__c1__lay_t__schematic",
+        "L__c2__lay__schematic",
+        "L__c2__lay_t__schematic",
+    }
+
+
+def test_task_spec_label_isolated_per_spec(tmp_path: Path) -> None:
+    """Two specs with different ``label`` values keep their labels
+    isolated post-expansion — the field doesn't leak across specs and
+    doesn't mutate the task_id derivation."""
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: c1\n"
+        "  lvs_layout_view: lay\n"
+        "  label: spec one\n"
+        "- library: L\n"
+        "  cell: c2\n"
+        "  lvs_layout_view: lay\n"
+        "  label: spec two\n",
+    )
+    tasks = load_tasks(p)
+    assert len(tasks) == 2
+    by_cell = {t.cell: t for t in tasks}
+    assert by_cell["c1"].label == "spec one"
+    assert by_cell["c2"].label == "spec two"
+
+
+def test_task_spec_label_one_spec_set_one_unset(tmp_path: Path) -> None:
+    """Mixing labelled + unlabelled specs in the same file: each spec's
+    ``label`` propagates only to its own children."""
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: c1\n"
+        "  lvs_layout_view: lay\n"
+        "  label: only one\n"
+        "- library: L\n"
+        "  cell: c2\n"
+        "  lvs_layout_view: lay\n",
+    )
+    tasks = load_tasks(p)
+    by_cell = {t.cell: t for t in tasks}
+    assert by_cell["c1"].label == "only one"
+    assert by_cell["c2"].label is None
+
+
+def test_apply_tasks_edits_omits_label_when_none(tmp_path: Path) -> None:
+    """A spec dict without a ``label`` key must NOT produce a
+    ``label:`` line in the dumped YAML — empty round-trips to absent so
+    the on-disk file stays clean."""
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n  cell: c\n  lvs_layout_view: lay\n",
+    )
+    _, raw = load_tasks_with_raw(p)
+    apply_tasks_edits(
+        raw,
+        [{"library": "L", "cell": "c", "lvs_layout_view": "lay"}],
+    )
+    text = dump_tasks_yaml(raw)
+    assert "label" not in text
+
+
+def test_apply_tasks_edits_keeps_label_when_set(tmp_path: Path) -> None:
+    """A spec dict with ``label: my task`` must round-trip via
+    ``dump_tasks_yaml`` to a YAML that re-loads to the identical label."""
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n  cell: c\n  lvs_layout_view: lay\n",
+    )
+    _, raw = load_tasks_with_raw(p)
+    apply_tasks_edits(
+        raw,
+        [
+            {
+                "library": "L",
+                "cell": "c",
+                "lvs_layout_view": "lay",
+                "label": "my task",
+            }
+        ],
+    )
+    text = dump_tasks_yaml(raw)
+    assert "label: my task" in text
+    # And it actually loads back.
+    p2 = tmp_path / "after.yaml"
+    p2.write_text(text, encoding="utf-8")
+    tasks = load_tasks(p2)
+    assert tasks[0].label == "my task"
+
+
+def test_apply_tasks_edits_drops_label_on_remove(tmp_path: Path) -> None:
+    """Round-trip path: a spec previously carrying ``label: foo`` that
+    the user clears in the GUI (spec dict drops the key) must end up
+    with NO ``label`` line in the dumped YAML, not ``label: null``."""
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n  cell: c\n  lvs_layout_view: lay\n  label: foo\n",
+    )
+    _, raw = load_tasks_with_raw(p)
+    # User clears the label → TasksTab pops the key from the dict.
+    apply_tasks_edits(
+        raw,
+        [{"library": "L", "cell": "c", "lvs_layout_view": "lay"}],
+    )
+    text = dump_tasks_yaml(raw)
+    assert "label" not in text
+    p2 = tmp_path / "after.yaml"
+    p2.write_text(text, encoding="utf-8")
+    tasks = load_tasks(p2)
+    assert tasks[0].label is None
+
+
+def test_task_spec_rejects_unknown_field_with_label_present(tmp_path: Path) -> None:
+    """Adding ``label`` did not loosen ``extra=forbid``: a typo like
+    ``labels:`` (plural) still fails the schema."""
+    p = _write_tasks(
+        tmp_path,
+        "- library: L\n"
+        "  cell: c\n"
+        "  lvs_layout_view: lay\n"
+        "  labels: typo\n",
+    )
+    with pytest.raises(ConfigError):
+        load_tasks(p)

@@ -913,3 +913,106 @@ def test_dspf_combo_refresh_preserves_custom_text(qtbot) -> None:
 
     combo.refresh()
     assert combo.current_value() == custom
+
+
+# ---- TaskSpec.label QLineEdit (Tasks tab) --------------------------------
+
+
+def test_label_field_round_trips_to_yaml(qtbot, tmp_path: Path) -> None:
+    """Setting the ``label`` QLineEdit to ``my task`` then saving
+    produces ``label: my task`` in YAML (and reloads to the same
+    value)."""
+    cfg = _multi_spec_config(tmp_path)
+    tab, controller = _make_tab(qtbot, cfg)
+    # Type into the QLineEdit and trigger editingFinished — the
+    # standard pattern the tab uses for scalar fields.
+    tab._label_edit.setText("my task")
+    tab._label_edit.editingFinished.emit()
+    assert controller.is_dirty is True
+    pending = controller.pending_task_specs
+    assert pending is not None
+    assert pending[0].get("label") == "my task"
+    # Save and re-load: label survives.
+    assert controller.save() is True
+    text = (cfg / "tasks.yaml").read_text(encoding="utf-8")
+    assert "label: my task" in text
+    tasks_after = load_tasks(cfg / "tasks.yaml")
+    assert tasks_after[0].label == "my task"
+
+
+def test_label_empty_string_drops_key(qtbot, tmp_path: Path) -> None:
+    """Clearing the QLineEdit (empty string) must round-trip to no
+    ``label:`` key in the YAML output — empty does NOT mean
+    ``label: ""``, and certainly not ``label: null``."""
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text("employee_id: alice\n", encoding="utf-8")
+    (d / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  label: previously set\n",
+        encoding="utf-8",
+    )
+    tab, controller = _make_tab(qtbot, d)
+    # Sanity: the existing label loaded into the line edit.
+    assert tab._label_edit.text() == "previously set"
+    # User clears it.
+    tab._label_edit.setText("")
+    tab._label_edit.editingFinished.emit()
+    pending = controller.pending_task_specs
+    assert pending is not None
+    assert "label" not in pending[0]
+    assert controller.save() is True
+    text = (d / "tasks.yaml").read_text(encoding="utf-8")
+    assert "label" not in text
+    tasks_after = load_tasks(d / "tasks.yaml")
+    assert tasks_after[0].label is None
+
+
+def test_label_whitespace_only_drops_key(qtbot, tmp_path: Path) -> None:
+    """Whitespace-only input is treated as empty so the user can't
+    accidentally save a ``label: '   '`` blob."""
+    cfg = _multi_spec_config(tmp_path)
+    tab, controller = _make_tab(qtbot, cfg)
+    tab._label_edit.setText("   ")
+    tab._label_edit.editingFinished.emit()
+    pending = controller.pending_task_specs
+    # Whitespace-only must NOT stage a label key.
+    if pending is not None:
+        assert "label" not in pending[0]
+
+
+def test_label_loads_from_disk_into_line_edit(qtbot, tmp_path: Path) -> None:
+    """A spec on disk with ``label: foo`` populates the QLineEdit on
+    load so the user sees the existing value before editing."""
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text("employee_id: alice\n", encoding="utf-8")
+    (d / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  label: hello\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, d)
+    assert tab._label_edit.text() == "hello"
+
+
+def test_label_summary_appears_in_spec_list(qtbot, tmp_path: Path) -> None:
+    """The spec-list row prefixes ``[label]`` so the user can pick the
+    right spec at a glance when they have many."""
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text("employee_id: alice\n", encoding="utf-8")
+    (d / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: A\n"
+        "  lvs_layout_view: layout\n"
+        "  label: my display\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, d)
+    text = tab._spec_list.item(0).text()
+    assert "[my display]" in text
