@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -47,6 +48,12 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from auto_ext.core.clone_template import (
+    CloneTemplateError,
+    clone_template,
+    derive_clone_destination,
+    validate_suffix,
+)
 from auto_ext.core.env import resolve_env
 from auto_ext.core.errors import AutoExtError, ConfigError
 from auto_ext.core.manifest import (
@@ -96,6 +103,12 @@ class TemplatesTab(QWidget):
     #: Emitted when the user selects a different template in the list.
     #: Phase 5.6 (diff editor) will subscribe; for 5.5 nothing wires it.
     current_template_changed = pyqtSignal(object)  # Path | None
+
+    #: Emitted after a new template file appears under ``templates/``
+    #: (currently only the "Copy template..." flow). Main window wires
+    #: this to TasksTab so per-stage template combos pick up the new
+    #: file without a manual refresh / restart.
+    templates_changed = pyqtSignal()
 
     def __init__(
         self,
@@ -166,6 +179,15 @@ class TemplatesTab(QWidget):
             self._on_open_template_generator
         )
         toolbar.addWidget(self._template_generator_btn)
+        self._copy_template_btn = QPushButton("Copy template...", self)
+        self._copy_template_btn.setToolTip(
+            "Clone the currently-selected template (or pick one) into "
+            "the same stage directory under a new name, then open the "
+            "side-by-side editor for tweaks. The manifest sidecar is "
+            "copied alongside so knob declarations survive."
+        )
+        self._copy_template_btn.clicked.connect(self._on_copy_template)
+        toolbar.addWidget(self._copy_template_btn)
         toolbar.addStretch(1)
         root.addLayout(toolbar)
 
@@ -611,6 +633,115 @@ class TemplatesTab(QWidget):
         # Hold a reference so the non-modal dialog survives this method.
         self._template_generator_dlg = dlg
         dlg.show()
+
+    # ---- Copy template flow (Feature #1) -----------------------------
+
+    def _pick_clone_source(self) -> Path | None:
+        """Resolve the source ``.j2`` for the Copy-template flow.
+
+        Tries the currently-selected list entry first (resolved to its
+        on-disk absolute path); falls back to a :class:`QFileDialog`
+        rooted at ``<auto_ext_root>/templates/`` if no template is
+        selected or the resolved path doesn't exist (e.g. an
+        unresolvable env-var-relative path).
+        """
+        resolved = self._resolved_selected_path()
+        if resolved is not None and resolved.is_file():
+            return resolved
+        root = self._controller.auto_ext_root
+        start_dir = (
+            str(root / "templates") if root is not None and (root / "templates").is_dir()
+            else str(Path.cwd())
+        )
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "Select template to clone", start_dir,
+            "Jinja templates (*.j2)",
+        )
+        if not path_str:
+            return None
+        return Path(path_str)
+
+    def _prompt_clone_suffix(self, source: Path) -> Path | None:
+        """Prompt for the suffix and return the validated destination
+        path. Loops until the user enters a valid, non-clashing suffix
+        or cancels.
+        """
+        message_prefix = (
+            f"Cloning {source.name} into {source.parent}\n"
+            "Enter a suffix (letters, digits, _ or -):"
+        )
+        prefill = ""
+        while True:
+            suffix, ok = QInputDialog.getText(
+                self, "Copy template", message_prefix,
+                QLineEdit.Normal, prefill,
+            )
+            if not ok:
+                return None
+            suffix = suffix.strip()
+            try:
+                validate_suffix(suffix)
+                dest = derive_clone_destination(source, suffix)
+            except CloneTemplateError as exc:
+                QMessageBox.warning(self, "Invalid suffix", str(exc))
+                prefill = suffix
+                continue
+            if dest.exists():
+                QMessageBox.warning(
+                    self, "Destination exists",
+                    f"{dest.name} already exists in {dest.parent}.\n"
+                    "Pick a different suffix.",
+                )
+                prefill = suffix
+                continue
+            return dest
+
+    def _on_copy_template(self) -> None:
+        # Lazy import — same reasoning as the other toolbar tools.
+        from auto_ext.ui.widgets.diff_editor import open_for_save_as_new
+
+        source = self._pick_clone_source()
+        if source is None:
+            return
+        if not source.name.endswith(".j2"):
+            QMessageBox.warning(
+                self, "Not a Jinja template",
+                f"{source.name!r} is not a *.j2 file.",
+            )
+            return
+
+        dest = self._prompt_clone_suffix(source)
+        if dest is None:
+            return
+
+        try:
+            _, manifest_dest = clone_template(source, dest)
+        except CloneTemplateError as exc:
+            QMessageBox.warning(self, "Clone failed", str(exc))
+            return
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Clone failed",
+                f"Could not copy {source} -> {dest}: {exc}",
+            )
+            return
+
+        dlg = open_for_save_as_new(source, dest, parent=self)
+        # Keep a reference to keep the dialog alive while it's modal.
+        self._copy_template_dlg = dlg
+        if manifest_dest is None:
+            # Caller may want to know; surface via a status hint after
+            # save. For now just log to the status banner of the Knobs
+            # pane the next time the user selects the new file.
+            pass
+        dlg.exec_()
+
+        # Whether the user accepted or rejected, the .j2 + sidecar are
+        # now on disk (clone_template ran before exec_). Refresh the
+        # local list and notify TasksTab so its per-stage combos pick
+        # up the new file.
+        self._refresh_template_list()
+        self.templates_changed.emit()
 
 
 def _mono_font() -> QFont:

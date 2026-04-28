@@ -60,6 +60,13 @@ class MainWindow(QMainWindow):
 
         self._run_tab.request_init_wizard.connect(self._open_init_wizard)
 
+        # Templates tab cloned a new .j2 → Tasks tab should refresh
+        # its per-stage template combos so the new file appears
+        # without a manual re-select / restart (Feature #1).
+        self._templates_tab.templates_changed.connect(
+            self._tasks_tab.refresh_template_combos
+        )
+
         if config_dir is not None:
             self._controller.load(config_dir)
 

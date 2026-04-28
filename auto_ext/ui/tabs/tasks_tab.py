@@ -756,6 +756,24 @@ class TasksTab(QWidget):
                 w.deleteLater()
         self._task_knob_editors.clear()
 
+    def refresh_template_combos(self) -> None:
+        """Re-enumerate ``templates/<stage>/`` and rebuild the per-stage
+        combos for the active spec.
+
+        Public hook for the Templates tab's "Copy template..." flow:
+        once a new ``.j2`` lands on disk we want it to appear in this
+        tab's combos immediately, without making the user re-select
+        the spec.
+        """
+        spec = self._current_spec()
+        if spec is None:
+            return
+        self._populating = True
+        try:
+            self._rebuild_template_combos(spec)
+        finally:
+            self._populating = False
+
     def _rebuild_template_combos(self, spec: dict[str, Any]) -> None:
         """Populate each per-stage ComboBox with the standard templates
         plus the project's effective default and any custom override.
