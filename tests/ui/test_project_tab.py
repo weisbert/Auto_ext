@@ -331,6 +331,50 @@ def test_paths_group_clear_field_stages_none(
     assert controller.pending_edits == {"paths.calibre_lvs_dir": None}
 
 
+def test_paths_rebuild_preserves_widgets_when_keys_unchanged(
+    qtbot, project_tools_config: Path
+) -> None:
+    """When paths.* keys are identical between two loads, the existing
+    QLineEdit instances must survive. Recreating them mid-event (during
+    autosave -> reload) destroyed widgets that an in-flight click was
+    targeting and crashed Qt with a segfault.
+    """
+    tab, _controller = _make_tab(qtbot, project_tools_config)
+    line_before = tab._path_fields["calibre_lvs_dir"]
+    label_before = tab._path_used_by_labels["calibre_lvs_dir"]
+    # Re-run the rebuild with the same project — what _load_project does
+    # on every autosave round-trip.
+    tab._rebuild_paths_rows(_controller.project)
+    assert tab._path_fields["calibre_lvs_dir"] is line_before, (
+        "QLineEdit was replaced even though keys were identical — autosave "
+        "would destroy click targets in flight"
+    )
+    assert tab._path_used_by_labels["calibre_lvs_dir"] is label_before
+
+
+def test_paths_rebuild_replaces_widgets_when_keys_change(
+    qtbot, project_tools_config: Path
+) -> None:
+    """Adding/removing a key still triggers a real rebuild; the new key
+    must have a fresh QLineEdit and the dropped key's mapping must be
+    gone from _path_fields.
+    """
+    tab, controller = _make_tab(qtbot, project_tools_config)
+    line_before = tab._path_fields["calibre_lvs_dir"]
+
+    # Mutate the loaded project so the next rebuild sees a new key.
+    project = controller.project
+    project.paths["new_custom_path"] = "$VERIFY_ROOT/foo"
+    tab._rebuild_paths_rows(project)
+
+    assert "new_custom_path" in tab._path_fields
+    # The original widget for an unchanged key is REPLACED in this path —
+    # ok because we deleteLater the old widgets, so no segfault.
+    # Just confirm the new structure is consistent.
+    assert tab._path_fields["calibre_lvs_dir"] is not line_before
+    assert sorted(tab._path_fields.keys()) == sorted(project.paths.keys())
+
+
 # ---- Save button bug fix + auto-save (Phase 5.6.6 / 5.9) -----------------
 
 

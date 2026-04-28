@@ -536,13 +536,48 @@ class ProjectTab(QWidget):
         combo.setCurrentIndex(0)  # triggers _on_template_combo_changed → stage None
 
     def _rebuild_paths_rows(self, project: ProjectConfig | None) -> None:
-        """Tear down any existing per-path widgets and rebuild from
-        ``project.paths``."""
-        # Drop existing rows. Skip the trailing button row (last row).
-        # QFormLayout exposes rows by index; remove from end so indices
-        # don't shift.
+        """Sync per-path widgets to ``project.paths``.
+
+        Two-mode behavior to avoid a segfault path:
+          * If the key set is unchanged, refresh values + used_by labels
+            in place. No widget destruction — safe even when an Output
+            field's autosave fires mid-click on a Paths widget.
+          * If keys were added/removed, take rows out of the layout and
+            schedule them for deferred deletion via ``deleteLater``, so
+            destruction lands after the current Qt event chain finishes.
+            ``QFormLayout.removeRow`` would synchronously delete the
+            widgets — fine in isolation, fatal during an in-flight
+            focus transition.
+        """
+        target_keys = (
+            sorted(project.paths.keys()) if project and project.paths else []
+        )
+        current_keys = sorted(self._path_fields.keys())
+
+        if target_keys == current_keys:
+            if project is None:
+                return
+            used_by_index = self._collect_used_by_index(project)
+            for key in target_keys:
+                line = self._path_fields[key]
+                new_value = project.paths[key]
+                # Don't clobber a focused field — the user may still be
+                # typing into it and the autosave value already matches
+                # what they typed anyway.
+                if not line.hasFocus() and line.text() != new_value:
+                    line.setText(new_value)
+                self._refresh_path_row(key, used_by_index.get(key, []))
+            return
+
+        # Structural change — full rebuild with deferred destruction.
         while self._paths_form.rowCount() > 1:
-            self._paths_form.removeRow(0)
+            taken = self._paths_form.takeRow(0)
+            for item in (taken.fieldItem, taken.labelItem):
+                if item is None:
+                    continue
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
         self._path_fields.clear()
         self._path_used_by_labels.clear()
 
