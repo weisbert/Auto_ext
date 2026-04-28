@@ -78,7 +78,28 @@ if (Test-Path $bundlePath) {
     Remove-Item $bundlePath -Force
 }
 
-& tar.exe -czf $bundlePath @excludeArgs $includes
+# Resolve tar.exe robustly. Windows 10 1803+ / Windows 11 ship bsdtar at
+# %WINDIR%\System32\tar.exe, but PATH may not include System32 in some
+# shells (e.g. when a venv activate script clobbers PATH ordering). Fall
+# back to PATH lookup if the canonical path is missing.
+$tarExe = Join-Path $env:WINDIR 'System32\tar.exe'
+if (-not (Test-Path $tarExe)) {
+    $tarCmd = Get-Command tar.exe -ErrorAction SilentlyContinue
+    if ($null -eq $tarCmd) {
+        Write-Error @"
+tar.exe not found. Windows 10 1803+ and Windows 11 include it at
+$env:WINDIR\System32\tar.exe. If you're on an older Windows, install
+Git for Windows or 7-Zip and ensure tar.exe is on PATH.
+"@
+        exit 1
+    }
+    $tarExe = $tarCmd.Source
+}
+
+Write-Host "  tar:    $tarExe"
+Write-Host ""
+
+& $tarExe -czf $bundlePath @excludeArgs $includes
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "tar failed (exit code $LASTEXITCODE)"
