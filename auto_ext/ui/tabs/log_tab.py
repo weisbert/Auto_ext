@@ -71,8 +71,16 @@ class LogTab(QWidget):
 
     # ---- public API ---------------------------------------------------
 
-    def set_active_log(self, path: Path | None) -> None:
+    def set_active_log(
+        self, path: Path | None, display_id: str | None = None
+    ) -> None:
         """Switch to ``path`` (or clear the view when ``None``).
+
+        ``display_id`` is the optional human-readable label for the task
+        whose log this is (the spec's ``label`` value falling back to
+        the canonical ``task_id``). When provided, the header reads
+        ``"<display_id> — <path>"`` so the user can see at a glance
+        which task this log belongs to without parsing the path.
 
         Creates the file's parent directory if absent so
         :class:`QFileSystemWatcher` has a target to watch before the
@@ -91,7 +99,10 @@ class LogTab(QWidget):
             self._poll.stop()
             return
 
-        self._header.setText(str(path))
+        if display_id:
+            self._header.setText(f"{display_id} — {path}")
+        else:
+            self._header.setText(str(path))
         path.parent.mkdir(parents=True, exist_ok=True)
         # QFileSystemWatcher won't attach to a non-existent file; create
         # it empty so the first write fires a change event.
