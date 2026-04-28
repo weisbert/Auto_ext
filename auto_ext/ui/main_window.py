@@ -1,9 +1,11 @@
-"""Top-level :class:`QMainWindow` with 5 tabs.
+"""Top-level :class:`QMainWindow` with 4 tabs (Feature #4).
 
 Owns the shared :class:`ConfigController` so the Run and Project tabs
-see the same loaded ``project.yaml`` + ``tasks.yaml``, and wires the
-Run tab's ``stage_selected`` signal into the Log tab so clicking a
-stage in the status tree switches the log viewer.
+see the same loaded ``project.yaml`` + ``tasks.yaml``. The log viewer
+used to live in its own top-level tab; Feature #4 embedded it under
+the Run tab's status tree (RunTab owns its own :class:`LogTab` and
+wires ``stage_selected`` straight into it), so the standalone "Log"
+tab is gone.
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ from pathlib import Path
 from PyQt5.QtWidgets import QMainWindow, QMessageBox, QTabWidget
 
 from auto_ext.ui.config_controller import ConfigController
-from auto_ext.ui.tabs.log_tab import LogTab
 from auto_ext.ui.tabs.project_tab import ProjectTab
 from auto_ext.ui.tabs.run_tab import RunTab
 from auto_ext.ui.tabs.tasks_tab import TasksTab
@@ -43,13 +44,11 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget(self)
         self._run_tab = RunTab(self._controller, tabs)
-        self._log_tab = LogTab(tabs)
         self._project_tab = ProjectTab(self._controller, self._run_tab, tabs)
         self._tasks_tab = TasksTab(self._controller, self._run_tab, tabs)
         self._templates_tab = TemplatesTab(self._controller, self._run_tab, tabs)
 
         tabs.addTab(self._run_tab, "Run")
-        tabs.addTab(self._log_tab, "Log")
         tabs.addTab(self._project_tab, "Project")
         tabs.addTab(self._tasks_tab, "Tasks")
         tabs.addTab(self._templates_tab, "Templates")
@@ -59,9 +58,6 @@ class MainWindow(QMainWindow):
 
         self._build_menus()
 
-        # Run tab selects a stage → Log tab switches the file + focus
-        # jumps to the Log tab so the user sees it without manual nav.
-        self._run_tab.stage_selected.connect(self._on_stage_selected)
         self._run_tab.request_init_wizard.connect(self._open_init_wizard)
 
         if config_dir is not None:
@@ -93,11 +89,6 @@ class MainWindow(QMainWindow):
         dlg = InitProjectWizard(controller=self._controller, parent=self)
         dlg.accepted_with_load.connect(self._controller.load)
         dlg.exec_()
-
-    def _on_stage_selected(self, log_path: Path | None) -> None:
-        self._log_tab.set_active_log(log_path)
-        if log_path is not None:
-            self._tabs.setCurrentWidget(self._log_tab)
 
     def _on_dirty_changed(self, dirty: bool) -> None:
         suffix = " *" if dirty else ""

@@ -1,4 +1,4 @@
-"""Run tab: pick tasks/stages, start a run, watch live status.
+"""Run tab: pick tasks/stages, start a run, watch live status, view logs.
 
 Owns:
 
@@ -8,6 +8,9 @@ Owns:
 - Run / Cancel buttons,
 - a QTreeWidget showing live per-task / per-stage status that updates
   in response to :class:`QtProgressReporter` signals,
+- an embedded :class:`LogTab` underneath the status tree (Feature #4),
+  driven by the same ``stage_selected`` signal that auto-follow + the
+  double-click handler emit,
 - the :class:`RunWorker` lifecycle (one at a time).
 
 Config state (``config_dir`` / ``project`` / ``tasks``) lives on the
@@ -17,10 +20,10 @@ the tab listens on ``config_loaded`` / ``config_saved`` to refresh its
 task list.
 
 Emits :attr:`stage_selected` when the user double-clicks a stage row so
-the Log tab can switch to that stage's log file. Single-click only
-selects the row (per Qt's default selection behaviour) so that users
-who want to right-click a row don't get the Log tab yanked from under
-them.
+the embedded :class:`LogTab` can switch to that stage's log file.
+Single-click only selects the row (per Qt's default selection
+behaviour) so that users who want to right-click a row don't get the
+log viewer yanked from under them.
 """
 
 from __future__ import annotations
@@ -59,6 +62,7 @@ from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.models import STAGE_DISPLAY, STATUS_COLOR, TASK_DISPLAY
 from auto_ext.ui.os_open import open_in_os
 from auto_ext.ui.qt_reporter import QtProgressReporter
+from auto_ext.ui.tabs.log_tab import LogTab
 from auto_ext.ui.worker import RunWorker
 
 
@@ -211,11 +215,17 @@ class RunTab(QWidget):
 
         splitter.addWidget(left)
 
-        right = QWidget(self)
-        lright = QVBoxLayout(right)
+        # Feature #4: the right column is itself a vertical splitter so
+        # the live status tree (top) and the embedded LogTab (bottom)
+        # share the available height. Drag the handle to 0 on either
+        # side to focus on the other — no separate "hide log" toggle.
+        right_splitter = QSplitter(Qt.Vertical, self)
+
+        right_top = QWidget(right_splitter)
+        lright = QVBoxLayout(right_top)
         lright.setContentsMargins(0, 0, 0, 0)
-        lright.addWidget(QLabel("Live status", right))
-        self._status_tree = QTreeWidget(right)
+        lright.addWidget(QLabel("Live status", right_top))
+        self._status_tree = QTreeWidget(right_top)
         self._status_tree.setHeaderLabels(["task / stage", "status"])
         self._status_tree.setColumnWidth(0, 360)
         # Feature #3: single-click only selects (Qt default highlight); the
@@ -224,14 +234,29 @@ class RunTab(QWidget):
         # other (decoupled) channel that emits stage_selected.
         self._status_tree.itemDoubleClicked.connect(self._on_tree_double_click)
         # Phase 5.9 B+C: right-click on a stage row opens a context menu
-        # with "Open rendered template" + (calibre only) "Open LVS report".
+        # with "View log file" + "Open rendered template" + (calibre only)
+        # "Open LVS report".
         self._status_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self._status_tree.customContextMenuRequested.connect(
             self._on_tree_context_menu
         )
         lright.addWidget(self._status_tree)
 
-        splitter.addWidget(right)
+        # Feature #4: the LogTab widget gets embedded directly under the
+        # status tree. Subscribing to our own stage_selected signal keeps
+        # the auto-follow + double-click paths working through a single
+        # public API (also still consumable by MainWindow if the user
+        # ever wants the log somewhere else).
+        self._log_tab = LogTab(right_splitter)
+        self.stage_selected.connect(self._log_tab.set_active_log)
+
+        right_splitter.addWidget(right_top)
+        right_splitter.addWidget(self._log_tab)
+        right_splitter.setStretchFactor(0, 1)
+        right_splitter.setStretchFactor(1, 1)
+        right_splitter.setSizes([400, 400])
+
+        splitter.addWidget(right_splitter)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([400, 800])

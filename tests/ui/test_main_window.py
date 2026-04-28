@@ -203,3 +203,65 @@ def test_main_window_open_wizard_dirty_cancel(
 
     assert save_calls == [], "Cancel must NOT save"
     assert opened == [], "Cancel must NOT open the wizard"
+
+
+# ---- Feature #4: Log tab merged into Run tab ---------------------------
+
+
+def test_feature4_main_window_has_four_tabs(qtbot) -> None:
+    """Feature #4 dropped the standalone Log tab in favour of an embedded
+    LogTab inside RunTab. MainWindow now exposes 4 tabs, not 5.
+    """
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._tabs.count() == 4
+    titles = [window._tabs.tabText(i) for i in range(window._tabs.count())]
+    assert "Log" not in titles, (
+        "Standalone Log tab must be removed; the log viewer lives "
+        "inside the Run tab now."
+    )
+    # All four expected tabs are still present.
+    assert set(titles) == {"Run", "Project", "Tasks", "Templates"}
+
+
+def test_feature4_run_tab_owns_embedded_log_tab(qtbot) -> None:
+    """RunTab now owns its own LogTab and wires stage_selected straight
+    into ``set_active_log``. MainWindow no longer holds a separate
+    LogTab reference."""
+    from auto_ext.ui.tabs.log_tab import LogTab
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert hasattr(window._run_tab, "_log_tab")
+    assert isinstance(window._run_tab._log_tab, LogTab)
+    # MainWindow no longer holds a top-level _log_tab attribute.
+    assert not hasattr(window, "_log_tab")
+
+
+def test_feature4_stage_selected_drives_embedded_log_tab(
+    qtbot, project_tools_config: Path, tmp_path: Path
+) -> None:
+    """Emitting ``stage_selected`` from the Run tab must route the path
+    into the embedded LogTab's ``set_active_log``. The connection lives
+    inside RunTab._build_ui — this test pins it so a future refactor
+    can't silently disconnect the two."""
+    from auto_ext.ui.config_controller import ConfigController
+    from auto_ext.ui.tabs.run_tab import RunTab
+
+    ae_root = tmp_path / "pr"
+    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
+    tab = RunTab(controller)
+    qtbot.addWidget(tab)
+    controller.load(project_tools_config)
+
+    task_id = controller.tasks[0].task_id
+    log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
+
+    # No log selected yet.
+    assert tab._log_tab._path is None
+
+    # Emit and check that the embedded LogTab took the path.
+    tab.stage_selected.emit(log_path)
+    assert tab._log_tab._path == log_path
