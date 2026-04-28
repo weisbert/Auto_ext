@@ -244,6 +244,16 @@ class TaskSpec(BaseModel):
     templates: TemplatePaths = Field(default_factory=TemplatePaths)
     ground_net: str = "vss"
     out_file: str | None = None
+    #: Optional human-readable display name for this spec. Pure UX sugar:
+    #: when set, the GUI's Run-tab status tree row, log header, and task
+    #: picker render this value instead of the auto-derived ``task_id``
+    #: (``library__cell__layout__source``). The canonical ``task_id`` is
+    #: always preserved for the on-disk paths (``runs/task_<id>/``,
+    #: ``logs/task_<id>/``) and internal lookups — renaming ``task_id``
+    #: would diverge from prior runs. Defaults to ``None`` (render the
+    #: ``task_id`` verbatim). Empty strings should round-trip to ``None``
+    #: so the YAML stays clean.
+    label: str | None = None
     jivaro: JivaroConfig = Field(default_factory=JivaroConfig)
     continue_on_lvs_fail: bool = False
     #: Per-task override for :attr:`ProjectConfig.dspf_out_path`. ``None``
@@ -277,6 +287,11 @@ class TaskConfig(BaseModel):
     templates: TemplatePaths
     ground_net: str
     out_file: str | None
+    #: Per-spec display label propagated unchanged from
+    #: :attr:`TaskSpec.label`. The same value lands on every expanded
+    #: child of a spec — ``label`` is display sugar, not an expansion
+    #: axis. ``None`` means "render the auto-derived ``task_id``".
+    label: str | None = None
     jivaro: JivaroConfig
     continue_on_lvs_fail: bool
     dspf_out_path: str | None = None
@@ -463,6 +478,7 @@ def _expand_spec(
                             templates=merged_templates,
                             ground_net=spec.ground_net,
                             out_file=spec.out_file,
+                            label=spec.label,
                             jivaro=jivaro,
                             continue_on_lvs_fail=spec.continue_on_lvs_fail,
                             dspf_out_path=spec.dspf_out_path,
