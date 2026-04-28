@@ -636,4 +636,171 @@ def _with_caption(caption: str, widget: QWidget, parent: QWidget) -> QWidget:
     return container
 
 
-__all__ = ["DiffEditorDialog"]
+# ---- Clone-and-edit (Feature #1, 2026-04-28) -------------------------------
+
+
+class CloneTemplateDialog(QDialog):
+    """Side-by-side editor for the Templates tab "Copy template" flow.
+
+    Two panes:
+
+    * Left: read-only view of the source ``.j2`` (kept as a reference
+      diff while the user edits the copy).
+    * Right: editable copy. Initially identical to the source; the
+      user tweaks it and clicks Save to write it to ``dest_path``.
+
+    The dialog itself does not perform the initial copy of the
+    ``.j2`` + ``.manifest.yaml`` pair — that's
+    :func:`auto_ext.core.clone_template.clone_template`. The Templates
+    tab clones first, then opens this dialog on the cloned pair so the
+    Save-as-new operation is always purely a write to an existing file.
+
+    Why a separate class from :class:`DiffEditorDialog`? The diff
+    editor is a *toggle authoring* tool whose right pane is a derived
+    preview. Reusing it would mean disabling half its UI (drop zones,
+    toggle name field, swap, manifest preview, save-preset). A small
+    dedicated dialog keeps both code paths clear and the existing
+    diff-editor behaviour untouched.
+    """
+
+    def __init__(
+        self,
+        source_path: Path,
+        dest_path: Path,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit clone - {dest_path.name}")
+        self.setModal(True)
+        self.resize(1100, 720)
+
+        self._source_path = source_path
+        self._dest_path = dest_path
+
+        try:
+            self._source_text = source_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            self._source_text = ""
+
+        # The destination file already exists (clone_template copied it
+        # before we opened the dialog). If reading fails we fall back
+        # to the source text so the user can still edit the right pane.
+        try:
+            self._initial_dest_text = dest_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            self._initial_dest_text = self._source_text
+
+        self._saved: bool = False
+        self._build_ui()
+
+    # ---- UI ---------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+
+        header = QLabel(
+            f"Source: <code>{self._source_path}</code><br>"
+            f"Saving to: <code>{self._dest_path}</code>",
+            self,
+        )
+        header.setTextFormat(Qt.RichText)
+        header.setStyleSheet("color: #444;")
+        header.setWordWrap(True)
+        root.addWidget(header)
+
+        splitter = QSplitter(Qt.Horizontal, self)
+
+        self._left_pane = QPlainTextEdit(self)
+        self._left_pane.setReadOnly(True)
+        self._left_pane.setFont(_mono_font())
+        self._left_pane.setPlainText(self._source_text)
+        self._left_highlighter = JinjaHighlighter(self._left_pane.document())
+
+        self._right_pane = QPlainTextEdit(self)
+        self._right_pane.setReadOnly(False)
+        self._right_pane.setFont(_mono_font())
+        self._right_pane.setPlainText(self._initial_dest_text)
+        self._right_highlighter = JinjaHighlighter(self._right_pane.document())
+
+        splitter.addWidget(_with_caption(
+            f"{self._source_path.name} (read-only)", self._left_pane, self,
+        ))
+        splitter.addWidget(_with_caption(
+            f"{self._dest_path.name} (editable)", self._right_pane, self,
+        ))
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        root.addWidget(splitter, 1)
+
+        hint = QLabel(
+            "Edit the right pane, then click Save to write it to disk. "
+            "The manifest sidecar (if any) was already copied alongside; "
+            "edit it later via the Knobs tab.",
+            self,
+        )
+        hint.setStyleSheet("color: #666; font-size: 11px;")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        self._save_btn = QPushButton("Save", self)
+        self._save_btn.clicked.connect(self._on_save)
+        self._save_btn.setDefault(True)
+        self._cancel_btn = QPushButton("Cancel", self)
+        self._cancel_btn.clicked.connect(self.reject)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self._save_btn)
+        btn_row.addWidget(self._cancel_btn)
+        root.addLayout(btn_row)
+
+    # ---- slots ------------------------------------------------------------
+
+    def _on_save(self) -> None:
+        text = self._right_pane.toPlainText()
+        try:
+            self._dest_path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Save failed",
+                f"Writing {self._dest_path} failed: {exc}",
+            )
+            return
+        self._saved = True
+        self.accept()
+
+    # ---- public accessors -------------------------------------------------
+
+    @property
+    def saved(self) -> bool:
+        """``True`` iff Save was clicked and the write succeeded."""
+        return self._saved
+
+    @property
+    def dest_path(self) -> Path:
+        return self._dest_path
+
+    # Programmatic helper for tests: simulate user edit + save click.
+    def set_right_text_for_tests(self, text: str) -> None:
+        self._right_pane.setPlainText(text)
+
+
+def open_for_save_as_new(
+    source_path: Path,
+    dest_path: Path,
+    parent: QWidget | None = None,
+) -> CloneTemplateDialog:
+    """Construct a :class:`CloneTemplateDialog` ready to be ``exec_()``ed.
+
+    Public entry point for the Templates-tab "Copy template" flow. The
+    caller is expected to have already cloned the source files via
+    :func:`auto_ext.core.clone_template.clone_template`; this helper
+    just wires up the editor pane.
+    """
+    return CloneTemplateDialog(source_path, dest_path, parent=parent)
+
+
+__all__ = [
+    "CloneTemplateDialog",
+    "DiffEditorDialog",
+    "open_for_save_as_new",
+]
