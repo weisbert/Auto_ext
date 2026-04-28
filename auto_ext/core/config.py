@@ -102,6 +102,34 @@ class TemplatePaths(BaseModel):
             return v.replace("\\", "/")
         return v
 
+    @field_validator("calibre", "quantus", "jivaro", "si", mode="after")
+    @classmethod
+    def _reject_relative_traversal(cls, v: Path | None) -> Path | None:
+        # Reject ``..`` segments in *relative* template paths. A relative
+        # path with ``..`` would silently resolve through
+        # :func:`resolve_template_path`'s auto_ext-root or workarea
+        # fallback to a file outside the project tree (e.g. a copy-paste
+        # of ``../../etc/passwd`` from another tool's output). Absolute
+        # paths are still accepted — explicit absolute is the user's
+        # responsibility on a shared filesystem.
+        #
+        # Use the POSIX absolute-check (leading ``/``) for cross-platform
+        # consistency: production deploys to Linux, where YAMLs always
+        # use POSIX paths, but unit tests also run on Windows where
+        # ``Path("/abs").is_absolute()`` returns ``False`` (no drive).
+        if v is None:
+            return v
+        s = str(v).replace("\\", "/")
+        if s.startswith("/"):
+            return v
+        if ".." in v.parts:
+            raise ValueError(
+                f"template path {str(v)!r} contains '..'; "
+                "relative template paths must stay inside the project tree "
+                "(use an absolute path if you really need to escape it)"
+            )
+        return v
+
 
 class ProjectConfig(BaseModel):
     """Schema for ``project.yaml``. ``source_path`` and ``raw`` are filled
