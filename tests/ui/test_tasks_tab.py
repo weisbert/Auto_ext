@@ -860,3 +860,56 @@ def test_runner_resolve_dspf_path_unresolved_passes_through() -> None:
     )
     assert text == "${WORK_ROOT2}/c.dspf"
     assert err is not None and err.startswith("unresolved:")
+
+
+def test_dspf_combo_refresh_preserves_preset_selection(qtbot) -> None:
+    """Picking a non-default preset and then triggering ``refresh()``
+    (e.g. autosave round-trip) must not silently revert the combo to
+    the first preset. Regressed when ``_populate_items``'s ``clear()``
+    dropped currentIndex to -1 and items re-added defaulted to 0.
+    """
+    from auto_ext.ui.widgets.dspf_out_path_combo import (
+        DspfOutPathCombo,
+        _PROJECT_PRESETS,
+    )
+
+    captured: list[object] = []
+
+    def resolver(template: str) -> tuple[str, str | None]:
+        # Stable resolution so labels stay identical across refresh,
+        # otherwise label-based matching would be a separate variable.
+        return template.replace("{cell}", "<cell>"), None
+
+    combo = DspfOutPathCombo(resolver)
+    qtbot.addWidget(combo)
+    combo.value_changed.connect(lambda v: captured.append(v))
+
+    # Pick the second preset (the bug-A example: ${output_dir}/{cell}.dspf).
+    target_template = _PROJECT_PRESETS[1].template
+    combo.set_value(target_template)
+    assert combo.current_value() == target_template
+
+    # Now trigger a refresh — what autosave does post-stage.
+    combo.refresh()
+    assert combo.current_value() == target_template, (
+        "refresh() reverted the user's preset selection to the default"
+    )
+
+
+def test_dspf_combo_refresh_preserves_custom_text(qtbot) -> None:
+    """Custom-typed values (no matching preset userData) must survive
+    refresh() in the line edit, parked on the trailing Custom... item."""
+    from auto_ext.ui.widgets.dspf_out_path_combo import DspfOutPathCombo
+
+    def resolver(template: str) -> tuple[str, str | None]:
+        return template.replace("{cell}", "<cell>"), None
+
+    combo = DspfOutPathCombo(resolver)
+    qtbot.addWidget(combo)
+
+    custom = "/abs/literal/path/{cell}.dspf"
+    combo.set_value(custom)
+    assert combo.current_value() == custom
+
+    combo.refresh()
+    assert combo.current_value() == custom

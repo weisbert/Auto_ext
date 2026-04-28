@@ -614,6 +614,20 @@ def _build_context(
     return ctx
 
 
+# Synthetic context tokens that ``dspf_out_path`` may reference via ``${X}``.
+# These are *not* shell env vars — the runner injects them into the
+# substitute_env env dict at render time. Excluded from env discovery so
+# resolve_env does not log "missing" warnings for them.
+_PATH_TOKEN_NAMES: frozenset[str] = frozenset({
+    "output_dir",
+    "intermediate_dir",
+    "layer_map",
+    "calibre_lvs_dir",
+    "calibre_lvs_basename",
+    "qrc_deck_dir",
+})
+
+
 def _build_path_token_env(
     resolved_env: dict[str, str], ctx_so_far: dict[str, Any]
 ) -> dict[str, str]:
@@ -628,14 +642,7 @@ def _build_path_token_env(
     a stray shell var with the same name.
     """
     merged: dict[str, str] = dict(resolved_env)
-    for key in (
-        "output_dir",
-        "intermediate_dir",
-        "layer_map",
-        "calibre_lvs_dir",
-        "calibre_lvs_basename",
-        "qrc_deck_dir",
-    ):
+    for key in _PATH_TOKEN_NAMES:
         v = ctx_so_far.get(key)
         if v is not None:
             merged[key] = str(v)
@@ -810,6 +817,13 @@ def _discover_env_vars(
             except OSError as exc:
                 raise ConfigError(f"cannot read template {tp}: {exc}") from exc
     required = discover_required_vars(sources)
+    # ``dspf_out_path`` (and friends) may reference synthetic path tokens
+    # like ``${output_dir}`` that are injected by the runner at render
+    # time, not real shell vars. Strip them so resolve_env does not log
+    # "missing" warnings for tokens that will be supplied later.
+    # ``project.paths.*`` keys are also valid synthetic tokens.
+    required -= _PATH_TOKEN_NAMES
+    required -= set(project.paths.keys())
     # tech_name auto-derive still walks env-var candidates when unset.
     if project.tech_name is None:
         required.update(project.tech_name_env_vars)

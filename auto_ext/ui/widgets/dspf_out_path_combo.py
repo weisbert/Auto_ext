@@ -260,8 +260,48 @@ class DspfOutPathCombo(QWidget):
         return data if isinstance(data, str) else (line_text or None)
 
     def refresh(self) -> None:
-        """Re-resolve every item's preview. Call after env-overrides change."""
+        """Re-resolve every item's preview. Call after env-overrides change.
+
+        Preserves the user's current selection across the rebuild —
+        otherwise ``_populate_items`` would clear the combo, dropping
+        ``currentIndex`` to -1, then default to 0 (the first preset)
+        when items are re-added. That looked like the user's preset
+        choice was being silently reverted on every autosave round-trip.
+        """
+        # Capture before populate. Match set_default_hint's pattern so the
+        # two callers stay symmetrical.
+        current_data = self._combo.currentData(self._ROLE_TEMPLATE)
+        current_text = self._combo.lineEdit().text()
+        current_idx = self._combo.currentIndex()
+        was_default_sentinel = (
+            self._include_default_sentinel and current_idx == 0
+            and current_data is None
+        )
         self._populate_items()
+        # Restore: prefer matching userData (preset / default sentinel),
+        # fall back to the typed text.
+        self._populating = True
+        try:
+            if was_default_sentinel:
+                self._combo.setCurrentIndex(0)
+                self._combo.lineEdit().clear()
+            elif isinstance(current_data, str):
+                idx = self._find_item_by_template(current_data)
+                if idx >= 0:
+                    self._combo.setCurrentIndex(idx)
+                    self._combo.lineEdit().setText(self._combo.itemText(idx))
+                elif current_text:
+                    self._combo.lineEdit().setText(current_text)
+            elif current_text:
+                # Custom-typed value, no userData — drop it back into the
+                # line edit. Park on the trailing Custom... sentinel so the
+                # display reflects "this is a custom value".
+                custom_idx = self._combo.count() - 1
+                if custom_idx >= 0:
+                    self._combo.setCurrentIndex(custom_idx)
+                self._combo.lineEdit().setText(current_text)
+        finally:
+            self._populating = False
         self._refresh_preview()
 
     # ---- internals ---------------------------------------------------

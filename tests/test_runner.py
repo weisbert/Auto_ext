@@ -736,3 +736,45 @@ def test_discover_env_vars_includes_dspf_out_path(project_tools_config: Path) ->
     required = _discover_env_vars(project, tasks)
     assert "MY_DSPF_ROOT" in required
     assert "PER_TASK_DSPF" in required
+
+
+def test_discover_env_vars_strips_synthetic_path_tokens(
+    project_tools_config: Path,
+) -> None:
+    """``${output_dir}`` and friends are runner-injected synthetic tokens —
+    they must NOT appear in the env-var requirement set, otherwise
+    resolve_env logs a "missing" warning and confuses the user even
+    though the runner supplies them at render time. This regressed when
+    ``dspf_out_path`` was added to ``_discover_env_vars`` sources without
+    a path-token filter."""
+    from auto_ext.core.runner import _discover_env_vars
+
+    (project_tools_config / "project.yaml").write_text(
+        "dspf_out_path: \"${output_dir}/{cell}.dspf\"\n"
+        "paths:\n"
+        "  custom_path: \"${VERIFY_ROOT}/foo\"\n",
+        encoding="utf-8",
+    )
+    (project_tools_config / "tasks.yaml").write_text(
+        "- library: L\n"
+        "  cell: c\n"
+        "  lvs_layout_view: layout\n"
+        "  dspf_out_path: \"${calibre_lvs_dir}/per_task.dspf\"\n",
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    required = _discover_env_vars(project, tasks)
+    # Runner-injected path tokens must not surface as required env vars.
+    for token in (
+        "output_dir",
+        "intermediate_dir",
+        "calibre_lvs_dir",
+        "calibre_lvs_basename",
+        "qrc_deck_dir",
+        "layer_map",
+    ):
+        assert token not in required, f"{token} should be filtered"
+    # project.paths.* keys are also synthetic.
+    assert "custom_path" not in required
+    # But real shell vars referenced inside paths.* values still surface.
+    assert "VERIFY_ROOT" in required
