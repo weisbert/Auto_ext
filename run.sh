@@ -70,6 +70,14 @@ if needs_qt "$@"; then
 fi
 
 export PYTHONPATH="${here}${PYTHONPATH:+:${PYTHONPATH}}"
+
+# Python 3.11+: prevent Python from prepending cwd / script-dir to sys.path.
+# Without this, `cd workarea && python -m auto_ext` would shadow our package
+# with any same-named auto_ext/ that happens to live at workarea root (a real
+# incident: a user had a separate, unrelated `auto_ext/` project there).
+# PYTHONPATH still works -- only the implicit cwd/script-dir entry is dropped.
+export PYTHONSAFEPATH=1
+
 cd "${workarea}"
 
 # `test` is a launcher convenience, NOT an auto_ext subcommand.
