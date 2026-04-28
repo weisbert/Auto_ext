@@ -1,0 +1,109 @@
+现在我想使用python3在linux的环境中设计一个自动抽取av_extract的脚本
+
+用户必须从workarea下直接运行，例如python3 scripts/auto_ext.py (注意scripts这个文件夹的名字可以随意改变)
+用户需要提前准备好的文件有:
+1. 一个Run_ext.txt配置文件。例如放在workarea/scripts里
+2.一个或多个不同的calibre模板进行LVS仿真。例如放在workarea/scripts/template/calibre_wiodio.qci
+3.一个或多个不同的Quantus模板进行后抽。例如放在workarea/scripts/template/qrc_ext.txt
+4.一个或多个不同的jivaro模板进行后抽reduce。例如放在workarea/scripts/template/jivaro_tempt.xml
+5.一个si.env文件用于si命令抽取aucdl。例如放在workarea/scripts/template里
+
+在Run_ext.txt文件中有这些变量：
+
+Task: 1 \\这个代表后抽的任务编号
+LibraryName: WB_PLL_DCO
+CellName: DCO5G_BUF_TOP
+lvsSourceView: schematic
+lvsLayoutView:layout
+LVSTemp: template/calibre_wiodio.qci  \\这个代表用户准备好的calibre仿真模板
+GndName: AVSS_DCO_BUF  \\这个用作Quantus中选中的reference node
+OutFileName: av_ext  \\这个代表最后抽取av_extract文件的名称
+QrcTemp: template/qrc_ext.txt  \\这个代表用户准备好的Quantus模板
+ifJivaro: Yes  \\这个代表用户是否决定使用Jivaro, Yes代表进行，No代表不进行抽取
+frequencyLimit： 14  \\这个代表Jivaro减少寄生的最高频率，单位GHz
+errorMax: 2  \\这个代表jivaro中允许的最大错误%
+JivaroTemp: template/jivaro_tempt.xml   \\这个代表用户准备好的jivaro模板
+layerMap: /data/location/xx.layermap \\这个是用户用strmout提取gds文件时使用的文件路径
+sienv: template/si.env
+
+Task2: 2 \\第二个后抽任务
+...
+
+对于单独一个后抽任务来说，例如对于Task：1
+首先需要定义这个任务的仿真文件设置
+1. 对于LVS的文件，使用用户指定的calibre_wiodio.qci，在workarea/scripts/template/calibre_wiodio.qci下
+      a.替换掉该文件中所有的“CellName”字符为“DCO5G_BUF_TOP”
+      b.替换掉该文件中所有的“LibraryName”字符为“WB_PLL_DCO”
+      c.将改文件中“*lvsSourceView:”后的内容替换成用户定义的lvsSourceView
+      d.将改文件中“*lvsLayoutView:”后的内容替换成用户定义的lvsLayoutView
+      e.将文件中的QCI_PATH替换为QCI_PATH_<CellName>
+2. 对于quantus仿真文件
+      a.替换掉该文件中所有的“CellName”字符为“DCO5G_BUF_TOP”
+      b.替换掉该文件中所有的“LibraryName”字符为“WB_PLL_DCO”
+      b.替换 -ground_net "(随机的字符)" 中""里的内容改为<GndName>，本例中为AVSS_DCO_BUF
+      e.将文件中的QCI_PATH替换为QCI_PATH_<CellName>
+      c.讲文件中-view_name "av_ext"，“”内的内容换成<OutFileName>
+3. 对于jivaro仿真文件
+      a.里面有一行为inputView value="xx/xx/xx"，“xx”不是代表文件中真的是xx，可能是别的随机的值，将""内容替换为
+          <LibraryName>/<CellName>/<OutFileName>，在本例中为WB_PLL_DCO/DCO5G_BUF_TOP/av_ext
+      b.里面有一行为frequencyLimit value="12", 将文件中的值换成Run_ext.txt中定义的值，即为14
+      c.里面有一行为errorMax value="5", 将文件中的值换成Run_ext.txt中定义的值，即为2
+      d.里面有一行为 outputView value="xx"，将双引号中的内容替换成<OutFileName>_red
+4. 对于si.env仿真文件
+      a.替换掉该文件中所有的“CellName”字符为“DCO5G_BUF_TOP”
+      b.替换掉该文件中所有的“LibraryName”字符为“WB_PLL_DCO”
+      c.文件中有一行为 simViewName = "xxxx"，将""内的内容替换成<lvsSourceView>
+      e.将文件中的QCI_PATH替换为QCI_PATH_<CellName>
+      f.替换掉WORK_ROOT字符，换成当前环境$WORK_ROOT的字符
+对于如何修改和生成文件：
+1. 对于这些模板文件，不可直接修改原模板，应该在对应的QCI_path内生成新的模板
+2. 由于si命令会读取当前工作目录下的si.env文件，需要复制一份对应的si.env到workarea下
+
+
+程序执行的流程大致为: 
+
+对于单个任务，用task1进行举例：
+0. 修改生成对应软件的模板
+1. 获取跑LVS需要的文件
+      a.获取src.net文件
+          (1).先检查workarea下是否有.running文件，如果有就删除
+          (2).执行指令：si -batch -command netlist -cdslib ./cds.lib
+   b.获取gds文件，使用命令行：
+strmout -library <LibraryName> -topCell <CellName> -view <lvsLayoutView> -strmFile $WORK_ROOT/cds/verify/QCI_PATH_<CellName>/<CellName>.gds -layerMap <layerMap>
+2.使用calibre -gui -lvs -runset calibre_wiodio.qci -batch进行LVS仿真(这个runset必须要用你修改后的文件)
+3. 判断lvs是否跑通，如果跑通再进行下一步，如果不成功，则中止。最终结果report在都存储在$WORK_ROOT/cds/verify/QCI_PATH_<CellName>/CellName.lvs.report(本例中CellName为DCO5G_BUF_TOP)中，如果跑通了会有"CORRECT"的字符
+4. 在lvs跑通后进行，quantus抽取，使用qrc -cmd qrc_ext.txt (这个runset必须要用你修改后的文件)
+5. 判断当前的ifJivaro的值是否为Yes，若为No，到第7步
+6. 若为Yes，使用jivaro -xml jivaro_tempt.xml进行后仿文件缩减(这个runset必须要用你修改后的文件)
+7. 进行下一个test或者结束任务
+
+菜单设计:
+1.用户可以选择
+    a. 检查环境，测试对应的模板文件是否都在
+    b.一次性全跑所有任务
+    c.只选择跑某一个任务
+    d.单独任务
+       0.返回
+       1.仅生成calibre_wiodio.qci，qrc.txt，jivaro_tempt.xml，si.env等文件
+       2.生成gds文件到(这个需要调整strmFile后的路径)
+           1.默认路径
+           2.当前路径 (-strmFile <CellName>.gds)
+           3.指定路径 (-strmFile reliability/<CellName>.gds)
+       3.仅进行LVS仿真
+       4.仅进行qrc抽取
+       5.仅进行jivaro
+       6.默认LVS已跑完，从qrc这步继续
+
+无论是有一个任务还是多个任务，用户都能选择这个菜单栏的功能。
+
+要求：
+1. 进程显示，用户要能看见现在具体进行到了哪一步
+2. 结果总结
+3. 用户能指定具体用哪一个Run_ext.txt文件
+
+注意点：
+1.python脚本全英文
+2. 若检测到已有对应的QCI_PATH文件夹，直接覆盖QCI_PATH文件内部的同名文件。不能直接覆盖删除QCI_PATH文件夹，这会导致之前的文件消失
+3. 一次性全跑的情况下严格遵守LVS->QRC->jivaro的顺序
+4. 使用串行仿真，task1完全完成之后才进行task2
+5. $WORK_ROOT并不等于workarea，其指向了另外一个目录

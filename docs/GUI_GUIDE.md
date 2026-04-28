@@ -1,6 +1,6 @@
-# Auto_ext GUI 使用说明（Phase 5.5 阶段）
+# Auto_ext GUI 使用说明
 
-本文档对应 Phase 5.5 收尾时的 GUI 状态：5 个 tab 全部可用，TemplatesTab 是这次 5.5 新落地的最后一块 GUI 编辑能力。Diff-mode 模板编辑器（5.6）和 init-project 向导（5.7）尚未实装。
+本文档对应当前 main（Phase 5.6.5 + 5.7 + 5.8 + dspf_out_path）的 GUI 状态：5 个 tab（Project / Templates / Tasks / Run / Log）全部可用，外加 5.6 的 Diff-mode 模板编辑器、5.6.2 的 TemplateDiffViewer 只读对比、5.6/5.7 的 PresetPicker / KnobEditor / InitWizard、5.8 的单文件 TemplateGenerator dialog，以及 Project/Tasks 两个 tab 上新增的 DspfOutPathCombo。
 
 适用场景：Windows 开发机本地启动看 UI；不依赖 Cadence。
 
@@ -231,13 +231,63 @@ PYTHONPATH=/c/code/Auto_ext/Auto_ext /c/code/Auto_ext/.venv/Scripts/python -m au
 
 ---
 
-## 4. 已知限制 / TODO
+## 4. 5.6 之后新增的 GUI 入口
 
-- **Phase 5.6 diff-mode 模板编辑器**：现在 Templates tab 是只读 inventory + knob 编辑，没法 wrap `[% if toggle %]`。Calibre 的 "noConnectByNetName on/off" 之类两份模板还是手工切。`current_template_changed` 信号已经在 5.5 留好给 5.6 用。
-- **Phase 5.7 init-project GUI 向导**：第一次创建 `project.yaml` 还是要走 CLI `auto_ext init-project`。
-- **Manifest 编辑**：5.5 不让 GUI 改 `*.manifest.yaml`（manifest 是 template-author 领域，跟着 git 走）。要加新 knob 还是 `auto_ext knob suggest` / `knob promote`。
-- **Per-task knob override**：`tasks.yaml[...].knobs.<stage>.<name>` 5.5 只在 CLI 跟 yaml 手编可改；要在 GUI 改得等 TasksTab 后续扩展。
-- **Phase 3.5 办公室验证 Steps 4–6**：`--jobs 4` 的 license ceiling 探测、duplicate-cell preflight、混合 pass/fail，仍待真 Cadence 跑。
+下面这些是 5.5 之后陆续落地的；上面 §2 主要描述 5.5 的 5 个 tab，新东西基本都是从 Templates tab 或菜单触发的对话框。
+
+### 4.1 Diff-mode 模板编辑器（Phase 5.6, `widgets/diff_editor.py`）
+
+Templates tab → 选中一个绑定模板 → `[Edit diff…]`（或对应入口按钮）打开 modal `DiffEditor`：
+
+- 拖两份原始 EDA 导出（diff 的 A / B）进 DropZone，或 `[Browse…]`
+- 用 `[% if toggle %] … [% else %] … [% endif %]` 把两边差异 wrap 进同一个 `.j2`
+- 输出回 `<auto_ext_root>/templates/<tool>/...`，保留注释 + 缩进
+- Toggle 名 / 默认值用对话框里的 QLineEdit + checkbox 直接配，写回 manifest
+
+Calibre 的 "noConnectByNetName on/off" 之类两份模板现在用这个 wrap，不再手工切。
+
+### 4.2 只读 TemplateDiffViewer（Phase 5.6.2, `widgets/template_diff_viewer.py`）
+
+仅查看差异、不写文件。两个 DropZone + 同步滚动 + 行级 diff 着色。常用于"我手里两份 raw 想看下到底差哪几行"的快查；不依赖 controller，可独立起。
+
+### 4.3 PresetPicker（Phase 5.6, `widgets/preset_picker.py`）
+
+Templates tab 新增的 `[Apply preset…]`。列出 `<auto_ext_root>/templates/presets/` 下所有合法 preset，右侧给 meta + snippet 预览，选中 → apply 到当前模板。锚点对不上直接拒绝（v1 没有 fuzzy 回退）。
+
+### 4.4 InitWizard（Phase 5.7, `widgets/init_wizard.py`）
+
+主菜单 / 启动页 `[Init project…]` 调起的 `QWizard`。6 页：Intro / Destination / RawFiles / Preview / Commit / Result，里面包了 `auto_ext.core.init_project`。第一次建 `project.yaml` 不再必须走 CLI；同步执行（无后台线程 / 取消 / rollback），Preview 页两个子 tab：概要 + 生成的 yaml。
+
+### 4.5 TemplateGenerator dialog（Phase 5.8, `widgets/template_generator.py`）
+
+非模态 `[Generate from raw…]`。把单个 raw EDA 文件（Calibre `.qci` / `si.env` / Quantus `.cmd` / Jivaro `.xml`）直接转成参数化 `.j2`：
+
+- 拖一份 raw 进 DropZone → 自动 detect tool（也可顶部下拉手切）
+- 调 `core.importer.import_template` 算参数化 body
+- 左 raw / 右 parameterized 双栏；真正 differ 的行黄底高亮
+- 右侧第三栏 6 个 Identity 字段（library / cell / view 等），改完 300ms 防抖重新 import
+- 状态条：`自动抽取 / 用户覆盖 / 导入失败：<reason>`
+- 满意之后 `[Save…]` 写到 `templates/<tool>/`
+
+### 4.6 Paths group（Phase 5.6.5, Project tab）
+
+§2.3 已经描述。重写要点：旧 `pdk_subdir` / `project_subdir` / `runset_versions.{lvs,qrc}` 四段 schema 已删，统一进 `paths.<key>`，每个 path 直接是模板 `[[<key>]]` 引用的整条目录路径，可 `${X}|parent` 形式从 env var 派生。每行带"被哪些模板引用"的反查列表 + tooltip 给 resolves-to 预览。
+
+### 4.7 DspfOutPathCombo（最近一次，Project + Tasks tab）
+
+`widgets/dspf_out_path_combo.py`。Project tab 的 Output group 里加了 `dspf_out_path`，Tasks tab 的每行 spec 里也有同名字段（per-task 覆盖）。
+
+- Editable QComboBox，下拉项展示 **resolved real paths**（`${X}` / `[[X]]` / `{cell}` 都已替换）
+- 每条 preset 在 `Qt.UserRole` 里挂着 **template form**（如 `${WORK_ROOT2}/{cell}.dspf`），写回 yaml 仍是 templated
+- 末尾 `Custom...` 哨兵让你直接键入自定义表达式
+- Tasks tab 变体在 index 0 多一个 `(default: <X>)` 哨兵：选中即删除 per-task 覆盖、回退 project default
+- Combo 下方斜体 label 实时显示 fully-resolved 路径
+
+### 4.8 仍未做的 / 已知限制
+
+- **Manifest 编辑**：GUI 不改 `*.manifest.yaml`（manifest 是 template-author 领域，跟着 git 走）。加新 knob 仍走 `auto_ext knob suggest` / `knob promote`。
+- **Per-task knob override**：`tasks.yaml[...].knobs.<stage>.<name>` 现在仍只在 CLI / yaml 手编里改；GUI 要在 TasksTab 后续扩展加。
+- **办公室验证 Steps 4–6**：`--jobs 4` 的 license ceiling 探测、duplicate-cell preflight、混合 pass/fail 真跑，仍待真 Cadence 环境（见 `OFFICE_VALIDATION.md`）。
 
 ---
 
