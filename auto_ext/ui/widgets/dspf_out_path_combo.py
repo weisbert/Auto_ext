@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
 )
 
 from auto_ext.core.errors import ConfigError
-from auto_ext.core.env import substitute_env
+from auto_ext.core.runner import resolve_dspf_path
 
 
 _CUSTOM_LABEL = "Custom..."
@@ -75,37 +75,29 @@ def resolve_dspf_template(
 ) -> tuple[str, str | None]:
     """Resolve a ``dspf_out_path`` template for preview.
 
-    Mirrors the runner's two-phase substitution
-    (env / path-token then ``str.format``) but tolerates missing
-    references and reports them via the second tuple slot rather than
-    raising — so the GUI preview never explodes on a half-typed value.
+    Thin wrapper over :func:`auto_ext.core.runner.resolve_dspf_path`
+    that supplies GUI-friendly placeholder defaults. The shared helper
+    mirrors the runner's two-phase substitution (env / path-token then
+    ``str.format``) but tolerates missing references and reports them
+    via the second tuple slot rather than raising — so the GUI
+    preview never explodes on a half-typed value.
 
     Returns ``(preview_text, error_msg_or_None)``. On success
-    ``preview_text`` is the fully-resolved path. On failure
-    ``preview_text`` echoes the original template (so the user sees what
-    they typed) and ``error_msg_or_None`` carries the ``unresolved: $X``
-    or ``unknown format key`` reason for display.
+    ``preview_text`` is the fully-resolved path. On unresolved env
+    refs (``${X}`` / ``$env(X)`` / bare ``$X``) the second slot
+    carries ``unresolved: $X[, $Y]`` so the combo can flag the field
+    inline; ``preview_text`` still went through .format so other
+    tokens are filled in. On a truly unknown ``{X}`` format key (no
+    ``$`` prefix) the second slot carries the ``unknown format key``
+    message instead.
     """
-    if not template:
-        return "", "empty"
-    after_env = substitute_env(template, extended_env)
-    # Detect unresolved env references (substitute_env passes them
-    # through as ``${X}`` / ``$X`` / ``$env(X)``).
-    unresolved: list[str] = []
-    for marker in ("${", "$env("):
-        if marker in after_env:
-            unresolved.append(marker.rstrip("("))
-    # Bare `$IDENT`: hard to reliably detect without re-running the
-    # regex, but the brace and tcl forms cover the common GUI cases.
-    try:
-        resolved = after_env.format(cell=cell, library=library, task_id=task_id)
-    except KeyError as exc:
-        return after_env, f"unknown format key {{{exc.args[0]}}}"
-    except (IndexError, ValueError) as exc:
-        return after_env, f"format error: {exc}"
-    if unresolved:
-        return resolved, f"unresolved: {', '.join(unresolved)}"
-    return resolved, None
+    return resolve_dspf_path(
+        template,
+        extended_env,
+        cell=cell,
+        library=library,
+        task_id=task_id,
+    )
 
 
 class DspfOutPathCombo(QWidget):

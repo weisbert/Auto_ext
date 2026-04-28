@@ -668,6 +668,54 @@ def test_build_context_dspf_out_path_unknown_env_passthrough(project_config) -> 
     assert ctx["dspf_out_path"] == "/wkr2/${UNDEFINED_X}/c.dspf"
 
 
+def test_resolve_dspf_out_path_raises_on_unknown_format_key(project_config) -> None:
+    """A ``{foo}`` literal with no ``$`` prefix is a real
+    misconfiguration: the runner must still raise ConfigError so
+    runtime is fail-fast, not silently emit a half-rendered path.
+    """
+    from auto_ext.core.runner import _build_context
+    from auto_ext.core.errors import ConfigError
+
+    project_config.dspf_out_path = "/abs/{cell}/{foo}.dspf"
+    task = _make_dspf_task(cell="c")
+    with pytest.raises(ConfigError, match="unknown format key 'foo'"):
+        _build_context(
+            project_config, task,
+            resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
+        )
+
+
+def test_resolve_dspf_path_helper_returns_tuple_for_gui() -> None:
+    """The shared :func:`resolve_dspf_path` helper exposes a
+    ``(text, error_or_None)`` tuple that both the runner wrapper and
+    the GUI wrapper consume. Smoke-test the three error classes.
+    """
+    from auto_ext.core.runner import resolve_dspf_path
+
+    # Happy path.
+    t, e = resolve_dspf_path(
+        "${WK}/{cell}.dspf", {"WK": "/w"}, cell="c", library="L", task_id="T"
+    )
+    assert (t, e) == ("/w/c.dspf", None)
+    # Unresolved env (brace form).
+    t, e = resolve_dspf_path(
+        "${WK}/{cell}.dspf", {}, cell="c", library="L", task_id="T"
+    )
+    assert t == "${WK}/c.dspf"
+    assert e and e.startswith("unresolved:")
+    # Bare ``$X`` form too.
+    t, e = resolve_dspf_path(
+        "$WK/{cell}.dspf", {}, cell="c", library="L", task_id="T"
+    )
+    assert t == "$WK/c.dspf"
+    assert e and "unresolved" in e and "$WK" in e
+    # Truly unknown format key.
+    _, e = resolve_dspf_path(
+        "/abs/{foo}.dspf", {}, cell="c", library="L", task_id="T"
+    )
+    assert e and "unknown format key" in e and "foo" in e
+
+
 def test_discover_env_vars_includes_dspf_out_path(project_tools_config: Path) -> None:
     """Custom env refs in dspf_out_path (project + per-task) surface in
     the discovered set so check-env catches missing ones up-front."""

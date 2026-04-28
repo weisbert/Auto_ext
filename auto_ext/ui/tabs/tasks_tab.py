@@ -15,6 +15,7 @@ any matching entry.
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -513,13 +514,19 @@ class TasksTab(QWidget):
     def _refresh_dspf_default_hint(self) -> None:
         """Sync the dspf combo's ``(default: <X>)`` sentinel to the
         project layer's current value. Called on populate + after a
-        spec mutation so the sentinel stays accurate."""
+        spec mutation so the sentinel stays accurate. If the project
+        layer's template fails to resolve (e.g. an env var that's set
+        in neither shell nor overrides) the hint surfaces the inline
+        ``unresolved: $X`` annotation so the user spots it without
+        having to dig into the project tab."""
         project = self._controller.project
         if project is None:
             self._dspf_combo.set_default_hint(None, "<no project>")
             return
         template = project.dspf_out_path
-        preview, _ = self._resolve_dspf_for_preview(template)
+        preview, error = self._resolve_dspf_for_preview(template)
+        if error:
+            preview = f"{preview}  ({error})"
         self._dspf_combo.set_default_hint(template, preview)
 
     def _build_extended_env_for_preview(self) -> dict[str, str]:
@@ -527,12 +534,16 @@ class TasksTab(QWidget):
         imported across tabs to keep tabs.tasks free of project_tab
         coupling. The duplication is small and the logic is
         intentionally tab-local: each tab's preview uses its own
-        controller / context."""
+        controller / context. Shell env is merged in first then YAML
+        overrides win on collision, matching
+        :func:`auto_ext.core.env.resolve_env` precedence so the GUI
+        preview sees the same vars the runner does."""
         controller = self._controller
         project = controller.project
-        effective = controller.effective_env_overrides()
+        effective: dict[str, str] = dict(os.environ)
+        effective.update(controller.effective_env_overrides())
         if project is None:
-            return dict(effective)
+            return effective
         ctx_so_far: dict[str, object] = {}
         spec = self._current_spec()
         # Use the spec's first axis values for sample {cell}/{library} —

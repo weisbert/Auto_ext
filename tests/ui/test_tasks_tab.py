@@ -712,3 +712,151 @@ def test_dspf_combo_preview_reflects_per_task_value_when_set(
     assert spec["dspf_out_path"] == "/over/{cell}.dspf"
     preview2 = tab._dspf_combo._preview_label.text()
     assert "/over/A.dspf" in preview2
+
+
+def _shell_only_dspf_tasks_config(tmp_path: Path) -> Path:
+    """Tasks-tab fixture with NO YAML env_overrides for ``WORK_ROOT2`` —
+    so the only path to a resolved preview is via ``os.environ``.
+    """
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text(
+        'dspf_out_path: "${WORK_ROOT2}/{cell}.dspf"\n',
+        encoding="utf-8",
+    )
+    (d / "tasks.yaml").write_text(
+        "- library: L\n  cell: A\n  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_dspf_preview_resolves_from_shell_env_when_not_in_overrides(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """Bug 1 regression: shell-only ``WORK_ROOT2`` must reach the
+    tasks-tab preview env (matches the runner, which sees shell vars
+    via ``resolve_env``)."""
+    monkeypatch.setenv("WORK_ROOT2", "/shell/wkr2")
+    cfg = _shell_only_dspf_tasks_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    extended = tab._build_extended_env_for_preview()
+    assert extended.get("WORK_ROOT2") == "/shell/wkr2"
+    label0 = tab._dspf_combo._combo.itemText(0)
+    assert "/shell/wkr2/A.dspf" in label0
+
+
+def test_dspf_preview_unresolved_shows_friendly_hint(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """Bug 2 regression: missing ``WORK_ROOT2`` surfaces as
+    ``unresolved: $WORK_ROOT2``, not the misleading
+    ``unknown format key {WORK_ROOT2}``."""
+    monkeypatch.delenv("WORK_ROOT2", raising=False)
+    cfg = _shell_only_dspf_tasks_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    label0 = tab._dspf_combo._combo.itemText(0)
+    assert "unresolved" in label0
+    assert "$WORK_ROOT2" in label0
+    assert "unknown format key" not in label0
+
+
+def test_dspf_preview_yaml_override_wins_over_shell(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """YAML overrides win over shell on collision, mirroring
+    ``resolve_env`` precedence."""
+    monkeypatch.setenv("WORK_ROOT2", "/from/shell")
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text(
+        "env_overrides:\n  WORK_ROOT2: /from/yaml\n"
+        'dspf_out_path: "${WORK_ROOT2}/{cell}.dspf"\n',
+        encoding="utf-8",
+    )
+    (d / "tasks.yaml").write_text(
+        "- library: L\n  cell: A\n  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, d)
+    extended = tab._build_extended_env_for_preview()
+    assert extended.get("WORK_ROOT2") == "/from/yaml"
+    label0 = tab._dspf_combo._combo.itemText(0)
+    assert "/from/yaml/A.dspf" in label0
+    assert "/from/shell" not in label0
+
+
+def test_resolve_dspf_template_returns_unresolved_for_missing_env() -> None:
+    """Direct unit test for ``resolve_dspf_template``: an env var that
+    isn't in the env dict yields ``("...", "unresolved: ...")`` instead
+    of the prior ``unknown format key`` confusion (the brace-form
+    ``${X}`` would otherwise reach str.format and raise KeyError).
+    """
+    from auto_ext.ui.widgets.dspf_out_path_combo import resolve_dspf_template
+
+    text, err = resolve_dspf_template(
+        "${WORK_ROOT2}/{cell}.dspf",
+        {},  # empty env — nothing resolves
+        cell="myCell",
+        library="L",
+        task_id="T",
+    )
+    # Brace-form survives substitute_env, gets escaped before .format
+    # so the literal ``${WORK_ROOT2}`` is preserved verbatim.
+    assert text == "${WORK_ROOT2}/myCell.dspf"
+    assert err is not None
+    assert "unresolved" in err
+    assert "unknown format key" not in err
+
+
+def test_resolve_dspf_template_detects_bare_dollar_ident() -> None:
+    """Bare ``$X`` (no braces) should also surface as unresolved."""
+    from auto_ext.ui.widgets.dspf_out_path_combo import resolve_dspf_template
+
+    text, err = resolve_dspf_template(
+        "$WORK_ROOT2/{cell}.dspf",
+        {},
+        cell="c",
+        library="L",
+        task_id="T",
+    )
+    assert text == "$WORK_ROOT2/c.dspf"
+    assert err is not None
+    assert "unresolved" in err
+    assert "$WORK_ROOT2" in err
+
+
+def test_resolve_dspf_template_unknown_format_key_distinct() -> None:
+    """A ``{foo}`` literal with no ``$`` prefix is a real
+    misconfiguration and produces the ``unknown format key`` message,
+    NOT the unresolved-env message."""
+    from auto_ext.ui.widgets.dspf_out_path_combo import resolve_dspf_template
+
+    _, err = resolve_dspf_template(
+        "/abs/{foo}.dspf",
+        {},
+        cell="c",
+        library="L",
+        task_id="T",
+    )
+    assert err is not None
+    assert "unknown format key" in err
+    assert "foo" in err
+
+
+def test_runner_resolve_dspf_path_unresolved_passes_through() -> None:
+    """The runner-side helper preserves the legacy ``${UNDEFINED}``
+    pass-through behaviour for unresolved env vars (it's only the
+    GUI wrapper that surfaces them as a warning).
+    """
+    from auto_ext.core.runner import resolve_dspf_path
+
+    text, err = resolve_dspf_path(
+        "${WORK_ROOT2}/{cell}.dspf",
+        {},
+        cell="c",
+        library="L",
+        task_id="T",
+    )
+    assert text == "${WORK_ROOT2}/c.dspf"
+    assert err is not None and err.startswith("unresolved:")

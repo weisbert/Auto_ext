@@ -642,6 +642,88 @@ def test_dspf_combo_autosaves_when_enabled(
     assert controller.project.dspf_out_path == "${output_dir}/{cell}.dspf"
 
 
+def _shell_only_dspf_config(tmp_path: Path) -> Path:
+    """Config with NO YAML env_overrides for WORK_ROOT2 — so the only
+    way the dspf_out_path preview can resolve ``${WORK_ROOT2}`` is by
+    picking it up from ``os.environ``. Used by the bug-1 regression
+    tests below.
+    """
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text(
+        "tech_name: HN001\n"
+        'dspf_out_path: "${WORK_ROOT2}/{cell}.dspf"\n',
+        encoding="utf-8",
+    )
+    (d / "tasks.yaml").write_text(
+        "- library: L\n  cell: c1\n  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_dspf_preview_resolves_from_shell_env_when_not_in_overrides(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """Bug 1 regression: shell-only ``WORK_ROOT2`` must reach the
+    preview env so the combo resolves the real path instead of leaving
+    the literal ``${WORK_ROOT2}`` behind.
+    """
+    monkeypatch.setenv("WORK_ROOT2", "/shell/wkr2")
+    cfg = _shell_only_dspf_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    extended = tab._build_extended_env_for_preview()
+    assert extended.get("WORK_ROOT2") == "/shell/wkr2"
+    body = tab._dspf_combo._preview_label.text().replace("→ ", "", 1)
+    assert "/shell/wkr2/c1.dspf" in body
+    assert "${" not in body
+    assert "unknown format key" not in body
+
+
+def test_dspf_preview_unresolved_shows_friendly_hint(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """Bug 2 regression: when ``${WORK_ROOT2}`` is in neither the
+    overrides nor the shell, the preview must surface
+    ``unresolved: $WORK_ROOT2`` rather than the misleading
+    ``unknown format key {WORK_ROOT2}``.
+    """
+    monkeypatch.delenv("WORK_ROOT2", raising=False)
+    cfg = _shell_only_dspf_config(tmp_path)
+    tab, _ = _make_tab(qtbot, cfg)
+    text = tab._dspf_combo._preview_label.text()
+    assert "unresolved" in text
+    assert "$WORK_ROOT2" in text
+    assert "unknown format key" not in text
+
+
+def test_dspf_preview_yaml_override_wins_over_shell(
+    qtbot, tmp_path: Path, monkeypatch
+) -> None:
+    """When both shell and YAML overrides set the same var, YAML wins
+    (matches ``resolve_env`` precedence in :mod:`auto_ext.core.env`).
+    """
+    monkeypatch.setenv("WORK_ROOT2", "/from/shell")
+    d = tmp_path / "config"
+    d.mkdir()
+    (d / "project.yaml").write_text(
+        "tech_name: HN001\n"
+        "env_overrides:\n  WORK_ROOT2: /from/yaml\n"
+        'dspf_out_path: "${WORK_ROOT2}/{cell}.dspf"\n',
+        encoding="utf-8",
+    )
+    (d / "tasks.yaml").write_text(
+        "- library: L\n  cell: c1\n  lvs_layout_view: layout\n",
+        encoding="utf-8",
+    )
+    tab, _ = _make_tab(qtbot, d)
+    extended = tab._build_extended_env_for_preview()
+    assert extended.get("WORK_ROOT2") == "/from/yaml"
+    body = tab._dspf_combo._preview_label.text().replace("→ ", "", 1)
+    assert "/from/yaml/c1.dspf" in body
+    assert "/from/shell" not in body
+
+
 def test_placeholder_updates_after_env_override(
     qtbot, project_tools_config: Path, monkeypatch
 ) -> None:

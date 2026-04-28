@@ -671,16 +671,24 @@ class ProjectTab(QWidget):
 
         Mirrors the runner's ``_build_path_token_env`` extension by
         layering resolved ``project.paths.*`` entries and a synthesised
-        ``output_dir`` / ``intermediate_dir`` on top of effective env
-        overrides. Errors during ``paths.*`` resolution are swallowed
-        (the field is preview-only — surfacing the error inline keeps
-        the combo usable while the user fixes the misconfiguration).
+        ``output_dir`` / ``intermediate_dir`` on top of the
+        shell-env-merged-with-overrides view. Shell env is included
+        first then YAML overrides win on collision — matching
+        :func:`auto_ext.core.env.resolve_env`'s precedence so the
+        preview sees the same env vars the runner would see.
+        Errors during ``paths.*`` resolution are swallowed (the field
+        is preview-only — surfacing the error inline keeps the combo
+        usable while the user fixes the misconfiguration).
         """
         controller = self._controller
         project = controller.project
-        effective = controller.effective_env_overrides()
+        # Merge shell env (PDK setup typically exports things like
+        # WORK_ROOT2 here) with YAML overrides; overrides win on
+        # collision, matching ``resolve_env`` precedence.
+        effective: dict[str, str] = dict(os.environ)
+        effective.update(controller.effective_env_overrides())
         if project is None:
-            return dict(effective)
+            return effective
         # Resolve env then layer in path tokens. This is preview only
         # so we tolerate missing resolutions silently — the combo will
         # render the unresolved literal which is then flagged inline.

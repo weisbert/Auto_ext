@@ -654,39 +654,67 @@ _DSPF_FORMAT_KEYS: frozenset[str] = frozenset({"cell", "library", "task_id"})
 # format-spec slots like ``{cell:>20}``.
 _DSPF_BRACE_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
+# Detect surviving env references after :func:`substitute_env` to
+# build the ``unresolved: $X[, $Y]`` annotation. Patterns mirror
+# :mod:`auto_ext.core.env`'s ``_RE_ENV_BRACE`` / ``_RE_ENV_TCL`` /
+# ``_RE_ENV_BARE`` but we duplicate them here so this helper stays
+# self-contained (``env.py`` keeps those names private).
+_DSPF_UNRESOLVED_BRACE = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_DSPF_UNRESOLVED_TCL = re.compile(r"(?<!\$)\$env\(([A-Za-z_][A-Za-z0-9_]*)\)")
+_DSPF_UNRESOLVED_BARE = re.compile(
+    r"(?<!\$)\$(?!env\()([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_])"
+)
 
-def _resolve_dspf_out_path(
-    project: ProjectConfig,
-    task: TaskConfig,
-    resolved_env: dict[str, str],
-    ctx_so_far: dict[str, Any],
-) -> str:
-    """Resolve ``dspf_out_path`` (per-task override > project default).
 
-    Two-phase substitution:
-      1. :func:`substitute_env` against an extended env dict that
-         includes the already-resolved path-context values, so
-         ``${output_dir}`` / ``${intermediate_dir}`` / ``${calibre_lvs_dir}``
-         and any ``project.paths.*`` key resolve in addition to plain
-         env vars.
-      2. ``str.format(cell=..., library=..., task_id=...)`` so
-         ``{cell}`` / ``{library}`` / ``{task_id}`` are substituted.
+def resolve_dspf_path(
+    raw: str,
+    extended_env: dict[str, str],
+    *,
+    cell: str,
+    library: str,
+    task_id: str,
+) -> tuple[str, str | None]:
+    """Two-phase resolve a ``dspf_out_path`` template — shared by runner + GUI.
 
-    Unknown ``${X}`` references pass through unchanged (matches
-    :func:`substitute_env` semantics) — including the literal braces,
-    so a leftover ``${UNDEFINED}`` does not poison the subsequent
-    ``str.format`` step (its ``{UNDEFINED}`` would otherwise raise
-    KeyError). Other unknown ``{X}`` literals (e.g. ``{foo}`` with no
-    ``$`` prefix) raise :class:`ConfigError` to mirror
-    :func:`_resolve_output_dir`.
+    Step 1: :func:`substitute_env` against ``extended_env`` (which
+    callers compose by layering path tokens / project paths on top of
+    ``resolved_env``).
+
+    Step 2: pre-escape unresolved ``${X}`` brace pairs so they don't
+    poison ``str.format``; then format with ``cell`` / ``library`` /
+    ``task_id``.
+
+    Returns ``(text, error_msg_or_None)``:
+
+    - On full success: ``(resolved_path, None)``.
+    - When some env reference (``${X}``, ``$env(X)``, or bare ``$X``)
+      is unresolved: ``(best_effort_path, "unresolved: $X[, $Y]")``.
+      ``text`` still went through .format (so format keys resolve
+      around the literal ``$X``).
+    - When a truly unknown ``{X}`` format key (no ``$`` prefix) is
+      present: ``(safe_template_after_escape, "unknown format key {X}")``.
+
+    Callers that need fail-fast behaviour (the runner) wrap this and
+    raise :class:`ConfigError` on either error class. The GUI surfaces
+    both inline in the preview label.
     """
-    raw = task.dspf_out_path or project.dspf_out_path
-    extended_env = _build_path_token_env(resolved_env, ctx_so_far)
+    if not raw:
+        return "", "empty"
+
     after_env = substitute_env(raw, extended_env)
 
-    # Pre-escape unresolved ``${X}`` so the leftover ``{X}`` is not
-    # interpreted by str.format. Any other unknown ``{X}`` (no ``$``
-    # prefix) is a misconfiguration and surfaces as ConfigError below.
+    # Collect each surviving env-reference identifier; deduplicate so
+    # ``${X}/$X/$env(X)`` produces a single ``$X`` annotation. Order is
+    # stable (sorted) for predictable error messages in tests.
+    unresolved_names: set[str] = set()
+    for pat in (
+        _DSPF_UNRESOLVED_BRACE,
+        _DSPF_UNRESOLVED_TCL,
+        _DSPF_UNRESOLVED_BARE,
+    ):
+        unresolved_names.update(pat.findall(after_env))
+    unresolved = [f"${n}" for n in sorted(unresolved_names)]
+
     def _escape_unknown(m: re.Match[str]) -> str:
         name = m.group(1)
         if name in _DSPF_FORMAT_KEYS:
@@ -702,16 +730,52 @@ def _resolve_dspf_out_path(
     safe = _DSPF_BRACE_PATTERN.sub(_escape_unknown, after_env)
 
     try:
-        return safe.format(
-            cell=task.cell,
-            library=task.library,
-            task_id=task.task_id,
-        )
+        formatted = safe.format(cell=cell, library=library, task_id=task_id)
     except KeyError as exc:
+        return safe, f"unknown format key {{{exc.args[0]}}}"
+    except (IndexError, ValueError) as exc:
+        return safe, f"format error: {exc}"
+
+    if unresolved:
+        return formatted, f"unresolved: {', '.join(unresolved)}"
+    return formatted, None
+
+
+def _resolve_dspf_out_path(
+    project: ProjectConfig,
+    task: TaskConfig,
+    resolved_env: dict[str, str],
+    ctx_so_far: dict[str, Any],
+) -> str:
+    """Resolve ``dspf_out_path`` (per-task override > project default).
+
+    Thin wrapper over :func:`resolve_dspf_path`. Unresolved ``${X}`` /
+    ``$env(X)`` / bare ``$X`` references pass through verbatim
+    (matches :func:`substitute_env` semantics — by the time we get
+    here, ``_discover_env_vars`` + ``resolve_env.require()`` would
+    have already raised on truly missing vars). Only an unknown
+    ``{X}`` format key (no ``$`` prefix) raises :class:`ConfigError`.
+    """
+    raw = task.dspf_out_path or project.dspf_out_path
+    extended_env = _build_path_token_env(resolved_env, ctx_so_far)
+    text, error = resolve_dspf_path(
+        raw,
+        extended_env,
+        cell=task.cell,
+        library=task.library,
+        task_id=task.task_id,
+    )
+    if error is None or error.startswith("unresolved:"):
+        return text
+    if error.startswith("unknown format key"):
+        # Mirror the previous wording for backwards-compatible test
+        # assertions: "uses unknown format key 'X'; supported: ...".
+        key = error.removeprefix("unknown format key {").rstrip("}")
         raise ConfigError(
-            f"dspf_out_path uses unknown format key {exc.args[0]!r}; "
+            f"dspf_out_path uses unknown format key {key!r}; "
             "supported: cell, library, task_id"
-        ) from exc
+        )
+    raise ConfigError(f"dspf_out_path {error}")
 
 
 def _discover_env_vars(
