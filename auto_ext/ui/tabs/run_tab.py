@@ -32,7 +32,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import QPoint, Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QAction,
@@ -700,7 +700,14 @@ class RunTab(QWidget):
                 )
             menu.addAction(act_report)
 
-        menu.exec_(self._status_tree.viewport().mapToGlobal(pos))
+        # X11 delivers the QContextMenuEvent on right-button *press*, so
+        # exec_()ing the menu synchronously pops it up while the button is
+        # still held — the following button-release event then dismisses
+        # it, forcing the user to right-click twice. Defer the popup to the
+        # next event-loop tick so the press/release pair completes first.
+        # (No-op cost on Windows, where the event fires on release anyway.)
+        global_pos = self._status_tree.viewport().mapToGlobal(pos)
+        QTimer.singleShot(0, lambda: menu.exec_(global_pos))
 
     def _open_path(self, path: Path) -> None:
         """Wrapper around :func:`open_in_os` that surfaces failures via

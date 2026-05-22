@@ -799,8 +799,140 @@ def open_for_save_as_new(
     return CloneTemplateDialog(source_path, dest_path, parent=parent)
 
 
+# ---- In-place template edit (right-click "Edit...") ------------------------
+
+
+class EditTemplateDialog(QDialog):
+    """Single-pane in-place editor for an existing template file.
+
+    Opened from the Templates-tab right-click "Edit..." action. The
+    editable pane shows the template's current text with Jinja syntax
+    highlighting; Save writes it straight back to ``target_path``.
+
+    Unlike :class:`CloneTemplateDialog` there is no read-only source
+    pane — the user is editing the file itself, not authoring a copy,
+    so a reference diff against an identical file would be noise. The
+    manifest sidecar is deliberately left untouched (knobs are edited
+    via the Templates tab's Knobs sub-tab).
+    """
+
+    def __init__(
+        self, target_path: Path, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit template - {target_path.name}")
+        self.setModal(True)
+        self.resize(900, 700)
+
+        self._target_path = target_path
+        try:
+            self._initial_text = target_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            self._initial_text = ""
+        self._saved = False
+
+        self._build_ui()
+
+    # ---- UI ---------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+
+        header = QLabel(f"Editing: <code>{self._target_path}</code>", self)
+        header.setTextFormat(Qt.RichText)
+        header.setStyleSheet("color: #444;")
+        header.setWordWrap(True)
+        root.addWidget(header)
+
+        self._editor = QPlainTextEdit(self)
+        self._editor.setFont(_mono_font())
+        self._editor.setPlainText(self._initial_text)
+        self._highlighter = JinjaHighlighter(self._editor.document())
+        root.addWidget(self._editor, 1)
+
+        hint = QLabel(
+            "Saving overwrites the file in place. The manifest sidecar "
+            "is not touched — edit knobs via the Knobs tab.",
+            self,
+        )
+        hint.setStyleSheet("color: #666; font-size: 11px;")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        self._save_btn = QPushButton("Save", self)
+        self._save_btn.clicked.connect(self._on_save)
+        self._save_btn.setDefault(True)
+        self._cancel_btn = QPushButton("Cancel", self)
+        self._cancel_btn.clicked.connect(self.reject)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self._save_btn)
+        btn_row.addWidget(self._cancel_btn)
+        root.addLayout(btn_row)
+
+    # ---- slots ------------------------------------------------------------
+
+    def _has_unsaved_edits(self) -> bool:
+        return self._editor.toPlainText() != self._initial_text
+
+    def _on_save(self) -> None:
+        text = self._editor.toPlainText()
+        try:
+            self._target_path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Save failed",
+                f"Writing {self._target_path} failed: {exc}",
+            )
+            return
+        self._initial_text = text
+        self._saved = True
+        self.accept()
+
+    def reject(self) -> None:
+        # Guard against losing edits to a stray Cancel / window-close.
+        if self._has_unsaved_edits():
+            choice = QMessageBox.question(
+                self, "Discard changes?",
+                "The template has unsaved edits. Discard them?",
+                QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if choice != QMessageBox.Discard:
+                return
+        super().reject()
+
+    # ---- public accessors -------------------------------------------------
+
+    @property
+    def saved(self) -> bool:
+        """``True`` iff Save was clicked and the write succeeded."""
+        return self._saved
+
+    @property
+    def target_path(self) -> Path:
+        return self._target_path
+
+    # Programmatic helper for tests: simulate a user edit.
+    def set_text_for_tests(self, text: str) -> None:
+        self._editor.setPlainText(text)
+
+
+def open_for_edit(
+    target_path: Path, parent: QWidget | None = None
+) -> EditTemplateDialog:
+    """Construct an :class:`EditTemplateDialog` ready to be ``exec_()``ed.
+
+    Public entry point for the Templates-tab right-click "Edit..."
+    action — in-place editing of an existing ``.j2`` file.
+    """
+    return EditTemplateDialog(target_path, parent=parent)
+
+
 __all__ = [
     "CloneTemplateDialog",
     "DiffEditorDialog",
+    "EditTemplateDialog",
+    "open_for_edit",
     "open_for_save_as_new",
 ]

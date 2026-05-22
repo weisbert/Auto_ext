@@ -393,12 +393,32 @@ class TemplatesTab(QWidget):
             workarea=self._controller.workarea,
         )
 
+    def _render_context_keys(self) -> frozenset[str]:
+        """Jinja variables the runner injects beyond the identity keys.
+
+        :func:`auto_ext.core.runner._build_context` resolves every
+        ``project.paths.*`` entry into the render context under its own
+        key, and auto-derives ``calibre_lvs_basename`` from
+        ``calibre_lvs_dir`` when the latter is configured. These bind
+        cleanly at render time, so the Inventory viewer must not paint
+        them ``missing`` just because they aren't identity keys or
+        declared manifest knobs.
+        """
+        project = self._controller.project
+        if project is None:
+            return frozenset()
+        keys = set(project.paths.keys())
+        if "calibre_lvs_dir" in project.paths:
+            keys.add("calibre_lvs_basename")
+        return frozenset(keys)
+
     def _populate_inventory_table(
         self,
         inventory: PlaceholderInventory,
         manifest: TemplateManifest | None,
     ) -> None:
         project = self._controller.project
+        context_keys = self._render_context_keys()
         resolution = None
         if project is not None and inventory.env_vars:
             try:
@@ -423,7 +443,11 @@ class TemplatesTab(QWidget):
         for name in sorted(inventory.user_defined):
             rows.append(("user_defined", name, user_defined_status(name)))
         for name in sorted(inventory.jinja_variables):
-            rows.append(("jinja", name, jinja_variable_status(name, manifest)))
+            rows.append((
+                "jinja",
+                name,
+                jinja_variable_status(name, manifest, context_keys=context_keys),
+            ))
 
         self._inventory_table.setRowCount(len(rows))
         if not rows:
@@ -641,6 +665,10 @@ class TemplatesTab(QWidget):
     def _on_template_list_context_menu(self, pos: QPoint) -> None:
         """Build the right-click menu on a template list row.
 
+        - **Edit...** — open the in-place editor on the row's
+          template and write edits straight back to the file.
+          Disabled (with tooltip) when the resolved path isn't on
+          disk.
         - **Copy...** — clone the row's template (.j2 + manifest)
           under a new suffix and open the side-by-side editor.
           Disabled (with tooltip) when the resolved path isn't on
@@ -672,6 +700,20 @@ class TemplatesTab(QWidget):
 
         menu = QMenu(self._list)
 
+        edit_action = QAction("Edit...", menu)
+        if resolved is None or not resolved.is_file():
+            edit_action.setEnabled(False)
+            edit_action.setToolTip(
+                "Source file not on disk (resolve project.templates "
+                "first, or pick a discovered template)."
+            )
+        else:
+            edit_action.setToolTip(str(resolved))
+            edit_action.triggered.connect(
+                lambda _checked=False, p=resolved: self._invoke_edit_template(p)
+            )
+        menu.addAction(edit_action)
+
         copy_action = QAction("Copy...", menu)
         if resolved is None or not resolved.is_file():
             copy_action.setEnabled(False)
@@ -699,7 +741,13 @@ class TemplatesTab(QWidget):
             )
         menu.addAction(delete_action)
 
-        menu.exec_(self._list.viewport().mapToGlobal(pos))
+        # X11 delivers the QContextMenuEvent on right-button *press*, so a
+        # synchronous exec_() pops the menu up while the button is still
+        # down and the following release dismisses it — forcing a second
+        # right-click. Defer one event-loop tick so the press/release pair
+        # completes before the menu shows.
+        global_pos = self._list.viewport().mapToGlobal(pos)
+        QTimer.singleShot(0, lambda: menu.exec_(global_pos))
 
     def _delete_blocked_reason(
         self, entry: TemplateEntry, resolved: Path | None
@@ -726,6 +774,24 @@ class TemplatesTab(QWidget):
                 "from shared / external locations."
             )
         return None
+
+    def _invoke_edit_template(self, target: Path) -> None:
+        """Open the in-place template editor on ``target``.
+
+        Called from the list's right-click "Edit..." action with the
+        resolved on-disk path. After the dialog closes with a save, the
+        inventory / knobs panes are re-scanned in case the edit changed
+        the template's placeholder set.
+        """
+        # Lazy import — same reasoning as the other diff-editor entry points.
+        from auto_ext.ui.widgets.diff_editor import open_for_edit
+
+        dlg = open_for_edit(target, parent=self)
+        # Keep a reference so the modal dialog isn't GC'd mid-exec.
+        self._edit_template_dlg = dlg
+        dlg.exec_()
+        if dlg.saved:
+            self._refresh_timer.start()
 
     def _invoke_delete_template(self, target: Path) -> None:
         """Confirm + delete a template's .j2 plus manifest sidecar."""

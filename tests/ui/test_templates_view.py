@@ -120,6 +120,21 @@ def test_jinja_variable_undeclared_is_missing() -> None:
     assert jinja_variable_status("totally_unknown", manifest=manifest) == "missing"
 
 
+def test_jinja_variable_context_key_is_ok() -> None:
+    # project.paths.* keys are injected into the render context by
+    # runner._build_context — passing them as context_keys must flip the
+    # verdict from "missing" to "ok" (regression: the Inventory viewer
+    # used to falsely flag [[calibre_lvs_dir]] / [[qrc_deck_dir]] red).
+    ctx = frozenset({"calibre_lvs_dir", "qrc_deck_dir", "calibre_lvs_basename"})
+    assert jinja_variable_status("calibre_lvs_dir", None, context_keys=ctx) == "ok"
+    assert jinja_variable_status("qrc_deck_dir", None, context_keys=ctx) == "ok"
+    assert (
+        jinja_variable_status("calibre_lvs_basename", None, context_keys=ctx) == "ok"
+    )
+    # A name absent from every bucket is still missing.
+    assert jinja_variable_status("stray", None, context_keys=ctx) == "missing"
+
+
 def test_template_entry_is_frozen() -> None:
     entry = TemplateEntry(tool="si", path=Path("a.j2"), in_project=True)
     with pytest.raises(Exception):

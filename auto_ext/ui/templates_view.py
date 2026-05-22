@@ -141,11 +141,28 @@ def jinja_variable_status(
     name: str,
     manifest: TemplateManifest | None,
     identity_keys: frozenset[str] = _IDENTITY_KEYS,
+    context_keys: frozenset[str] = frozenset(),
 ) -> PlaceholderStatus:
-    """Classify a Jinja variable as ``ok`` (identity or declared knob)
-    or ``missing`` (StrictUndefined would fire at render time).
+    """Classify a Jinja variable as ``ok`` or ``missing``.
+
+    ``ok`` when the runner binds the variable at render time:
+
+    - an identity key (``cell`` / ``library`` / ``output_dir`` / …),
+    - a render-context key passed in via ``context_keys`` — these are
+      the ``project.paths.*`` entries (plus the auto-derived
+      ``calibre_lvs_basename``) that
+      :func:`auto_ext.core.runner._build_context` injects into the
+      Jinja context; without them a ``[[calibre_lvs_dir]]`` /
+      ``[[qrc_deck_dir]]`` reference would be wrongly flagged
+      ``missing`` even though the runner resolves it fine,
+    - a knob declared in the template's manifest sidecar.
+
+    ``missing`` otherwise — :class:`jinja2.StrictUndefined` would fire
+    at render time.
     """
     if name in identity_keys:
+        return "ok"
+    if name in context_keys:
         return "ok"
     if manifest is not None and name in manifest.knobs:
         return "ok"

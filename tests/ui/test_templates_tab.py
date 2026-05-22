@@ -183,6 +183,58 @@ def test_inventory_flags_undeclared_jinja_var_red(qtbot, tmp_path: Path) -> None
     assert statuses.get("OBSOLETE") == "info"
 
 
+def test_inventory_marks_project_paths_keys_ok(qtbot, tmp_path: Path) -> None:
+    """project.paths.* keys — and the auto-derived calibre_lvs_basename —
+    are injected into the render context by runner._build_context, so the
+    Inventory viewer must show them 'ok'.
+
+    Regression: jinja_variable_status only knew identity keys + manifest
+    knobs, so [[calibre_lvs_dir]] / [[calibre_lvs_basename]] /
+    [[qrc_deck_dir]] were wrongly painted 'missing' even though
+    extraction ran fine.
+    """
+    auto_ext_root = tmp_path / "Auto_ext"
+    config_dir = auto_ext_root / "config"
+    config_dir.mkdir(parents=True)
+    templates = auto_ext_root / "templates" / "calibre"
+    templates.mkdir(parents=True)
+    calibre_tpl = templates / "calibre_lvs.qci.j2"
+    calibre_tpl.write_text(
+        "*lvsRulesFile: [[calibre_lvs_dir]]/[[calibre_lvs_basename]]\n"
+        "*qrcDeck: [[qrc_deck_dir]]/deck\n"
+        "*cell: [[cell]]\n",
+        encoding="utf-8",
+    )
+    (config_dir / "project.yaml").write_text(
+        "templates:\n"
+        f"  calibre: {calibre_tpl}\n"
+        "paths:\n"
+        "  calibre_lvs_dir: /pdk/lvs/rules\n"
+        "  qrc_deck_dir: /pdk/qrc/deck\n",
+        encoding="utf-8",
+    )
+    (config_dir / "tasks.yaml").write_text(
+        "- library: L\n  cell: C\n  lvs_layout_view: layout\n", encoding="utf-8"
+    )
+    tab, _ = _make_tab(qtbot, config_dir, auto_ext_root)
+    for i in range(tab._list.count()):
+        if "[calibre]" in tab._list.item(i).text():
+            tab._list.setCurrentRow(i)
+            break
+    tab._refresh_inventory_and_knobs()
+
+    statuses: dict[str, str] = {}
+    for r in range(tab._inventory_table.rowCount()):
+        statuses[tab._inventory_table.item(r, 1).text()] = (
+            tab._inventory_table.item(r, 2).text()
+        )
+    assert statuses.get("calibre_lvs_dir") == "ok"
+    assert statuses.get("calibre_lvs_basename") == "ok"
+    assert statuses.get("qrc_deck_dir") == "ok"
+    # Sanity: a genuine identity key is still ok, nothing regressed.
+    assert statuses.get("cell") == "ok"
+
+
 def test_knobs_form_renders_default_hint_and_no_dirty(qtbot, tmp_path: Path) -> None:
     cfg, root = _scaffold_project(tmp_path)
     tab, controller = _make_tab(qtbot, cfg, root)

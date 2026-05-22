@@ -5,10 +5,11 @@ Two layers:
 * :class:`CloneTemplateDialog` smoke (constructs, save writes the
   right pane to disk).
 * :class:`TemplatesTab` integration: the list's right-click menu
-  exposes ``Copy...`` and ``Delete...``. Copy clones the .j2 +
-  manifest under a user-supplied suffix and refreshes Tasks-tab
-  combos. Delete removes both files after confirmation, blocked
-  when the template is bound or lives outside ``<auto_ext_root>/templates/``.
+  exposes ``Edit...``, ``Copy...`` and ``Delete...``. Edit opens the
+  in-place editor; Copy clones the .j2 + manifest under a
+  user-supplied suffix and refreshes Tasks-tab combos. Delete removes
+  both files after confirmation, blocked when the template is bound
+  or lives outside ``<auto_ext_root>/templates/``.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from auto_ext.ui.tabs.tasks_tab import TasksTab  # noqa: E402
 from auto_ext.ui.tabs.templates_tab import TemplatesTab  # noqa: E402
 from auto_ext.ui.widgets.diff_editor import (  # noqa: E402
     CloneTemplateDialog,
+    EditTemplateDialog,
+    open_for_edit,
     open_for_save_as_new,
 )
 
@@ -184,6 +187,54 @@ def test_open_for_save_as_new_factory(qtbot, tmp_path: Path) -> None:
     assert isinstance(dlg, CloneTemplateDialog)
 
 
+# ---- EditTemplateDialog (in-place edit) ----------------------------------
+
+
+def test_edit_dialog_loads_target_text(qtbot, tmp_path: Path) -> None:
+    target = tmp_path / "calibre_lvs.qci.j2"
+    target.write_text("*lvsConnectByName: 1\n", encoding="utf-8")
+
+    dlg = EditTemplateDialog(target)
+    qtbot.addWidget(dlg)
+    assert dlg._editor.isReadOnly() is False
+    assert dlg._editor.toPlainText() == "*lvsConnectByName: 1\n"
+    assert dlg.saved is False
+    assert dlg.target_path == target
+
+
+def test_edit_dialog_save_overwrites_file_in_place(qtbot, tmp_path: Path) -> None:
+    target = tmp_path / "calibre_lvs.qci.j2"
+    target.write_text("ORIGINAL\n", encoding="utf-8")
+
+    dlg = EditTemplateDialog(target)
+    qtbot.addWidget(dlg)
+    dlg.set_text_for_tests("EDITED [[cell]]\n")
+    dlg._on_save()  # bypass exec_()
+    assert dlg.saved is True
+    assert target.read_text(encoding="utf-8") == "EDITED [[cell]]\n"
+
+
+def test_edit_dialog_reject_without_edits_does_not_prompt(
+    qtbot, tmp_path: Path
+) -> None:
+    target = tmp_path / "t.qci.j2"
+    target.write_text("body\n", encoding="utf-8")
+    dlg = EditTemplateDialog(target)
+    qtbot.addWidget(dlg)
+    # No edits → reject() closes straight through, file untouched.
+    dlg.reject()
+    assert dlg.saved is False
+    assert target.read_text(encoding="utf-8") == "body\n"
+
+
+def test_open_for_edit_factory(qtbot, tmp_path: Path) -> None:
+    target = tmp_path / "t.qci.j2"
+    target.write_text("body\n", encoding="utf-8")
+    dlg = open_for_edit(target)
+    qtbot.addWidget(dlg)
+    assert isinstance(dlg, EditTemplateDialog)
+
+
 # ---- Templates tab right-click menu (Copy + Delete) ----------------------
 
 
@@ -205,10 +256,51 @@ def test_context_menu_has_copy_and_delete(
     captured = _capture_menu_actions(monkeypatch)
     pos = tab._list.visualItemRect(tab._list.item(row)).center()
     tab._on_template_list_context_menu(pos)
+    # The popup is deferred via QTimer.singleShot(0) (X11 press/release
+    # fix) — pump the loop so the patched exec_ records the menu.
+    qtbot.wait(10)
 
     actions = captured["actions"]
     texts = [a.text() for a in actions]
-    assert texts == ["Copy...", "Delete..."]
+    assert texts == ["Edit...", "Copy...", "Delete..."]
+
+
+def test_context_menu_edit_action_enabled_for_existing_template(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The right-click 'Edit...' entry is enabled when the template
+    resolves to a file on disk."""
+    cfg, root = _scaffold_project(tmp_path)
+    tab, _, _ = _make_tab(qtbot, cfg, root)
+    row = _select_row_with(tab, "[calibre]")
+
+    captured = _capture_menu_actions(monkeypatch)
+    pos = tab._list.visualItemRect(tab._list.item(row)).center()
+    tab._on_template_list_context_menu(pos)
+    qtbot.wait(10)
+
+    actions = captured["actions"]
+    edit_action = next(a for a in actions if a.text() == "Edit...")
+    assert edit_action.isEnabled() is True
+
+
+def test_edit_action_opens_in_place_editor(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Triggering 'Edit...' opens an :class:`EditTemplateDialog` on the
+    resolved template path."""
+    cfg, root = _scaffold_project(tmp_path)
+    tab, _, _ = _make_tab(qtbot, cfg, root)
+    _select_row_with(tab, "[calibre]")
+
+    monkeypatch.setattr(
+        "auto_ext.ui.widgets.diff_editor.EditTemplateDialog.exec_",
+        lambda self: None,
+    )
+    target = root / "templates" / "calibre" / "calibre_lvs.qci.j2"
+    tab._invoke_edit_template(target)
+    assert isinstance(tab._edit_template_dlg, EditTemplateDialog)
+    assert tab._edit_template_dlg.target_path == target
 
 
 def test_context_menu_no_op_on_empty_space(
@@ -348,6 +440,9 @@ def test_delete_action_disabled_for_bound_template(
     captured = _capture_menu_actions(monkeypatch)
     pos = tab._list.visualItemRect(tab._list.item(row)).center()
     tab._on_template_list_context_menu(pos)
+    # The popup is deferred via QTimer.singleShot(0) (X11 press/release
+    # fix) — pump the loop so the patched exec_ records the menu.
+    qtbot.wait(10)
 
     actions = captured["actions"]
     delete_action = next(a for a in actions if a.text() == "Delete...")
@@ -370,6 +465,9 @@ def test_delete_action_enabled_for_unbound_template(
     captured = _capture_menu_actions(monkeypatch)
     pos = tab._list.visualItemRect(tab._list.item(row)).center()
     tab._on_template_list_context_menu(pos)
+    # The popup is deferred via QTimer.singleShot(0) (X11 press/release
+    # fix) — pump the loop so the patched exec_ records the menu.
+    qtbot.wait(10)
 
     actions = captured["actions"]
     delete_action = next(a for a in actions if a.text() == "Delete...")

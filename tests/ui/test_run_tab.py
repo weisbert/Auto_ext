@@ -173,6 +173,10 @@ def test_phase59_bc_context_menu_on_stage_row(
         # Pos must lie inside the stage-row rect so itemAt(pos) returns it.
         pos = rect.center()
         tab._on_tree_context_menu(pos)
+        # The menu popup is deferred via QTimer.singleShot(0) (X11
+        # press/release fix); pump the event loop so the patched exec_
+        # runs before the finally restores the real one.
+        qtbot.wait(10)
     finally:
         run_tab_mod.QMenu.exec_ = real_qmenu_exec  # type: ignore[method-assign]
 
@@ -215,6 +219,7 @@ def test_phase59_bc_context_menu_disabled_when_file_missing(
         si_item = tab._stage_items[(task_id, "si")]
         pos = tab._status_tree.visualItemRect(si_item).center()
         tab._on_tree_context_menu(pos)
+        qtbot.wait(10)  # deferred popup — see note above
     finally:
         run_tab_mod.QMenu.exec_ = real_exec  # type: ignore[method-assign]
 
@@ -667,6 +672,7 @@ def test_feature3_view_log_file_disabled_when_log_missing(
         item = tab._stage_items[(task_id, "calibre")]
         pos = tab._status_tree.visualItemRect(item).center()
         tab._on_tree_context_menu(pos)
+        qtbot.wait(10)  # deferred popup — see note above
     finally:
         run_tab_mod.QMenu.exec_ = real_exec  # type: ignore[method-assign]
 
@@ -711,6 +717,7 @@ def test_feature3_view_log_file_opens_log_when_present(
         item = tab._stage_items[(task_id, "calibre")]
         pos = tab._status_tree.visualItemRect(item).center()
         tab._on_tree_context_menu(pos)
+        qtbot.wait(10)  # deferred popup — see note above
     finally:
         run_tab_mod.QMenu.exec_ = real_exec  # type: ignore[method-assign]
 
