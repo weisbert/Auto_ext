@@ -1,0 +1,688 @@
+{
+ "items": [
+  {
+   "key": "decoupling_factor",
+   "group": "extraction",
+   "type": "float",
+   "default": "1.0",
+   "range": "[0.0, 1.0]",
+   "lands_in": "quantus ext.cmd + dspf.cmd: capacitance -decoupling_factor",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "决定耦合电容按多大比例折算成对地电容，是 RC 精度/仿真速度的直接权衡旋钮，现在写死 1.0 用户改不了。"
+  },
+  {
+   "key": "ground_net",
+   "group": "extraction",
+   "type": "str",
+   "default": "gnd!",
+   "lands_in": "quantus ext.cmd + dspf.cmd: capacitance -ground_net",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "每个 DUT 的地网名不同，属于 Cells 表的一列，不进 Recipe。"
+  },
+  {
+   "key": "extract_selection",
+   "group": "extraction",
+   "type": "enum",
+   "default": "all",
+   "choices": [
+    "all",
+    "specified_nets",
+    "selected_nets"
+   ],
+   "lands_in": "quantus ext.cmd + dspf.cmd: extract -selection",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "控制全网提取还是只提指定网络，值得暴露；但 Quantus 除 all 外的合法字面量需要用户在办公室确认。"
+  },
+  {
+   "key": "extract_type",
+   "group": "extraction",
+   "type": "enum",
+   "default": "rc_coupled",
+   "choices": [
+    "rc_coupled",
+    "rc_decoupled",
+    "c_only",
+    "r_only",
+    "rcc",
+    "rlck"
+   ],
+   "lands_in": "quantus ext.cmd + dspf.cmd: extract -type",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "这是提取条件里最核心的一项（只提电容/只提电阻/带耦合 RC），RFIC 前期迭代常用 c_only 提速，现在写死；rcc/rlck 拼写需用户确认。"
+  },
+  {
+   "key": "array_vias_spacing",
+   "group": "extraction",
+   "type": "str",
+   "default": "auto",
+   "lands_in": "quantus ext.cmd + dspf.cmd: extraction_setup -array_vias_spacing",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "阵列过孔间距处理方式，影响大面积 via array 的建模精度与运行时间；除 auto 外是否可填数值需用户确认。"
+  },
+  {
+   "key": "max_fracture_length",
+   "group": "extraction",
+   "type": "str",
+   "default": "infinite",
+   "lands_in": "quantus ext.cmd + dspf.cmd: extraction_setup -max_fracture_length",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "长走线切段长度，直接决定分布式 RC 的段数和网表规模，射频长传输线场景需要调小；infinite 之外的取值形式需用户确认。"
+  },
+  {
+   "key": "max_fracture_length_unit",
+   "group": "extraction",
+   "type": "enum",
+   "default": "MICRONS",
+   "choices": [
+    "MICRONS",
+    "MILS",
+    "MILLIMETERS",
+    "DBU"
+   ],
+   "lands_in": "quantus ext.cmd + dspf.cmd: extraction_setup -max_fracture_length_unit",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "与 max_fracture_length 配套的单位，改了长度就得能改单位；完整合法单位表需用户确认。"
+  },
+  {
+   "key": "max_via_array_size",
+   "group": "extraction",
+   "type": "str",
+   "default": "auto",
+   "lands_in": "quantus ext.cmd + dspf.cmd: extraction_setup -max_via_array_size",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "过孔阵列合并上限，大电流/大面积 via 阵列会显著影响提取耗时；auto 外的取值形式需用户确认。"
+  },
+  {
+   "key": "preserve_cell_list_file",
+   "group": "extraction",
+   "type": "str",
+   "default": "[[qrc_deck_dir]]/preserveCellList.txt",
+   "lands_in": "quantus ext.cmd + dspf.cmd: extraction_setup -parasitic_blocking_device_cells_file",
+   "currently": "project_path",
+   "confidence": "certain",
+   "why": "这是 PDK 的 QRC deck 自带文件，归 PDK Profile 的 deck 目录条目，不该出现在 Recipe 里。"
+  },
+  {
+   "key": "extraction_net_name_space",
+   "group": "extraction",
+   "type": "enum",
+   "default": "SCHEMATIC",
+   "choices": [
+    "SCHEMATIC",
+    "LAYOUT"
+   ],
+   "lands_in": "quantus ext.cmd + dspf.cmd: extraction_setup -net_name_space",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "决定提取结果里的网络名跟原理图还是版图对齐，直接影响后仿真能否对上原理图网名，是典型该暴露的开关。"
+  },
+  {
+   "key": "exclude_self_cap",
+   "group": "extraction",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "quantus ext.cmd + dspf.cmd: filter_cap -exclude_self_cap",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "是否丢弃自电容，属于 filter_cap 三项过滤条件之一，另两项都能调唯独它写死，逻辑上不自洽。"
+  },
+  {
+   "key": "exclude_floating_nets",
+   "group": "extraction",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "quantus ext.cmd + dspf.cmd: filter_cap -exclude_floating_nets",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "floating nets 上限已经是 knob，但它的总开关反而写死，应该成对暴露（关掉时 limit 无意义）。"
+  },
+  {
+   "key": "exclude_floating_nets_limit",
+   "group": "extraction",
+   "type": "int",
+   "default": "5000",
+   "range": "[100, 100000]",
+   "lands_in": "quantus ext.cmd + dspf.cmd: filter_cap -exclude_floating_nets_limit",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "现有 5 个 knob 之一，Recipe 提取条件段直接继承，语义为丢弃的悬空网络数量上限。"
+  },
+  {
+   "key": "coupling_cap_threshold_absolute",
+   "group": "extraction",
+   "type": "float",
+   "default": "0.01",
+   "unit": "F",
+   "lands_in": "quantus ext.cmd + dspf.cmd: filter_coupling_cap -coupling_cap_threshold_absolute",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "现有 knob，耦合电容绝对阈值，是控制网表规模的主力旋钮，必须进 Recipe。"
+  },
+  {
+   "key": "coupling_cap_threshold_relative",
+   "group": "extraction",
+   "type": "float",
+   "default": "0.001",
+   "lands_in": "quantus ext.cmd + dspf.cmd: filter_coupling_cap -coupling_cap_threshold_relative",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "现有 knob，耦合电容相对阈值，与绝对阈值配套使用，必须进 Recipe。"
+  },
+  {
+   "key": "merge_parallel_res",
+   "group": "extraction",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "quantus ext.cmd + dspf.cmd: filter_res -merge_parallel_res",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "并联电阻合并开关，射频里为了保留电流分布有时需要关掉，现在写死。"
+  },
+  {
+   "key": "min_res",
+   "group": "extraction",
+   "type": "float",
+   "default": "0.001",
+   "unit": "ohm",
+   "lands_in": "quantus ext.cmd + dspf.cmd: filter_res -min_res",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "现有 knob，最小保留电阻，用户已经在目标模型的提取条件清单里点名要它。"
+  },
+  {
+   "key": "remove_dangling_res",
+   "group": "extraction",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "quantus ext.cmd + dspf.cmd: filter_res -remove_dangling_res",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "悬空电阻清理开关，与 merge_parallel_res 同属 filter_res 三件套，只有 min_res 能调不合理。"
+  },
+  {
+   "key": "input_db_type",
+   "group": "lvs",
+   "type": "enum",
+   "default": "calibre",
+   "choices": [
+    "calibre",
+    "assura",
+    "pvs",
+    "dfii",
+    "hercules"
+   ],
+   "lands_in": "quantus ext.cmd + dspf.cmd: input_db -type",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "决定 Quantus 读哪个 LVS 引擎产出的数据库，本流程固定 Calibre，但换 PVS/Assura 时必须能改；完整取值表需用户确认。"
+  },
+  {
+   "key": "design_cell_name",
+   "group": "lvs",
+   "type": "str",
+   "default": "[[cell]] [[lvs_layout_view]] [[library]]",
+   "lands_in": "quantus ext.cmd: input_db -design_cell_name（dspf.cmd 无此行）",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "cell/layout view/library 三元组来自 Cells 表，不该进 Recipe；顺带记录 dspf.cmd 缺这一行，两模板的 input_db 段并不同构。"
+  },
+  {
+   "key": "calibre_run_name",
+   "group": "lvs",
+   "type": "str",
+   "default": "Design",
+   "lands_in": "quantus ext.cmd + dspf.cmd: input_db -run_name",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "必须与 Calibre query 阶段产出的 Design.gds.map / Design.props / query_output 基名一致，改错就找不到输入；建议进 catalog 但默认锁定并与 temporary_directory_name 联动。"
+  },
+  {
+   "key": "device_property_value",
+   "group": "lvs",
+   "type": "int",
+   "default": "7",
+   "lands_in": "quantus ext.cmd + dspf.cmd: input_db -device_property_value",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "Calibre svdb 属性编号约定，改错会导致器件属性错位；是否随 deck 版本变化需要用户确认。"
+  },
+  {
+   "key": "instance_property_value",
+   "group": "lvs",
+   "type": "int",
+   "default": "6",
+   "lands_in": "quantus ext.cmd + dspf.cmd: input_db -instance_property_value",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "同 device_property_value，属于 Calibre 与 Quantus 之间的属性编号契约，需要用户确认是否会因 PDK 而异。"
+  },
+  {
+   "key": "net_property_value",
+   "group": "lvs",
+   "type": "int",
+   "default": "5",
+   "lands_in": "quantus ext.cmd + dspf.cmd: input_db -net_property_value",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "同上，网络属性编号，三个编号应作为一组暴露或一组锁进 PDK Profile，需要用户确认。"
+  },
+  {
+   "key": "input_db_format",
+   "group": "lvs",
+   "type": "enum",
+   "default": "DFII",
+   "choices": [
+    "DFII",
+    "GDSII",
+    "OASIS"
+   ],
+   "lands_in": "quantus ext.cmd: input_db -format（dspf.cmd 无此行）",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "版图数据来源格式，ext 流程写 DFII 而 dspf 流程整行缺失，这种不一致本身就说明它应该是显式配置项；合法取值需用户确认。"
+  },
+  {
+   "key": "input_db_hierarchy_delimiter",
+   "group": "netlist",
+   "type": "str",
+   "default": "/",
+   "lands_in": "quantus dspf.cmd: input_db -hierarchy_delimiter（ext.cmd 无此行）",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "读入层次名的分隔符，必须与 Calibre/si 侧一致，混用会导致层次名对不上。"
+  },
+  {
+   "key": "query_output_dir",
+   "group": "output",
+   "type": "str",
+   "default": "[[output_dir]]/query_output",
+   "lands_in": "quantus ext.cmd + dspf.cmd: input_db -directory_name 与 output_setup -directory_name",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "由 runner 从 output_dir 派生，属于 Run 的工作目录布局，不进 Recipe。"
+  },
+  {
+   "key": "layer_map_file",
+   "group": "lvs",
+   "type": "str",
+   "default": "[[output_dir]]/query_output/Design.gds.map",
+   "lands_in": "quantus ext.cmd + dspf.cmd: input_db -layer_map_file",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "由 output_dir 加固定文件名派生，属于运行目录产物路径，不进 Recipe（其中的 Design 前缀受 calibre_run_name 牵动）。"
+  },
+  {
+   "key": "device_properties_file",
+   "group": "lvs",
+   "type": "str",
+   "default": "[[output_dir]]/query_output/Design.props",
+   "lands_in": "quantus ext.cmd: input_db -device_properties_file（dspf.cmd 无此行）",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "同样是 output_dir 派生的运行产物路径，不进 Recipe。"
+  },
+  {
+   "key": "metal_fill_type",
+   "group": "extraction",
+   "type": "enum",
+   "default": "virtual",
+   "choices": [
+    "none",
+    "virtual",
+    "real"
+   ],
+   "lands_in": "quantus dspf.cmd: metal_fill -type（ext.cmd 整段缺失，等价于不做 metal fill 处理）",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "用户点名要的 metal fill 项，而且两个模板一个有一个没有——Recipe 必须能表达 none（不生成该段）/virtual/real 三态；real 之外是否还有取值需用户确认。"
+  },
+  {
+   "key": "output_form",
+   "group": "output",
+   "type": "enum",
+   "default": "extracted_view",
+   "choices": [
+    "extracted_view",
+    "dspf",
+    "spef",
+    "cdl",
+    "hspice",
+    "spectre"
+   ],
+   "lands_in": "quantus ext.cmd: output_db -type extracted_view / dspf.cmd: output_db -type dspf",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "这就是 Recipe「输出形式」字段本体：今天靠绑定 ext.cmd.j2 还是 dspf.cmd.j2 来选，删掉模板绑定槽后必须由它来决定生成哪一份（或两份都生成）；spef/cdl/hspice/spectre 的确切字面量需用户确认。"
+  },
+  {
+   "key": "dspf_subtype",
+   "group": "output",
+   "type": "enum",
+   "default": "extended",
+   "choices": [
+    "standard",
+    "extended",
+    "hierarchical"
+   ],
+   "lands_in": "quantus dspf.cmd: output_db -subtype",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "DSPF 的详略等级，直接决定寄生网表体积和后仿真速度；hierarchical 是否合法需用户确认。"
+  },
+  {
+   "key": "cap_component",
+   "group": "netlist",
+   "type": "str",
+   "default": "pcapacitor",
+   "lands_in": "quantus ext.cmd: output_db -cap_component",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "寄生电容映射到的器件名，随 PDK 而异（pcapacitor 是 PDK 里的具体 cell 名），更可能该落 PDK Profile 而非 Recipe。"
+  },
+  {
+   "key": "cap_property_name",
+   "group": "netlist",
+   "type": "str",
+   "default": "c",
+   "lands_in": "quantus ext.cmd: output_db -cap_property_name",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "与 cap_component 配套的属性名，同属 PDK 器件契约，改 cap_component 就得能改它。"
+  },
+  {
+   "key": "res_component",
+   "group": "netlist",
+   "type": "str",
+   "default": "presistor",
+   "lands_in": "quantus ext.cmd: output_db -res_component",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "寄生电阻映射到的器件名，PDK 相关，建议随 PDK Profile 走并允许 Recipe 覆盖。"
+  },
+  {
+   "key": "res_property_name",
+   "group": "netlist",
+   "type": "str",
+   "default": "r",
+   "lands_in": "quantus ext.cmd: output_db -res_property_name",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "与 res_component 配套的属性名，成组暴露才有意义。"
+  },
+  {
+   "key": "enable_cellview_check",
+   "group": "output",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "quantus ext.cmd: output_db -enable_cellview_check",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "写 extracted view 前是否检查已有 cellview，关系到重跑时会不会误覆盖，用户应该能开。"
+  },
+  {
+   "key": "device_finger_delimiter",
+   "group": "netlist",
+   "type": "str",
+   "default": "@",
+   "lands_in": "quantus ext.cmd + dspf.cmd: output_db -device_finger_delimiter",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "多指器件命名分隔符，与下游仿真器/网表解析约定强相关，换字符会影响后仿真读取。"
+  },
+  {
+   "key": "cdl_out_map_directory",
+   "group": "output",
+   "type": "str",
+   "default": "[[output_dir]]/",
+   "lands_in": "quantus ext.cmd: output_db -cdl_out_map_directory",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "由 output_dir 派生的运行目录路径，属于 Run 布局不进 Recipe；只有「是否输出这一项」值得作为开关考虑。"
+  },
+  {
+   "key": "include_cap_model",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "quantus ext.cmd + dspf.cmd: output_db -include_cap_model",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "输出网表里是否带电容模型语句，影响后仿真网表能否独立跑，是常调项；注意 Quantus 这里写的是带引号的 \"false\" 字符串。"
+  },
+  {
+   "key": "include_parasitic_cap_model",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "quantus ext.cmd + dspf.cmd: output_db -include_parasitic_cap_model",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "寄生电容模型语句开关，与 include_cap_model 成对，四个 include_* 应作为一组暴露。"
+  },
+  {
+   "key": "include_res_model",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "quantus ext.cmd + dspf.cmd: output_db -include_res_model",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "电阻模型语句开关，同上成组。"
+  },
+  {
+   "key": "include_parasitic_res_model",
+   "group": "netlist",
+   "type": "enum",
+   "default": "comment",
+   "choices": [
+    "true",
+    "false",
+    "comment"
+   ],
+   "lands_in": "quantus ext.cmd + dspf.cmd: output_db -include_parasitic_res_model",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "这一项默认值是 comment 而不是 true/false，说明它是三态枚举而非布尔，正好证明写死字面量掩盖了真实取值空间。"
+  },
+  {
+   "key": "extracted_view_name",
+   "group": "output",
+   "type": "str",
+   "default": "[[out_file]]",
+   "lands_in": "quantus ext.cmd: output_db -view_name",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "提取视图名来自 Cells 表的 out_file 列（jivaro 的 inputView 也依赖它），不进 Recipe。"
+  },
+  {
+   "key": "busbit_delimiter",
+   "group": "netlist",
+   "type": "str",
+   "default": "[]",
+   "lands_in": "quantus dspf.cmd: output_db -busbit_delimiter",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "总线位下标符号，必须与后仿真环境的网表约定一致，否则总线网名匹配不上。"
+  },
+  {
+   "key": "disable_instances",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "quantus dspf.cmd: output_db -disable_instances",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "DSPF 里是否禁用实例语句，影响 DSPF 是自带器件还是只带寄生（back-annotation 用法），是真实的使用方式选择。"
+  },
+  {
+   "key": "output_hierarchy_delimiter",
+   "group": "netlist",
+   "type": "str",
+   "default": "/",
+   "lands_in": "quantus dspf.cmd: output_db -hierarchy_delimiter",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "输出侧层次分隔符，与 input_db 那个是两个独立选项，Spectre 流程常需要改成 . 或保持 /。"
+  },
+  {
+   "key": "output_xy",
+   "group": "netlist",
+   "type": "enum",
+   "default": "CANONICAL_RES PARASITIC_RES CANONICAL_CAP PARASITIC_CAP DIODE MOS BIPOLAR GENERIC",
+   "choices": [
+    "CANONICAL_RES",
+    "PARASITIC_RES",
+    "CANONICAL_CAP",
+    "PARASITIC_CAP",
+    "DIODE",
+    "MOS",
+    "BIPOLAR",
+    "GENERIC"
+   ],
+   "lands_in": "quantus dspf.cmd: output_db -output_xy",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "这是一个多选集合（一行跟 8 个字面量），决定 DSPF 里哪些元件带坐标，直接影响文件体积；Recipe 里应存成多选列表，完整合法项集需用户确认。"
+  },
+  {
+   "key": "netlist_coupling_values",
+   "group": "netlist",
+   "type": "enum",
+   "default": "double",
+   "choices": [
+    "single",
+    "double"
+   ],
+   "lands_in": "quantus dspf.cmd: output_db -netlist_coupling_values",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "耦合电容在网表里写一次还是两端各写一半，直接影响总电容量的解释方式，用户点名要的类型之一；single 之外是否还有取值需用户确认。"
+  },
+  {
+   "key": "add_bulk_terminal",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "quantus dspf.cmd: output_db -add_bulk_terminal",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "是否给器件补衬底端子，四端/三端器件网表兼容性问题，换仿真器时要能改。"
+  },
+  {
+   "key": "sub_node_char",
+   "group": "netlist",
+   "type": "str",
+   "default": "#",
+   "lands_in": "quantus dspf.cmd: output_db -sub_node_char",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "寄生子节点命名字符，与下游解析脚本约定相关，和其它几个分隔符应作为「网表命名约定」一组暴露。"
+  },
+  {
+   "key": "output_temporary_directory_name",
+   "group": "output",
+   "type": "str",
+   "default": "Design",
+   "lands_in": "quantus ext.cmd + dspf.cmd: output_setup -temporary_directory_name",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "临时目录名，与 input_db -run_name 的 Design 是同一个约定，应该由同一个字段驱动而不是两处各写死一遍。"
+  },
+  {
+   "key": "dspf_out_path",
+   "group": "output",
+   "type": "str",
+   "default": "${WORK_ROOT2}/{cell}.dspf",
+   "lands_in": "quantus dspf.cmd: output_setup -file_name",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "今天是 project.yaml + per-task 两层覆盖的路径模板，属于「产物落在哪」而不是「怎么提取」，新模型里应归 Run 的输出布局/Cells，不进 Recipe。"
+  },
+  {
+   "key": "output_net_name_space",
+   "group": "output",
+   "type": "enum",
+   "default": "SCHEMATIC",
+   "choices": [
+    "SCHEMATIC",
+    "LAYOUT"
+   ],
+   "lands_in": "quantus dspf.cmd: output_setup -net_name_space（ext.cmd 无此行）",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "输出网表用原理图名还是版图名，与 extraction_setup 的同名选项是两处独立设置，DSPF 反标能否对上原理图全看它。"
+  },
+  {
+   "key": "technology_corner",
+   "group": "extraction",
+   "type": "enum",
+   "default": "TYPICAL",
+   "choices": [
+    "TYPICAL",
+    "CBEST",
+    "CWORST",
+    "RCBEST",
+    "RCWORST",
+    "CBEST_CCBEST",
+    "CWORST_CCWORST",
+    "RCBEST_CCBEST",
+    "RCWORST_CCWORST"
+   ],
+   "lands_in": "quantus ext.cmd + dspf.cmd: process_technology -technology_corner",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "用户点名的头号案例：同一条语句里 temperature 能调而 corner 写死；Recipe 只写语义名（如 RCWORST），实际字面量由 PDK Profile 的 corner 取值表提供，因为合法 corner 名由该工艺 assura_tech.lib 决定，需要用户在办公室拿具体 PDK 核对一次。"
+  },
+  {
+   "key": "technology_library_file",
+   "group": "extraction",
+   "type": "str",
+   "default": "$env(SETUP_ROOT)/assura_tech.lib",
+   "lands_in": "quantus ext.cmd + dspf.cmd: process_technology -technology_library_file",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "工艺库文件路径，归 PDK Profile 的 assura_tech.lib 条目，不进 Recipe（Recipe 要跨工艺可移植就不能带这个）。"
+  },
+  {
+   "key": "technology_name",
+   "group": "extraction",
+   "type": "str",
+   "default": "[[tech_name]]",
+   "lands_in": "quantus ext.cmd + dspf.cmd: process_technology -technology_name",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "由 runner 从 env 变量推导（project.tech_name 或 tech_name_env_vars），归 PDK Profile 的 tech_name 条目，不进 Recipe。"
+  },
+  {
+   "key": "temperature",
+   "group": "extraction",
+   "type": "float",
+   "default": "55.0",
+   "unit": "C",
+   "range": "[-55.0, 175.0]",
+   "lands_in": "quantus ext.cmd + dspf.cmd: process_technology -temperature",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "现有 5 个 knob 之一，用户点名要留在 Recipe 提取条件段；范围是按常见工业级温度区间给的建议值，可由用户收窄。"
+  },
+  {
+   "key": "cpu_count",
+   "group": "extraction",
+   "type": "int",
+   "default": "1",
+   "range": "[1, 64]",
+   "lands_in": "quantus ext.cmd + dspf.cmd: 需新增 multi_cpu 段（当前两个模板都没有）",
+   "currently": "not_present",
+   "confidence": "guess",
+   "why": "大 cell 提取耗时主要靠多核并行压下来，两个模板都没有这一段等于永远单核；Quantus 里确切的命令名和选项（multi_cpu / -cpu_per_machine / -turbo）需要用户在办公室确认。"
+  }
+ ]
+}

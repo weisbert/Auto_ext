@@ -1,0 +1,760 @@
+{
+ "items": [
+  {
+   "key": "lvs_deck_variant",
+   "group": "lvs",
+   "type": "enum",
+   "default": "wodio",
+   "choices": [
+    "wodio",
+    "widio"
+   ],
+   "lands_in": "calibre .qci: *lvsRulesFile 的 variant 段 — <calibre_lvs_dir>/<basename>.<variant>.qcilvs",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "整份 .qci 里唯一真正语义化的 LVS deck 选择（wodio = 不含 IO deck，widio = 含 IO）；可选值清单本身属于 PDK Profile 的 deck variant 表，Recipe 只存选中的名字，这样同一份 Recipe 换工艺仍可用。"
+  },
+  {
+   "key": "lvs_recognize_gates",
+   "group": "lvs",
+   "type": "enum",
+   "default": "NONE",
+   "choices": [
+    "NONE",
+    "SIMPLE",
+    "ALL"
+   ],
+   "lands_in": "calibre .qci: *lvsRecognizeGates",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "决定 Calibre 是否把 MOS 归并成门级再比对；纯模拟 RFIC 块必须 NONE，混入数字子块时才需要 SIMPLE/ALL，是典型的按配方切换项；三个枚举值需在办公室对 Calibre 手册确认是否还有第四种。"
+  },
+  {
+   "key": "lvs_connect_by_name",
+   "group": "lvs",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "calibre .qci: *cmnVConnectNamesState — true 时输出整行 ALL，false 时整行不输出",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "按名连接是 LVS 能不能跑通的关键开关（原始导出的两个 variant 就叫 noConnectByNetName / ConnectByNetName），必须留在 Recipe 里。"
+  },
+  {
+   "key": "lvs_connect_by_name_nets",
+   "group": "lvs",
+   "type": "str",
+   "default": "",
+   "lands_in": "calibre .qci: *cmnVConnectNames 名单 + *cmnVConnectNamesState: SOME（非空时改用 SOME）",
+   "currently": "not_present",
+   "confidence": "guess",
+   "why": "Calibre 除 ALL/NONE 外还支持 SOME 加指定网名单，RFIC 常见诉求是只对电源地按名连、信号网不连；现在的 bool 覆盖不到这档，键名 cmnVConnectNames 的准确拼写要在办公室用真 runset 确认。"
+  },
+  {
+   "key": "lvs_abort_on_supply_error",
+   "group": "lvs",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "calibre .qci: *lvsAbortOnSupplyError",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "电源网出错时是否直接中止 LVS；现在写死 0，也正因如此那两张超长 power/ground 名单目前基本是哑的 — 这两项在 UI 上要挨着放，否则用户看不懂名单有什么用。"
+  },
+  {
+   "key": "lvs_device_filter_enabled",
+   "group": "lvs",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "calibre .qci: *lvsDeviceFilterOptionsEnabled",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "器件过滤总开关，写死 0；打开后 layout/source 两侧的 filter options 才生效，本质是要不要在比对前扔掉寄生或短路器件这个真实取舍。"
+  },
+  {
+   "key": "lvs_device_filter_options",
+   "group": "lvs",
+   "type": "str",
+   "default": "AG RC RE RG",
+   "lands_in": "calibre .qci: *lvsLayoutDeviceFilterOptions 与 *lvsSourceDeviceFilterOptions（同一个值写两行）",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "只有 filter_enabled 打开时才生效；AG/RC/RE/RG 四个字母码的确切含义要在办公室查 Calibre 手册核实；现实中 layout 侧和 source 侧永远相同，所以合成一个字段，需要拆开时走 patch 逃生舱。"
+  },
+  {
+   "key": "lvs_extra_power_names",
+   "group": "lvs",
+   "type": "str",
+   "default": "",
+   "lands_in": "calibre .qci: 追加到 PDK Profile 的 power_names 基础名单尾部，一起渲染成 *lvsPowerNames",
+   "currently": "not_present",
+   "confidence": "likely",
+   "why": "DUT 自己的私有电源名（如 VDD_LO、VDD_DIV）不在工艺基础名单里，需要按配方补，但不该把整张 29 项名单搬进 Recipe。"
+  },
+  {
+   "key": "lvs_extra_ground_names",
+   "group": "lvs",
+   "type": "str",
+   "default": "",
+   "lands_in": "calibre .qci: 追加到 PDK Profile 的 ground_names 基础名单尾部，一起渲染成 *lvsGroundNames",
+   "currently": "not_present",
+   "confidence": "likely",
+   "why": "同 lvs_extra_power_names；这是把工艺事实和项目事实分层的那条缝。"
+  },
+  {
+   "key": "lvs_report_options",
+   "group": "lvs",
+   "type": "str",
+   "default": "S",
+   "lands_in": "calibre .qci: *lvsReportOptions",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "控制 LVS 报告输出哪些段落；core/checks.py 只依赖 banner 和 CELL SUMMARY 表，加字母安全、减字母可能把 CELL SUMMARY 删掉导致解析判成 truncated 而误报 fail — 字母表含义要在办公室确认后再决定开放到什么粒度。"
+  },
+  {
+   "key": "lvs_cpus",
+   "group": "lvs",
+   "type": "int",
+   "default": "2",
+   "unit": "core",
+   "range": "[1, 64]",
+   "lands_in": "calibre .qci: *cmnNumTurbo",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "Calibre Turbo 并行核数，写死 2；跟机器规格和 Turbo license 数直接相关，是最没争议的暴露项。"
+  },
+  {
+   "key": "lvs_run_mt",
+   "group": "lvs",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "calibre .qci: *cmnRunMT",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "和 lvs_cpus 联动，cpus 大于 1 时必须为 true；建议由 lvs_cpus 派生，只在 UI 高级区露出，避免用户设出 cpus=4 但 MT=off 的矛盾组合。"
+  },
+  {
+   "key": "lvs_run_hyper",
+   "group": "lvs",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "calibre .qci: *cmnRunHyper",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "Calibre Hyperscaling 需要单独 license，没有的站点开着会直接跑挂，必须能关；与 lvs_run_mt 是两套不同的并行机制，不能合并成一个开关。"
+  },
+  {
+   "key": "lvs_license_wait_min",
+   "group": "lvs",
+   "type": "int",
+   "default": "10",
+   "unit": "min",
+   "range": "[0, 1440]",
+   "lands_in": "calibre .qci: *cmnLicenseWaitTime（配套的 *cmnSpecifyLicenseWaitTime 固定为 1）",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "license 池拥挤时唯一能救的旋钮；严格讲这是站点属性而非工艺属性也非提取条件，将来若引入 Site/Machine 对象应迁过去，单位是分钟这点要在办公室确认。"
+  },
+  {
+   "key": "lvs_deck_dir",
+   "group": "profile",
+   "type": "str",
+   "default": "$calibre_source_added_place|parent",
+   "lands_in": "calibre .qci: *lvsRulesFile 的目录段，模板里是 [[calibre_lvs_dir]]",
+   "currently": "project_path",
+   "confidence": "certain",
+   "why": "LVS deck 目录，是纯工艺事实；PDK setup 把 $calibre_source_added_place 设成该目录下某文件，取 parent 即得，属于 PDK Profile 扫描发现的内容而不是用户输入。"
+  },
+  {
+   "key": "lvs_deck_basename",
+   "group": "profile",
+   "type": "str",
+   "default": "CFXXX",
+   "lands_in": "calibre .qci: *lvsRulesFile 的 basename 段，模板里是 [[calibre_lvs_basename]]",
+   "currently": "project_path",
+   "confidence": "certain",
+   "why": "现在靠 Path(calibre_lvs_dir).name 反推；deck 文件的命名前缀属于工艺，应由 PDK Profile 扫描时确定并作为一项体检（文件存不存在）。"
+  },
+  {
+   "key": "lvs_deck_variants",
+   "group": "profile",
+   "type": "str",
+   "default": "wodio,widio",
+   "lands_in": "不直接落盘；是 Recipe 字段 lvs_deck_variant 的可选值来源",
+   "currently": "not_present",
+   "confidence": "certain",
+   "why": "现在硬编码在 manifest 的 choices 和 importer 的正则里（_CALIBRE_LVS_VARIANT_RE 只认 wodio|widio），换个工艺用别的后缀就整个哑火；应改成 PDK Profile 扫 deck 目录 glob 出的 variant 表。"
+  },
+  {
+   "key": "qrc_deck_dir",
+   "group": "profile",
+   "type": "str",
+   "default": "",
+   "lands_in": "calibre .qci: *lvsPostTriggers 里的 -query_input <dir>/query_cmd；同时 quantus ext.cmd: -parasitic_blocking_device_cells_file <dir>/preserveCellList.txt",
+   "currently": "project_path",
+   "confidence": "certain",
+   "why": "QRC deck 目录，跨 Calibre 和 Quantus 两个工具引用同一个值（importer 的 aggregate_pdk_tokens 已经在做两边交叉校验），是 PDK Profile 一处定义两处引用的教科书例子。"
+  },
+  {
+   "key": "power_names",
+   "group": "profile",
+   "type": "str",
+   "default": "AHVDD AHVDDB AHVDDG AHVDDR AHVDDWELL AVDD AVDDB AVDDBG AVDDG AVDDR AVDWELL DHVDD DVDD HVDDWELL TACVDD TAVD33 TAVD33PST TAVDD TAVDDPST TVDD VD33 VDD VDD5V VDDESD VDDG VDDM VDDPST VDDSA VDWELL",
+   "lands_in": "calibre .qci: *lvsPowerNames",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "判定：进 PDK Profile，不进 Recipe。理由三条 — (1) 这 29 个名字（AHVDD/AVDD/DVDD/TAVDD/TAVD33PST/VDDPST/VDD5V/VDWELL/HVDDWELL 等）是代工厂 IO、ESD 和标准单元库的全局电源命名约定，不是设计者的选择；(2) 同一工艺下所有 cell 共用、跨项目不变，只有换工艺才变，完全符合扫描发现平时隐身的 Profile 定位；(3) 它的语义是告诉 Calibre 哪些网算 supply（配合 lvsAbortOnSupplyError 和 ERC），是工艺事实不是提取条件，塞进 Recipe 会让每份 Recipe 都拖着一坨跟本工艺绑死的字符串，直接破坏 Recipe 跨工艺可移植这条硬要求。项目私有电源名走 Recipe 的 lvs_extra_power_names 追加。另有一个渲染细节：docs/calibre_raw.txt 里用双空格分隔、模板用单空格，Calibre 容忍空白串，但 Profile 存成 list 后渲染要固定一种，否则和真实导出做 diff 时整行都报差异，patch 逃生舱会被这一行噪声淹掉。"
+  },
+  {
+   "key": "ground_names",
+   "group": "profile",
+   "type": "str",
+   "default": "AGND AHVSS AHVSSB AHVSSG AHVSSR AHVSSUB AVSS AVSSB AVSSBG AVSSG AVSSR AVSSUB DHVSS DVSS GND HVSSUB TACVSS TAVSS TAVSSPST TVSS VS33 VSS VSSESD VSSG VSSM VSSPST VSSUB",
+   "lands_in": "calibre .qci: *lvsGroundNames",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "判定同 power_names：27 项全部是工艺级地网命名约定，进 PDK Profile。额外一条必须写进 spec 的区分 — 它和 Cells 表的 ground_net（现在默认 vss，只喂 quantus 的 -ground_net）是两个不同的东西：ground_names 回答工艺上哪些名字算地，ground_net 回答这颗 DUT 用哪个地做提取参考网。重构时绝不能合并，但应加一项一致性体检：Cells 行的 ground_net 若不在 Profile 的 ground_names 里就告警（大概率是拼错了）。"
+  },
+  {
+   "key": "lvs_report_file_name",
+   "group": "fixed",
+   "type": "str",
+   "default": "<cell>.lvs.report",
+   "lands_in": "calibre .qci: *lvsReportFile",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "tools/calibre.py 反过来解析渲染后的 .qci 里的 *lvsRunDir 加 *lvsReportFile 来定位报告，再交给 core/checks.py 判 CORRECT/INCORRECT；用户改了就找不到报告。必须固定，并由 Run 归档时拷进 runs/<id>/results/lvs.report。"
+  },
+  {
+   "key": "lvs_svdb_cci",
+   "group": "fixed",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "calibre .qci: *lvsSVDBcci",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "生成带连接信息的 SVDB 是后续 Quantus 提取的前置条件，关掉整条流水线直接断；属于实现细节不是选项。"
+  },
+  {
+   "key": "lvs_pre_triggers",
+   "group": "fixed",
+   "type": "str",
+   "default": "{{rm -rf %d/svdb} process 1}",
+   "lands_in": "calibre .qci: *lvsPreTriggers",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "跑前清 svdb 防止上次残留被复用（和 si.env 残留是同一类坑）；%d 是 Calibre 的 run-dir 占位符、外层双花括号是 Tcl 字面量 — 这正是本项目 Jinja 用 [[ ]] 而不是 {{ }} 的原因，模板重写时这一行不能动。"
+  },
+  {
+   "key": "lvs_post_triggers",
+   "group": "fixed",
+   "type": "str",
+   "default": "{{rm -rf %d/query_output} process 1} {{mkdir %d/query_output} process 1} {{calibre -query_input <qrc_deck_dir>/query_cmd -query svdb } process 1}",
+   "lands_in": "calibre .qci: *lvsPostTriggers",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "这是 LVS 到 QRC 的交接动作（重建 query_output/ 再 query svdb），和 quantus ext.cmd 的 -directory_name <output_dir>/query_output 强耦合，改一边就断；整行只有内嵌的 qrc_deck_dir 该参数化，其余保持字面量。"
+  },
+  {
+   "key": "lvs_batch_mode_flags",
+   "group": "fixed",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "calibre .qci: *lvsLayoutGetFromViewer=1 / *lvsSourceGetFromViewer=1 / *cmnWarnLayoutOverwrite=0 / *cmnWarnSourceOverwrite=0 / *cmnShowOptions=1 / *cmnReleaseLicense=1 / *cmnSpecifyLicenseWaitTime=1",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "一组让 calibre -batch 不弹交互框、跑完释放 license 的开关，改任何一个只会让批处理挂住；额外注意 *cmnShowOptions 这一行还被 importer 当作注入 connect_by_name 块的锚点，重构模板时不能顺手删掉。"
+  },
+  {
+   "key": "lvs_remote_exec_tables",
+   "group": "fixed",
+   "type": "str",
+   "default": "（三张空表，见 lands_in）",
+   "lands_in": "calibre .qci: *cmnSlaveHosts / *cmnLSFSlaveTbl / *cmnGridSlaveTbl",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "现在三张表都是空壳（use 1 / totalCpus 1 / 其余空花括号）；将来要支持 LSF 或 Grid 提交时入口就在这里，在那之前保持字面量，个别站点需要就走 patch 逃生舱 — 顺带这里的 {{}} 嵌套花括号也是 [[ ]] 分隔符的又一个理由。"
+  },
+  {
+   "key": "runset_section_header",
+   "group": "fixed",
+   "type": "str",
+   "default": "",
+   "lands_in": "calibre .qci 首行的 ==<runset 名>== 段头",
+   "currently": "not_present",
+   "confidence": "likely",
+   "why": "docs/calibre_raw.txt 第 1 行有 ==Calibre_wiodio_noConnectByNetName== 而模板整行丢了 — 这是 Calibre Interactive 存 runset 时写的段名；建议 Run 渲染时自动补成 ==<run_slug>==，这样 runs/<id>/rendered/ 里的归档一眼能看出属于哪次跑（另注原始导出段名写 wiodio、rules 文件写 wodio，是导出时的手误，别照抄进 catalog）。"
+  },
+  {
+   "key": "dut_identity_bindings",
+   "group": "fixed",
+   "type": "str",
+   "default": "（来自 Cells 行 + Run 的 output_dir）",
+   "lands_in": "calibre .qci: *lvsLayoutPaths/Primary/Library/View、*lvsSourcePath/Primary/Library/View、*lvsSpiceFile、*lvsERCDatabase、*lvsERCSummaryFile、*lvsRunDir、*cmnTemplate_RN、*cmnFDILayoutLibrary/View、*cmnFDIDEFLayoutPath；si.env: simLibName/simCellName/simViewName；jivaro xml: inputView",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "这一整批全部来自 Cells 表的一行（library / cell / layout view / source view）加 Run 分配的 output_dir，既不进 Recipe 也不进 Profile；重构时要保证同一行 Cells 在三个模板里渲染出完全一致的值（现在 importer 的 _reconcile 在导入侧做这件事，运行侧需要同等保证）。"
+  },
+  {
+   "key": "netlist_force_full",
+   "group": "netlist",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: simNotIncremental（true 渲染成 't，false 渲染成 'nil）",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "关掉就是增量 netlist，大 block 快很多但有拿到旧网表的风险；这是真实的速度与正确性取舍，应该给用户，且 Run 的不可变记录正好能事后证明当次用的是哪档。"
+  },
+  {
+   "key": "netlist_renetlist_all",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "si.env: simReNetlistAll",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "和 simNotIncremental 语义重叠且当前取值互相矛盾（NotIncremental='t 但 ReNetlistAll=nil）；另外模板这一行写的是裸 nil 而不是 'nil，SKILL 里等价但和其余所有布尔行的风格不一致，做 patch diff 时会当成噪声 — 建议重构时把这两项合并成一个三态枚举（incremental / full / renetlist_all）。"
+  },
+  {
+   "key": "netlist_view_list",
+   "group": "netlist",
+   "type": "str",
+   "default": "auCdl schematic",
+   "lands_in": "si.env: simViewList（渲染成 SKILL 列表 '(...)）",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "层次遍历的 view switch 顺序；项目里混入 veriloga / symbol 视图、或 PDK 器件挂在别的 view 名下时必须改，是现场常改项，写死等于逼用户 fork 模板。"
+  },
+  {
+   "key": "netlist_stop_list",
+   "group": "netlist",
+   "type": "str",
+   "default": "auCdl",
+   "lands_in": "si.env: simStopList（渲染成 SKILL 列表 '(...)）",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "遇到哪些 view 就停止下钻，决定哪些子块被当作 leaf 器件；和 view_list 成对出现必须一起调，UI 上要放同一组。"
+  },
+  {
+   "key": "netlist_short_res",
+   "group": "netlist",
+   "type": "float",
+   "default": "2000.0",
+   "unit": "ohm",
+   "range": "[0, 1000000]",
+   "lands_in": "si.env: shortRES",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "小阻值电阻在 CDL 里被短路的门限，直接影响 LVS 能不能对上（layout 侧 Calibre 的器件处理必须一致）；2000.0 是 Cadence auCdl 的默认值，但到底是低于还是高于该值被短路、单位是不是欧姆，要在办公室用真 si 跑一次对比网表确认。"
+  },
+  {
+   "key": "netlist_preserve_all",
+   "group": "netlist",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: preserveALL",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "总开关，打开时会盖掉 preserveRES / preserveCAP / preserveDIO 三个分开关；UI 上必须做成父子勾选并在父项打开时把子项置灰，否则用户会以为自己改的分开关生效了其实没有。"
+  },
+  {
+   "key": "netlist_preserve_res",
+   "group": "netlist",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: preserveRES",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "CDL 里是否保留电阻器件；和 Calibre deck 对电阻的处理要成对，属于 CDL 器件比对面板这一组的一员。"
+  },
+  {
+   "key": "netlist_check_res_value",
+   "group": "netlist",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: checkRESVAL",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "是否把电阻值写成属性参与 LVS 比对；关掉能压掉一批容差型 discrepancy，是 LVS 调不通时最先动的几个开关之一。"
+  },
+  {
+   "key": "netlist_check_res_size",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "si.env: checkRESSIZE",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "是否比对电阻的 W/L 几何；默认关，需要严格核对版图电阻尺寸时才开。"
+  },
+  {
+   "key": "netlist_preserve_cap",
+   "group": "netlist",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: preserveCAP",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "CDL 里是否保留电容器件；同 preserve_res，属于 CDL 器件比对面板。"
+  },
+  {
+   "key": "netlist_check_cap_value",
+   "group": "netlist",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: checkCAPVAL",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "是否比对电容值；RFIC 里 MOM/MIM 电容值容差常导致假差异，是需要能关的。"
+  },
+  {
+   "key": "netlist_check_cap_area",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "si.env: checkCAPAREA",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "是否比对电容面积；默认关，与 check_cap_value 二选一或叠加取决于 deck 期望。"
+  },
+  {
+   "key": "netlist_check_cap_peri",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "si.env: checkCAPPERI",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "是否比对电容周长；默认关，和 check_cap_area 成对。"
+  },
+  {
+   "key": "netlist_preserve_dio",
+   "group": "netlist",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: preserveDIO",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "CDL 里是否保留二极管（ESD 和阱二极管）；关掉会让 ESD 结构在 source 侧消失导致 LVS 不匹配。"
+  },
+  {
+   "key": "netlist_check_dio_area",
+   "group": "netlist",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: checkDIOAREA",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "是否比对二极管面积；默认开，和 check_dio_peri 成对，二者一起决定 ESD 器件的比对严格度。"
+  },
+  {
+   "key": "netlist_check_dio_peri",
+   "group": "netlist",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: checkDIOPERI",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "是否比对二极管周长；默认开，同上。"
+  },
+  {
+   "key": "netlist_check_ldd",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "si.env: checkLDD",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "LDD 器件比对开关，默认关；只有工艺里真的有 LDD 器件时才需要，是这一组里价值最低的一个，可以放在折叠区。"
+  },
+  {
+   "key": "netlist_preserve_bang",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "si.env: preserveBangInNetlist",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "决定全局网名里的感叹号是否保留（vdd! 还是 vdd）；RFIC 原理图大量用感叹号全局网，保不保直接决定 source 侧网名能否和 layout 对上，是必须能改的一项。"
+  },
+  {
+   "key": "netlist_print_inherited_conn",
+   "group": "netlist",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "si.env: simPrintInhConnAttributes",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "用 net expression 做多电源域的设计（[@vdd] 这类）需要打开，否则 CDL 里丢掉继承连接信息，LVS 会在电源域边界上报一堆 open。"
+  },
+  {
+   "key": "netlist_global_power_sig",
+   "group": "netlist",
+   "type": "str",
+   "default": "",
+   "lands_in": "si.env: globalPowerSig（写进 CDL 的 .GLOBAL 行）",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "现在是空串，而 Quantus 那边已经在用 Cells 的 ground_net，两边不一致；重构时应默认取 Cells 行的电源网（Cells 表目前只有 ground_net 一列，需要补一列 power_net），并和 Profile 的 power_names 做一致性体检。"
+  },
+  {
+   "key": "netlist_global_gnd_sig",
+   "group": "netlist",
+   "type": "str",
+   "default": "",
+   "lands_in": "si.env: globalGndSig（写进 CDL 的 .GLOBAL 行）",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "同上，应默认取 Cells 行的 ground_net（默认 vss）；现在空着靠原理图自带的全局网兜底，一旦原理图没声明就静默产生错网表 — 这是三个工具里同一个地网概念第三种写法（另两处是 quantus -ground_net 和 calibre lvsGroundNames），重构时要在 spec 里画清三者关系。"
+  },
+  {
+   "key": "cdl_include_file",
+   "group": "profile",
+   "type": "str",
+   "default": "$calibre_source_added_place",
+   "lands_in": "si.env: incFILE",
+   "currently": "project_path",
+   "confidence": "certain",
+   "why": "PDK setup 脚本设的 env var，指向要前置到源网表的 CDL（器件 subckt 定义）；它取 parent 恰好就是 lvs_deck_dir，是 PDK Profile 里同一个事实的两种用法，不该在两处各写一遍；si.env 是 SKILL，这里是把带 $ 的字面串交给下游展开，展开时机要在办公室确认。"
+  },
+  {
+   "key": "check_scale",
+   "group": "profile",
+   "type": "enum",
+   "default": "meter",
+   "choices": [
+    "meter",
+    "micron"
+   ],
+   "lands_in": "si.env: checkScale",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "器件属性值的单位刻度，必须和 Calibre rule deck 期望的一致，属于工艺和 deck 绑定而不是用户偏好；choices 需要确认 auCdl 还接受哪些值（可能还有 centimeter）。"
+  },
+  {
+   "key": "shrink_factor",
+   "group": "profile",
+   "type": "float",
+   "default": "0.0",
+   "range": "[0, 1]",
+   "lands_in": "si.env: shrinkFACTOR",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "光罩缩放系数，纯工艺属性（0.0 表示不缩放）；同一工艺下所有设计相同，放 Profile 并在体检项里显示当前值。"
+  },
+  {
+   "key": "netlist_simulator",
+   "group": "fixed",
+   "type": "str",
+   "default": "auCdl",
+   "lands_in": "si.env: simSimulator",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "整条流水线以 CDL 网表喂 Calibre LVS，换 netlister 等于换流程；不是配方选项，保持模板字面量。"
+  },
+  {
+   "key": "netlist_out_name",
+   "group": "fixed",
+   "type": "str",
+   "default": "<cell>.src.net",
+   "lands_in": "si.env: hnlNetlistFileName（必须与 calibre .qci 的 *lvsSourcePath 逐字一致）",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "跨两个模板的硬耦合，两处必须同时改才有意义；由 catalog 成对生成，不给用户单独调，否则 LVS 直接找不到源网表。"
+  },
+  {
+   "key": "netlist_run_dir",
+   "group": "fixed",
+   "type": "str",
+   "default": "<output_dir>",
+   "lands_in": "si.env: simRunDir",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "由 Run 分配的 workdir 决定；已知坑：si 不会把 si.env 复制到 simRunDir，残留的旧 si.env 会掩盖 bug，所以 Run 每次必须把渲染结果写进 runs/<id>/rendered/ 并强制覆盖发布 — importer 里那段 simRunDir 缺失就自动补行的逻辑要原样保留到新 catalog。"
+  },
+  {
+   "key": "netlist_aucdl_proc",
+   "group": "fixed",
+   "type": "str",
+   "default": "ansCdlSubcktCall",
+   "lands_in": "si.env: auCdlDefNetlistProc",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "auCdl 标准的 subckt 调用生成过程名，改动没有实际用例；保持字面量。"
+  },
+  {
+   "key": "netlist_display_pin_info",
+   "group": "fixed",
+   "type": "bool",
+   "default": "true",
+   "lands_in": "si.env: displayPININFO",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "Calibre 靠 CDL 里的 *.PININFO 判定 pin 方向，关掉只会引入无谓的 LVS 差异，没有开放价值。"
+  },
+  {
+   "key": "netlist_rarely_used_fields",
+   "group": "fixed",
+   "type": "str",
+   "default": "（三项均为空）",
+   "lands_in": "si.env: resistorModel / pinMAP / setEQUIV",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "三个 auCdl 少用字段（电阻模型名、pin 映射表、等价器件声明）现在都是空串或 nil；真需要时走 patch 逃生舱，不值得占 Recipe 面积 — 但 resistorModel 若某个 PDK 强制要求非空，应升格成 Profile 字段。"
+  },
+  {
+   "key": "reduction_enabled",
+   "group": "reduction",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "不落 xml；控制 jivaro stage 是否执行（现 TaskSpec.jivaro.enabled）",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "缩减是可选的最后一步，开关必须在 Recipe 里；注意 runner 已强制 enabled 为 true 时 out_file 必填，这条约束要带进新模型的校验。"
+  },
+  {
+   "key": "reduction_frequency_limit",
+   "group": "reduction",
+   "type": "float",
+   "default": "14",
+   "unit": "GHz",
+   "range": "[0.1, 1000]",
+   "lands_in": "jivaro xml: <frequencyLimit>",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "缩减保真的频率上限，RFIC 里按工作频段直接决定要不要重跑，是 Recipe 的一等公民；模板里现在写成 [[jivaro_frequency_limit | default(14)]]，新模型该改成必填有默认值，去掉 Jinja default 过滤器这层隐式回退。"
+  },
+  {
+   "key": "reduction_error_max",
+   "group": "reduction",
+   "type": "float",
+   "default": "2",
+   "unit": "%",
+   "range": "[0, 100]",
+   "lands_in": "jivaro xml: <errorMax>",
+   "currently": "existing_knob",
+   "confidence": "certain",
+   "why": "允许的最大误差百分比，和 frequency_limit 成对构成缩减的精度契约；同样要去掉模板里的 default(2) 隐式回退。"
+  },
+  {
+   "key": "reduction_criterion",
+   "group": "reduction",
+   "type": "enum",
+   "default": "standard",
+   "choices": [
+    "standard"
+   ],
+   "lands_in": "jivaro xml: <criterion>",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "缩减判据模式，现在写死 standard；可选值要在办公室查 Jivaro 手册或 GUI 确认（疑似还有 aggressive / custom 之类），确认前 choices 只能填这一个值，属于必须现场核的条目。"
+  },
+  {
+   "key": "reduction_cpus",
+   "group": "reduction",
+   "type": "int",
+   "default": "1",
+   "unit": "core",
+   "range": "[1, 64]",
+   "lands_in": "jivaro xml: <cpu>",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "写死 1，大网表缩减慢得离谱；和 lvs_cpus 一样是纯资源旋钮，是最没争议的暴露项。"
+  },
+  {
+   "key": "reduction_reduce_floating_nets",
+   "group": "reduction",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "jivaro xml: <reduceFloatingNets>",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "和 quantus 的 -exclude_floating_nets 与 -exclude_floating_nets_limit 是同一个语义家族，Recipe 里必须并排显示，否则用户会在提取侧和缩减侧设出互相矛盾的值。"
+  },
+  {
+   "key": "reduction_decoupling_auto_threshold",
+   "group": "reduction",
+   "type": "bool",
+   "default": "false",
+   "lands_in": "jivaro xml: <decouplingAutoThreshold>",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "与 quantus 的 -decoupling_factor 1.0 对应；打开后 Jivaro 自动定阈值会盖掉手工设的耦合门限，两者要在 UI 上一起呈现并互斥提示。"
+  },
+  {
+   "key": "reduction_log_level",
+   "group": "reduction",
+   "type": "enum",
+   "default": "trace",
+   "choices": [
+    "error",
+    "warning",
+    "info",
+    "debug",
+    "trace"
+   ],
+   "lands_in": "jivaro xml: <logVerboseLevel>",
+   "currently": "hardcoded_literal",
+   "confidence": "guess",
+   "why": "现在写死最啰嗦的 trace，日志巨大；Run 既然每 stage 单独存一份日志，默认应降到 info 再让用户按需调高，但确切的枚举字面量要在办公室对 Jivaro 确认。"
+  },
+  {
+   "key": "reduction_view_suffix",
+   "group": "reduction",
+   "type": "str",
+   "default": "_red",
+   "lands_in": "jivaro xml: <outputView>（渲染成 <out_file><suffix>）",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "缩减结果视图名的后缀是硬编码字面量；同一颗 cell 想留多份不同频率或误差档的缩减结果时必须能改，这条正好配合 Run 的不可变记录 — 每次跑用不同后缀就不会互相覆盖。"
+  },
+  {
+   "key": "reduction_views_to_reduce",
+   "group": "reduction",
+   "type": "str",
+   "default": "av_extracted",
+   "lands_in": "jivaro xml: <viewsToReduce>",
+   "currently": "hardcoded_literal",
+   "confidence": "certain",
+   "why": "这是一处真实的不自洽：<inputView> 已经用 [[out_file]]，而 <viewsToReduce> 写死 av_extracted，只有当 out_file 恰好等于 av_extracted 时两行才对得上，否则 Jivaro 找不到要缩减的视图；新 catalog 应默认跟随 out_file，同时保留手改能力。"
+  },
+  {
+   "key": "reduction_net_selection",
+   "group": "reduction",
+   "type": "str",
+   "default": "",
+   "lands_in": "jivaro xml: <!-- Selectivity settings --> 段（现在是空注释）",
+   "currently": "not_present",
+   "confidence": "guess",
+   "why": "模板里留着 Selectivity 段的注释却没有内容，说明 Jivaro 支持只缩减部分网或实例；关键网（LO、时钟、匹配网络）不想被缩减是 RFIC 的常见诉求，具体标签名要在办公室查 Jivaro 的 xml schema 后再定。"
+  },
+  {
+   "key": "parasitic_device_models",
+   "group": "profile",
+   "type": "str",
+   "default": "analogLib/presistor/symbol; analogLib/pcapacitor/symbol; analogLib/pinductor/symbol; analogLib/pmind/symbol",
+   "lands_in": "jivaro xml: <rModel>/<cModel>/<lModel>/<kModel>；必须与 quantus ext.cmd 的 -res_component presistor 和 -cap_component pcapacitor 对齐",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "寄生器件的 cellview 绑定；analogLib 是 Cadence 通用而非工艺特有，但个别 PDK 要求用自家寄生器件，且这个值跨 Quantus 和 Jivaro 两个工具必须一致（Quantus 写出什么器件，Jivaro 就得认什么器件）— 放 PDK Profile 一处定义两处引用，避免改一半导致 Jivaro 读不出寄生元件。"
+  },
+  {
+   "key": "jivaro_schema_version",
+   "group": "fixed",
+   "type": "str",
+   "default": "2024.1",
+   "lands_in": "jivaro xml: <reductionParameters version=...>",
+   "currently": "hardcoded_literal",
+   "confidence": "likely",
+   "why": "跟随现场安装的 Jivaro 版本，应由 catalog 升级来跟进，并在 PDK Profile 的体检项里加一条（xml schema 版本 vs jivaro -version 实际输出）；不是用户旋钮。"
+  },
+  {
+   "key": "reduction_input_view",
+   "group": "fixed",
+   "type": "str",
+   "default": "<library>/<cell>/<out_file>",
+   "lands_in": "jivaro xml: <inputView>",
+   "currently": "identity_var",
+   "confidence": "certain",
+   "why": "由 Cells 行加 Quantus 的 -view_name（即 out_file）共同决定；runner 已强制 jivaro 启用时 out_file 必填，否则会渲染出 library/cell/None — 这条约束要从 runner 上移到新模型的 Recipe+Cells 组合校验里，在提交 Run 之前就报错。"
+  }
+ ]
+}
