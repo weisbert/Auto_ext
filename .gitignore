@@ -7,6 +7,9 @@ runs/
 # Per-task and per-run logs
 logs/
 
+# PDK health-check caches written next to config/profiles/<id>.yaml
+*.health.json
+
 # Python virtualenvs
 .venv/
 venv/

@@ -20,6 +20,20 @@ rerun can never overwrite the previous one — which the old
       results/          lvs.report + lvs_summary.json rescued from the workarea
       work/             parallel-isolation cwd (serial runs have none)
 
+Two render paths, chosen by one explicit branch:
+
+- **Legacy** (no ``recipe=``): templates come from ``project.templates``,
+  values from the four-layer ``*.manifest.yaml`` knob merge. Unchanged.
+- **Recipe** (``recipe=`` plus ``profile=``): templates come from
+  :mod:`auto_ext.catalog`, values from the :class:`~auto_ext.model.recipe.Recipe`
+  and the :class:`~auto_ext.model.pdk.PdkProfile`, manual edits from
+  ``Recipe.patches``. See :class:`RecipePipeline` for the full table of what
+  differs, and :mod:`auto_ext.core.render` for the pipeline itself.
+
+The two coexist on purpose: every caller today passes no recipe and gets
+byte-identical output, while the recipe path is exercised end to end by
+``tests/test_runner.py``.
+
 Two execution modes:
 
 - **Serial** (default): tasks run one at a time, cwd = ``workarea``.
@@ -89,6 +103,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from auto_ext import __version__ as AUTO_EXT_VERSION
+from auto_ext.catalog import Catalog, builtin_catalog
+from auto_ext.core import render
 from auto_ext.core.config import ProjectConfig, TaskConfig
 from auto_ext.core.env import (
     EnvResolution,
@@ -114,6 +130,7 @@ from auto_ext.core.run_store import (
     write_batch,
     write_record,
 )
+from auto_ext.core.patch_models import StagePatchReport
 from auto_ext.core.template import resolve_template_path
 from auto_ext.core.workdir import (
     place_si_env_in_parallel_dir,
@@ -121,6 +138,9 @@ from auto_ext.core.workdir import (
     serial_workdir,
     workspace_lock,
 )
+from auto_ext.model.common import Stage
+from auto_ext.model.pdk import PdkProfile
+from auto_ext.model.recipe import Recipe, ResourceProfile
 from auto_ext.model.run import (
     RUN_TIMESTAMP_FORMAT,
     DutSnapshot,
@@ -194,6 +214,18 @@ class StageResult:
     tool_result: ToolResult | None = None
     error: str | None = None
     record: StageRecord | None = None
+    #: Unique within the run. Equal to :attr:`stage` on the legacy path and
+    #: whenever a stage runs once; ``quantus.ext`` / ``quantus.dspf`` when a
+    #: recipe emits both quantus output forms.
+    key: str = ""
+    #: Per-hunk outcome of the recipe's manual edits to this stage's generated
+    #: file. ``None`` on the legacy path and whenever the recipe carries no
+    #: patch for the file.
+    patch_report: StagePatchReport | None = None
+
+    def __post_init__(self) -> None:
+        if not self.key:
+            self.key = self.stage
 
 
 @dataclass
@@ -256,6 +288,57 @@ class RunSummary:
         return [t.run_dir for t in self.tasks if t.run_dir is not None]
 
 
+@dataclass(frozen=True)
+class RecipePipeline:
+    """The catalog-driven pipeline's inputs, bundled.
+
+    Presence of this object is the **only** thing that selects the new render
+    path; there is no sniffing and no fallback heuristic. ``run_tasks``
+    assembles one when it is given a ``recipe=``, and passes ``None``
+    otherwise, in which case every stage renders through
+    ``project.templates`` + ``*.manifest.yaml`` knobs exactly as before.
+
+    What changes when it is present:
+
+    ==========================  ============================  ============================
+    concern                     legacy (``None``)             recipe pipeline
+    ==========================  ============================  ============================
+    which template              ``project/task.templates``    ``catalog.targets[].template``
+    values                      manifest knob 4-layer merge   Recipe / PdkProfile fields
+    corner literal              hardcoded ``"TYPICAL"``       ``PdkProfile.corners`` lookup
+    manual edits                clone the template            ``Recipe.patches``
+    quantus invocations         exactly one                   one per ``output.emit``
+    stage set                   CLI ``--stage``               ``recipe.stages`` ∩ ``--stage``
+    jivaro on/off               ``task.jivaro.enabled``       ``recipe.reduction.enabled``
+    continue on LVS fail        ``task.continue_on_lvs_fail`` ``recipe.policy...``
+    ==========================  ============================  ============================
+    """
+
+    recipe: Recipe
+    profile: PdkProfile
+    resources: ResourceProfile
+    catalog: Catalog
+    #: Overrides the checkout's ``templates/`` directory. For tests that render
+    #: from a temporary tree -- not a way for a user to re-point a target.
+    templates_root: Path | None = None
+
+
+@dataclass(frozen=True)
+class _Step:
+    """One unit of work in a task: a stage, and the file it renders (if any).
+
+    The legacy path produces one step per stage with ``plan=None``; the recipe
+    path produces one step per render target plus a bare step for ``strmout``,
+    which has no template at all. Everything downstream -- cancellation,
+    abort-on-failure, synthetic skip records, the progress reporter -- walks
+    this list and does not care which path built it.
+    """
+
+    key: str
+    stage: str
+    plan: render.TargetPlan | None = None
+
+
 @dataclass
 class _TaskExecCtx:
     """Per-task execution context: where stages run and how si.env is placed.
@@ -288,6 +371,11 @@ def run_tasks(
     max_workers: int | None = None,
     reporter: ProgressReporter | None = None,
     cancel_token: CancelToken | None = None,
+    recipe: Recipe | None = None,
+    profile: PdkProfile | None = None,
+    resources: ResourceProfile | None = None,
+    catalog: Catalog | None = None,
+    templates_root: Path | None = None,
 ) -> RunSummary:
     """Execute the stage × task matrix, serial or parallel.
 
@@ -307,7 +395,9 @@ def run_tasks(
 
     ``cli_knobs`` is the ``{stage: {name: str}}`` dict parsed from
     ``--knob`` options; values are still strings here and are coerced at
-    render time per :class:`auto_ext.core.manifest.KnobSpec`.
+    render time per :class:`auto_ext.core.manifest.KnobSpec`. It applies to the
+    legacy render path only -- a recipe run has typed fields instead of knobs,
+    and silently accepting ``--knob`` there would look like it did something.
 
     ``max_workers`` gates the execution mode: ``None`` or ``<= 1`` runs
     serially (cwd = ``workarea``, si.env swapped via
@@ -317,17 +407,45 @@ def run_tasks(
     ``reporter`` / ``cancel_token`` default to a :class:`NullReporter`
     and a fresh :class:`CancelToken` that is never set — same blocking
     behavior as pre-Phase-5 callers.
+
+    **Which render path runs is decided by ``recipe``, and by nothing else.**
+    Pass one (together with the ``profile`` whose corner table and deck paths
+    it needs) and every stage renders through :mod:`auto_ext.core.render`:
+    templates come from the catalog, values from the Recipe and the
+    PdkProfile, manual edits from ``Recipe.patches``. Leave it ``None`` — as
+    every caller does today — and nothing about the run changes: templates
+    still come from ``project.templates`` and values from the manifest knob
+    merge. ``resources`` / ``catalog`` / ``templates_root`` refine the recipe
+    path and are ignored without one; a ``profile`` without a ``recipe``, or a
+    ``recipe`` without a ``profile``, is a :class:`ConfigError` rather than a
+    half-configured run.
     """
+    pipeline = _build_pipeline(
+        recipe=recipe,
+        profile=profile,
+        resources=resources,
+        catalog=catalog,
+        templates_root=templates_root,
+    )
+
     _validate_stages(stages)
-    _validate_tasks(tasks, stages)
+    _validate_tasks(tasks, stages, pipeline=pipeline)
 
     if reporter is None:
         reporter = NullReporter()
     if cancel_token is None:
         cancel_token = CancelToken()
 
-    required_env = _discover_env_vars(project, tasks, auto_ext_root=auto_ext_root)
-    resolution = resolve_env(required_env, project.env_overrides)
+    if pipeline is None:
+        required_env = _discover_env_vars(project, tasks, auto_ext_root=auto_ext_root)
+        env_overrides = project.env_overrides
+    else:
+        required_env = _discover_env_vars_for_recipe(project, tasks, pipeline)
+        # project.yaml still owns the workspace patterns (``WorkspaceConfig``
+        # does not exist yet), so its overrides stay underneath; the profile's
+        # win, because env resolution is a PDK fact now.
+        env_overrides = {**project.env_overrides, **pipeline.profile.env_overrides}
+    resolution = resolve_env(required_env, env_overrides)
     resolved_env = resolution.require()
 
     parallel = max_workers is not None and max_workers >= 2
@@ -336,9 +454,11 @@ def run_tasks(
     # gone before ``str.format`` runs (Python would otherwise interpret
     # ``{WORK_ROOT}`` as a missing format key). Runs after env resolution
     # but before any subprocess; env errors are more fundamental anyway.
-    _validate_task_outputs(tasks, project, resolved_env, parallel=parallel)
+    _validate_task_outputs(
+        tasks, project, resolved_env, parallel=parallel, pipeline=pipeline
+    )
 
-    subprocess_env: dict[str, str] = {**os.environ, **project.env_overrides}
+    subprocess_env: dict[str, str] = {**os.environ, **env_overrides}
 
     tool_instances: dict[str, Tool] = {name: cls() for name, cls in _TOOL_REGISTRY.items()}
     tool_paths = _resolve_tool_paths(tool_instances, subprocess_env)
@@ -365,6 +485,7 @@ def run_tasks(
             tools=tool_instances,
             tool_paths=tool_paths,
             cli_knobs=cli_knobs,
+            pipeline=pipeline,
             verbose=verbose,
             dry_run=dry_run,
             parallel=parallel,
@@ -402,6 +523,88 @@ def run_tasks(
     )
     _safe_call(reporter, "on_run_end", summary)
     return summary
+
+
+# ---- pipeline selection ----------------------------------------------------
+
+
+def _build_pipeline(
+    *,
+    recipe: Recipe | None,
+    profile: PdkProfile | None,
+    resources: ResourceProfile | None,
+    catalog: Catalog | None,
+    templates_root: Path | None,
+) -> RecipePipeline | None:
+    """Assemble the recipe pipeline, or return ``None`` for the legacy path.
+
+    Refuses half a configuration. A Recipe without a PdkProfile has no corner
+    table, so ``-technology_corner`` could only be guessed; a PdkProfile
+    without a Recipe has nothing to render. Both would "work" if one were
+    quietly defaulted, which is precisely the class of silent-wrong-file this
+    round exists to remove.
+    """
+
+    if recipe is None and profile is None:
+        return None
+    if recipe is None:
+        raise ConfigError(
+            "a pdk profile was supplied without a recipe; the recipe is what "
+            "selects the catalog-driven render path. Pass recipe=... as well, "
+            "or neither."
+        )
+    if profile is None:
+        raise ConfigError(
+            f"recipe {recipe.recipe_id!r} needs a pdk profile: the corner it "
+            "names, the LVS deck directory and the supply-name tables are all "
+            "process facts the recipe deliberately does not carry. Pass "
+            "profile=... as well."
+        )
+    return RecipePipeline(
+        recipe=recipe,
+        profile=profile,
+        resources=resources if resources is not None else ResourceProfile(),
+        catalog=catalog if catalog is not None else builtin_catalog(),
+        templates_root=templates_root,
+    )
+
+
+def _discover_env_vars_for_recipe(
+    project: ProjectConfig,
+    tasks: list[TaskConfig],
+    pipeline: RecipePipeline,
+) -> set[str]:
+    """Env vars the recipe path needs, from the profile and the catalog.
+
+    Deliberately not ``_discover_env_vars``: that one walks
+    ``project.templates`` and ``project.paths``, neither of which the recipe
+    path reads. Here the template set is the catalog's and the path
+    expressions are the profile's, so a project.yaml that still lists a stale
+    template cannot make a run demand an env var nothing uses.
+
+    The workspace patterns (``extraction_output_dir`` / ``intermediate_dir`` /
+    ``dspf_out_path``) are still project.yaml's until ``WorkspaceConfig``
+    lands, so they are contributed here as extra sources.
+    """
+
+    extra: list[str] = [
+        project.extraction_output_dir,
+        project.intermediate_dir,
+        project.dspf_out_path,
+    ]
+    extra.extend(t.dspf_out_path for t in tasks if t.dspf_out_path is not None)
+
+    required = render.required_env_vars(
+        pipeline.profile,
+        extra_sources=extra,
+        catalog=pipeline.catalog,
+        templates_root=pipeline.templates_root,
+    )
+    # Synthetic tokens the runner injects at render time (``${output_dir}`` and
+    # friends), plus the profile's own extra path keys, are not shell vars.
+    required -= _PATH_TOKEN_NAMES
+    required -= set(pipeline.profile.extra_paths)
+    return required
 
 
 # ---- run directory / record lookup -----------------------------------------
@@ -469,6 +672,13 @@ def rendered_path_for(
     if record is None:
         return None
     stage_record = record.stage(stage)
+    if stage_record is None:
+        # A recipe run that emits both quantus forms records ``quantus.ext``
+        # and ``quantus.dspf`` rather than ``quantus``. The caller asked about
+        # a stage, so answer with the first file that stage produced.
+        stage_record = next(
+            (s for s in record.stages if s.stage == stage and s.rendered_path), None
+        )
     if stage_record is None or stage_record.rendered_path is None:
         return None
     base = (
@@ -496,6 +706,7 @@ def _run_single_task(
     tools: dict[str, Tool],
     tool_paths: dict[str, str],
     cli_knobs: dict[str, dict[str, Any]],
+    pipeline: RecipePipeline | None,
     verbose: bool,
     dry_run: bool,
     parallel: bool = False,
@@ -505,7 +716,9 @@ def _run_single_task(
     cancel_token: CancelToken,
 ) -> TaskResult:
     dut = DutSnapshot.from_task_config(task)
-    recipe_id = _derive_recipe_id(task)
+    recipe_id = (
+        pipeline.recipe.recipe_id if pipeline is not None else _derive_recipe_id(task)
+    )
 
     # The slug only reads ``recipe_id``, so a minimal snapshot names the
     # directory; the full snapshot needs the render context, which in turn
@@ -519,11 +732,37 @@ def _run_single_task(
     task_result = TaskResult(task_id=task.task_id, run_dir=run_dir)
     _safe_optional_call(reporter, "on_run_dir", task.task_id, run_dir)
 
+    steps: list[_Step]
     try:
-        context = _build_context(project, task, resolved_env, run_slug=slug, run_id=run_id)
-        recipe = _recipe_snapshot(
-            project, task, context, cli_knobs, auto_ext_root=auto_ext_root, recipe_id=recipe_id
-        )
+        if pipeline is None:
+            context = _build_context(
+                project, task, resolved_env, run_slug=slug, run_id=run_id
+            )
+            recipe = _recipe_snapshot(
+                project, task, context, cli_knobs,
+                auto_ext_root=auto_ext_root, recipe_id=recipe_id,
+            )
+            steps = [_Step(key=s, stage=s) for s in STAGE_ORDER if s in stages]
+        else:
+            steps = _recipe_steps(pipeline, stages)
+            context = _recipe_context(
+                pipeline,
+                project=project,
+                task=task,
+                dut=dut,
+                resolved_env=resolved_env,
+                run_dir=run_dir,
+                run_id=run_id,
+                slug=slug,
+                workarea=workarea,
+                created_at=created_at,
+                batch_id=batch_id,
+                dry_run=dry_run,
+                max_workers=max_workers,
+                parallel=parallel,
+                steps=steps,
+            )
+            recipe = _recipe_snapshot_from_recipe(pipeline, context, steps)
     except AutoExtError:
         # A configuration error here (an unknown dspf_out_path format key, say)
         # means nothing about this run can be described, so there is nothing
@@ -547,7 +786,12 @@ def _run_single_task(
             setup_error = f"cannot prepare the parallel work dir: {exc}"
 
     exec_ctx = _TaskExecCtx(cwd=cwd, run_dir=run_dir, paths=paths, parallel=parallel)
-    active_stages = [s for s in STAGE_ORDER if s in stages]
+    active_stages = [step.key for step in steps]
+    continue_on_lvs_fail = (
+        pipeline.recipe.policy.continue_on_lvs_fail
+        if pipeline is not None
+        else task.continue_on_lvs_fail
+    )
 
     base_fields: dict[str, Any] = {
         "run_id": run_id,
@@ -558,7 +802,7 @@ def _run_single_task(
         "recipe": recipe,
         "requested_stages": active_stages,
         "dry_run": dry_run,
-        "continue_on_lvs_fail": task.continue_on_lvs_fail,
+        "continue_on_lvs_fail": continue_on_lvs_fail,
         "max_workers": max_workers,
         "workspace_dir": str(context["output_dir"]),
         "intermediate_dir": _opt_str(context.get("intermediate_dir")),
@@ -567,12 +811,22 @@ def _run_single_task(
         "run_dir": str(run_dir),
         "work_dir": str(cwd) if parallel and setup_error is None else None,
         "env": EnvBinding.from_resolution(resolution),
-        "context": _jsonable_context(context),
+        "context": (
+            render.flatten_context(context)
+            if pipeline is not None
+            else _jsonable_context(context)
+        ),
         "tools": tool_paths,
         "host": _hostname(),
         "user": os.environ.get("USER") or os.environ.get("USERNAME"),
         "auto_ext_version": AUTO_EXT_VERSION,
         "python_version": platform.python_version(),
+        "catalog_version": (
+            pipeline.catalog.catalog_version if pipeline is not None else None
+        ),
+        "pdk_profile_id": (
+            pipeline.profile.profile_id if pipeline is not None else None
+        ),
     }
 
     _safe_store(write_record, run_dir, RunRecord(**base_fields))
@@ -586,6 +840,13 @@ def _run_single_task(
             "stages": active_stages,
             "dry_run": dry_run,
             "parallel": parallel,
+            "recipe_id": recipe_id,
+            "catalog_version": (
+                pipeline.catalog.catalog_version if pipeline is not None else None
+            ),
+            "pdk_profile_id": (
+                pipeline.profile.profile_id if pipeline is not None else None
+            ),
         },
     )
 
@@ -605,7 +866,7 @@ def _run_single_task(
             _execute_stages(
                 task=task,
                 project=project,
-                stages=active_stages,
+                steps=steps,
                 task_result=task_result,
                 exec_ctx=exec_ctx,
                 context=context,
@@ -613,6 +874,8 @@ def _run_single_task(
                 subprocess_env=subprocess_env,
                 tools=tools,
                 cli_knobs=cli_knobs,
+                pipeline=pipeline,
+                continue_on_lvs_fail=continue_on_lvs_fail,
                 dry_run=dry_run,
                 cancel_token=cancel_token,
                 auto_ext_root=auto_ext_root,
@@ -628,7 +891,7 @@ def _run_single_task(
             task_result,
             reporter,
             task.task_id,
-            active_stages[0] if active_stages else "si",
+            steps[0] if steps else _Step(key="si", stage="si"),
             StageStatus.FAILED,
             str(exc),
             run_dir=run_dir,
@@ -656,7 +919,7 @@ def _execute_stages(
     *,
     task: TaskConfig,
     project: ProjectConfig,
-    stages: list[str],
+    steps: list[_Step],
     task_result: TaskResult,
     exec_ctx: _TaskExecCtx,
     context: dict[str, Any],
@@ -664,24 +927,40 @@ def _execute_stages(
     subprocess_env: dict[str, str],
     tools: dict[str, Tool],
     cli_knobs: dict[str, dict[str, Any]],
+    pipeline: RecipePipeline | None,
+    continue_on_lvs_fail: bool,
     dry_run: bool,
     cancel_token: CancelToken,
     auto_ext_root: Path,
     reporter: ProgressReporter,
     run_dir: Path,
 ) -> None:
-    """Walk the stage list, appending a :class:`StageResult` for each."""
+    """Walk the step list, appending a :class:`StageResult` for each.
+
+    Identical control flow on both render paths. The only differences are that
+    a recipe run may present two ``quantus`` steps (``quantus.ext`` and
+    ``quantus.dspf``) and that "is jivaro on" comes from the recipe rather than
+    the task. Everything else -- cancellation, abort-on-failure, the synthetic
+    records for skipped steps -- reads :class:`_Step` and does not know which
+    path produced it.
+    """
 
     abort = False
     cancel_seen = False  # once set: first stage marked CANCELLED, rest SKIPPED
+    jivaro_enabled = (
+        pipeline.recipe.reduction.enabled
+        if pipeline is not None
+        else task.jivaro.enabled
+    )
 
-    for stage in stages:
+    for step in steps:
+        stage = step.stage
         # Pre-stage cancel check: short-circuit before any rendering or
         # subprocess spawn.
         if not cancel_seen and cancel_token.is_cancelled():
             # First stage hit by cancel → CANCELLED; subsequent → SKIPPED.
             _append_synthetic_stage(
-                task_result, reporter, task.task_id, stage,
+                task_result, reporter, task.task_id, step,
                 StageStatus.CANCELLED, "run cancelled by user", run_dir=run_dir,
             )
             cancel_seen = True
@@ -689,30 +968,30 @@ def _execute_stages(
 
         if cancel_seen:
             _append_synthetic_stage(
-                task_result, reporter, task.task_id, stage,
+                task_result, reporter, task.task_id, step,
                 StageStatus.SKIPPED, "aborted after cancellation", run_dir=run_dir,
             )
             continue
 
-        if stage == "jivaro" and not task.jivaro.enabled:
+        if stage == "jivaro" and not jivaro_enabled:
             _append_synthetic_stage(
-                task_result, reporter, task.task_id, stage,
+                task_result, reporter, task.task_id, step,
                 StageStatus.SKIPPED, "jivaro disabled for task", run_dir=run_dir,
             )
             continue
 
         if abort:
             _append_synthetic_stage(
-                task_result, reporter, task.task_id, stage,
+                task_result, reporter, task.task_id, step,
                 StageStatus.SKIPPED, "aborted after earlier stage failure",
                 run_dir=run_dir,
             )
             continue
 
-        _safe_call(reporter, "on_stage_start", task.task_id, stage)
-        _safe_store(append_event, run_dir, {"event": "stage_start", "stage": stage})
+        _safe_call(reporter, "on_stage_start", task.task_id, step.key)
+        _safe_store(append_event, run_dir, {"event": "stage_start", "stage": step.key})
         sr = _run_single_stage(
-            stage=stage,
+            step=step,
             project=project,
             task=task,
             tool=tools[stage],
@@ -721,6 +1000,7 @@ def _execute_stages(
             resolved_env=resolved_env,
             subprocess_env=subprocess_env,
             cli_knobs=cli_knobs,
+            pipeline=pipeline,
             dry_run=dry_run,
             cancel_token=cancel_token,
             auto_ext_root=auto_ext_root,
@@ -741,15 +1021,19 @@ def _execute_stages(
                 tool_result=sr.tool_result,
                 error=error,
                 record=record,
+                key=sr.key,
+                patch_report=sr.patch_report,
             )
             cancel_seen = True
 
         task_result.stages.append(sr)
         _safe_store(append_event, run_dir, _stage_end_event(sr))
-        _safe_call(reporter, "on_stage_end", task.task_id, stage, sr.status, sr.error)
+        _safe_call(
+            reporter, "on_stage_end", task.task_id, step.key, sr.status, sr.error
+        )
 
         if sr.status == StageStatus.FAILED:
-            if stage == "calibre" and task.continue_on_lvs_fail:
+            if stage == "calibre" and continue_on_lvs_fail:
                 logger.warning(
                     "task %s: calibre failed but continue_on_lvs_fail=True; proceeding",
                     task.task_id,
@@ -764,7 +1048,7 @@ def _append_synthetic_stage(
     task_result: TaskResult,
     reporter: ProgressReporter,
     task_id: str,
-    stage: str,
+    step: _Step,
     status: StageStatus,
     reason: str,
     *,
@@ -782,27 +1066,30 @@ def _append_synthetic_stage(
     unreadable six months later, when "did jivaro not run, or did it not get
     recorded?" is exactly the question being asked.
     """
-    _safe_call(reporter, "on_stage_start", task_id, stage)
+    _safe_call(reporter, "on_stage_start", task_id, step.key)
     moment = utcnow()
     record = StageRecord(
-        key=stage,
-        stage=stage,
+        key=step.key,
+        stage=step.stage,
         status=status,
         started_at=moment,
         ended_at=moment,
         duration_s=0.0,
         error=reason if status in (StageStatus.CANCELLED, StageStatus.FAILED) else None,
         skip_reason=reason,
+        render_target=step.plan.target.value if step.plan is not None else None,
     )
-    result = StageResult(stage=stage, status=status, error=reason, record=record)
+    result = StageResult(
+        stage=step.stage, status=status, error=reason, record=record, key=step.key
+    )
     task_result.stages.append(result)
     _safe_store(append_event, run_dir, _stage_end_event(result))
-    _safe_call(reporter, "on_stage_end", task_id, stage, status, reason)
+    _safe_call(reporter, "on_stage_end", task_id, step.key, status, reason)
 
 
 def _run_single_stage(
     *,
-    stage: str,
+    step: _Step,
     project: ProjectConfig,
     task: TaskConfig,
     tool: Tool,
@@ -811,13 +1098,16 @@ def _run_single_stage(
     resolved_env: dict[str, str],
     subprocess_env: dict[str, str],
     cli_knobs: dict[str, dict[str, Any]],
+    pipeline: RecipePipeline | None,
     dry_run: bool,
     cancel_token: CancelToken,
     auto_ext_root: Path,
 ) -> StageResult:
-    log_path = exec_ctx.paths.logs / f"{stage}.log"
+    stage = step.stage
+    log_path = exec_ctx.paths.logs / f"{step.key}.log"
     started_at = utcnow()
     started_perf = time.perf_counter()
+    patch_report: StagePatchReport | None = None
 
     def _finish(
         status: StageStatus,
@@ -829,7 +1119,7 @@ def _run_single_stage(
         logged: bool = False,
     ) -> StageResult:
         record = StageRecord(
-            key=stage,
+            key=step.key,
             stage=stage,
             status=status,
             started_at=started_at,
@@ -840,6 +1130,7 @@ def _run_single_stage(
             exit_code=_exit_code_of(tool_result),
             log_path=_run_relative(exec_ctx.run_dir, log_path) if logged else None,
             rendered_path=_run_relative(exec_ctx.run_dir, rendered),
+            render_target=step.plan.target.value if step.plan is not None else None,
             artifacts=[str(p) for p in (tool_result.artifact_paths if tool_result else [])],
             details=_jsonable_diagnostics(tool_result),
             error=error,
@@ -850,10 +1141,44 @@ def _run_single_stage(
             tool_result=tool_result,
             error=error,
             record=record,
+            key=step.key,
+            patch_report=patch_report,
         )
 
     rendered_path: Path
-    if tool.has_template:
+    if pipeline is not None and step.plan is not None:
+        # Catalog-driven render: the template comes from the catalog, the
+        # values from the Recipe and the PdkProfile, the manual edits from
+        # Recipe.patches. Every refusal in there is an AutoExtError, so one
+        # unrenderable stage fails its run rather than the whole dispatch.
+        try:
+            rendered = render.render_one(
+                step.plan,
+                context=context,
+                recipe=pipeline.recipe,
+                profile=pipeline.profile,
+                resolved_env=resolved_env,
+                out_dir=exec_ctx.paths.rendered,
+                resources=pipeline.resources,
+                catalog=pipeline.catalog,
+                templates_root=pipeline.templates_root,
+            )
+        except AutoExtError as exc:
+            return _finish(StageStatus.FAILED, error=f"render failed: {exc}")
+        patch_report = rendered.patch_report
+        rendered_path = rendered.out_path
+        rendered_record: Path | None = rendered_path
+    elif pipeline is not None and tool.has_template:
+        # A templated stage with no plan means the target list and the stage
+        # list disagree; that is a bug in _recipe_steps, not a user error.
+        return _finish(
+            StageStatus.FAILED,
+            error=(
+                f"stage {stage} needs a rendered input but the recipe plan "
+                f"carries no render target for step {step.key!r}"
+            ),
+        )
+    elif tool.has_template:
         template_path = _resolve_template_path(task, stage, auto_ext_root=auto_ext_root)
         if template_path is None:
             return _finish(
@@ -880,14 +1205,15 @@ def _run_single_stage(
             )
         except AutoExtError as exc:
             return _finish(StageStatus.FAILED, error=f"render failed: {exc}")
-        if stage == "si":
-            _archive_si_env(rendered_path, exec_ctx.paths.rendered)
-        rendered_record: Path | None = rendered_path
+        rendered_record = rendered_path
     else:
         # strmout consumes output_dir / layer_map directly; build_argv still
         # wants a path, but there is no rendered file to point a record at.
         rendered_path = exec_ctx.paths.rendered
         rendered_record = None
+
+    if stage == "si" and rendered_record is not None:
+        _archive_si_env(rendered_path, exec_ctx.paths.rendered)
 
     if dry_run:
         return _finish(StageStatus.DRY_RUN, rendered=rendered_record)
@@ -944,14 +1270,15 @@ def _run_single_stage(
 
 
 def _derive_recipe_id(task: TaskConfig) -> str:
-    """Name the effective configuration for the run directory.
+    """Name the effective configuration for the run directory. Legacy path only.
 
-    S1 has no ``Recipe`` object yet, so the closest stand-in for "which
-    configuration is this" is the template that shapes the extraction. The
-    first configured stage template wins, in the order the stages differ
-    most: quantus, then calibre, then si, then jivaro. ``ext.cmd.j2``
-    becomes ``ext``; a task with no templates at all becomes ``adhoc``,
-    which still produces a well-formed slug.
+    A recipe run names its directory after ``Recipe.recipe_id``, which is what
+    the user actually chose. Without a recipe there is no such name, so the
+    closest stand-in for "which configuration is this" is the template that
+    shapes the extraction. The first configured stage template wins, in the
+    order the stages differ most: quantus, then calibre, then si, then jivaro.
+    ``ext.cmd.j2`` becomes ``ext``; a task with no templates at all becomes
+    ``adhoc``, which still produces a well-formed slug.
     """
 
     for stage in ("quantus", "calibre", "si", "jivaro"):
@@ -1023,6 +1350,206 @@ def _recipe_snapshot(
     )
 
 
+def _recipe_steps(pipeline: RecipePipeline, stages: list[str]) -> list[_Step]:
+    """Expand a Recipe into the ordered list of steps this run executes.
+
+    The stage set is ``recipe.stages`` intersected with the caller's ``stages``
+    (the CLI's ``--stage``), so a recipe that declares no jivaro stage cannot
+    be talked into running one, and ``--stage calibre`` still narrows a
+    five-stage recipe to one stage.
+
+    ``strmout`` is added by hand: it renders nothing, so
+    :func:`auto_ext.core.render.plan_targets` has no target to report for it,
+    yet the GDS stream it writes is what Calibre reads.
+
+    ``quantus`` may appear twice. ``recipe.output.emit`` is a list and the
+    catalog has one target per output form, so a recipe asking for both an
+    extracted view and a DSPF runs Quantus twice with two different ``.cmd``
+    files. The legacy path could not express this at all: ``TemplatePaths``
+    has one quantus slot.
+    """
+
+    plans = render.plan_targets(
+        pipeline.recipe, stages=stages, catalog=pipeline.catalog
+    )
+    by_stage: dict[str, list[render.TargetPlan]] = {}
+    for plan in plans:
+        by_stage.setdefault(plan.stage.value, []).append(plan)
+
+    steps: list[_Step] = []
+    for stage in STAGE_ORDER:
+        if stage not in stages:
+            continue
+        if Stage(stage) not in pipeline.recipe.stages:
+            continue
+        targets = by_stage.get(stage)
+        if targets:
+            steps.extend(
+                _Step(key=plan.stage_key, stage=stage, plan=plan) for plan in targets
+            )
+        else:
+            steps.append(_Step(key=stage, stage=stage))
+    return steps
+
+
+def _recipe_context(
+    pipeline: RecipePipeline,
+    *,
+    project: ProjectConfig,
+    task: TaskConfig,
+    dut: DutSnapshot,
+    resolved_env: dict[str, str],
+    run_dir: Path,
+    run_id: str,
+    slug: str,
+    workarea: Path,
+    created_at: datetime,
+    batch_id: str | None,
+    dry_run: bool,
+    max_workers: int,
+    parallel: bool,
+    steps: list[_Step],
+) -> dict[str, Any]:
+    """Build the recipe path's render context, workspace paths included.
+
+    The three workspace paths still come from ``project.yaml``: ``WorkspaceConfig``
+    (schema doc section 1.4) does not exist yet, so ``extraction_output_dir`` /
+    ``intermediate_dir`` / ``dspf_out_path`` keep their current owner and their
+    current resolution rules. Everything else in the context comes from the
+    Recipe, the PdkProfile and the catalog.
+
+    The context is built twice. ``dspf_out_path`` may reference the PDK's
+    resolved deck directories (``${calibre_lvs_dir}``), which only exist once
+    the profile's path expressions have been resolved -- which is what the
+    first build does. Both builds are pure, so the second one is the only
+    result that escapes.
+    """
+
+    output_dir = _resolve_output_dir(
+        project, task, resolved_env, run_slug=slug, run_id=run_id
+    )
+    intermediate_tpl = substitute_env(project.intermediate_dir, resolved_env)
+    intermediate_dir = intermediate_tpl.format(cell=task.cell, library=task.library)
+
+    def facts(dspf: str | None) -> render.RunFacts:
+        return render.RunFacts(
+            run_id=run_id,
+            run_slug=slug,
+            run_dir=run_dir,
+            workarea=workarea,
+            output_dir=output_dir,
+            intermediate_dir=intermediate_dir,
+            dspf_out_path=dspf,
+            work_dir=(run_dir / "work") if parallel else None,
+            started_at=created_at,
+            batch_id=batch_id,
+            dry_run=dry_run,
+            max_workers=max_workers,
+            stages=tuple(step.key for step in steps),
+        )
+
+    site = render.SiteFacts(
+        employee_id=(
+            project.employee_id
+            or os.environ.get("USER")
+            or os.environ.get("USERNAME")
+            or "unknown"
+        ),
+        user=os.environ.get("USER") or os.environ.get("USERNAME"),
+        host=_hostname(),
+    )
+
+    def build(dspf: str | None) -> dict[str, Any]:
+        return render.build_context(
+            dut=dut,
+            recipe=pipeline.recipe,
+            profile=pipeline.profile,
+            run=facts(dspf),
+            resolved_env=resolved_env,
+            resources=pipeline.resources,
+            site=site,
+            catalog=pipeline.catalog,
+        )
+
+    first = build(None)
+    dspf_out_path = _resolve_dspf_out_path(
+        project, task, resolved_env, _recipe_path_tokens(first)
+    )
+    return build(dspf_out_path)
+
+
+def _recipe_path_tokens(context: dict[str, Any]) -> dict[str, Any]:
+    """Legacy flat path tokens a ``dspf_out_path`` expression may reference.
+
+    ``dspf_out_path`` is still a project.yaml string written in the old flat
+    vocabulary (``${output_dir}`` / ``${calibre_lvs_dir}``), so the recipe path
+    hands :func:`_resolve_dspf_out_path` the same names, filled from the new
+    namespaced context. It is a translation table, not a second source of
+    truth: every value here is read straight back out of the context that will
+    render the files.
+    """
+
+    pdk = context["pdk"]
+    tokens: dict[str, Any] = {
+        "output_dir": context["paths"]["output_dir"],
+        "intermediate_dir": context["paths"]["intermediate_dir"],
+        "layer_map": pdk["layer_map"],
+        "calibre_lvs_dir": pdk["lvs_dir"],
+        "calibre_lvs_basename": pdk["lvs_basename"],
+        "qrc_deck_dir": pdk["qrc_deck_dir"],
+    }
+    tokens.update(pdk["paths"])
+    return {k: v for k, v in tokens.items() if v is not None}
+
+
+def _recipe_snapshot_from_recipe(
+    pipeline: RecipePipeline, context: dict[str, Any], steps: list[_Step]
+) -> RecipeSnapshot:
+    """Freeze a real :class:`~auto_ext.model.recipe.Recipe` into ``run.json``.
+
+    ``RunRecord.recipe`` is still typed as the S1 :class:`RecipeSnapshot`, so
+    both render paths write the same shape and every existing reader keeps
+    working. :meth:`Recipe.to_snapshot` is the recipe layer's own converter --
+    it fills the seven legacy knob names from the typed fields, which is what
+    makes a recipe-driven run and a knob-driven run comparable side by side in
+    the history list.
+
+    The three things a Recipe deliberately does not carry are passed in here:
+    the templates (catalog state), ``dspf_out_path`` (workspace state) and the
+    resolved deck paths (profile state). ``templates`` is keyed by step key
+    rather than stage name, because a recipe emitting both quantus forms
+    renders two different ``.cmd`` files in one run and a stage-keyed map would
+    silently keep only the second.
+    """
+
+    templates = {
+        step.key: str(
+            render.template_path_for(
+                step.plan.spec, templates_root=pipeline.templates_root
+            )
+        )
+        for step in steps
+        if step.plan is not None
+    }
+    pdk = context["pdk"]
+    paths = {
+        key: str(value)
+        for key, value in (
+            ("calibre_lvs_dir", pdk["lvs_dir"]),
+            ("calibre_lvs_basename", pdk["lvs_basename"]),
+            ("calibre_lvs_rules_file", pdk["lvs_rules_file"]),
+            ("qrc_deck_dir", pdk["qrc_deck_dir"]),
+            *pdk["paths"].items(),
+        )
+        if value is not None
+    }
+    return pipeline.recipe.to_snapshot(
+        templates=templates,
+        dspf_out_path=_opt_str(context["paths"]["dspf_out"]),
+        paths=paths,
+    )
+
+
 def _finalize_run(
     *,
     run_dir: Path,
@@ -1052,6 +1579,9 @@ def _finalize_run(
     """
 
     stage_records = [s.record for s in task_result.stages if s.record is not None]
+    patch_reports = [
+        s.patch_report for s in task_result.stages if s.patch_report is not None
+    ]
     lvs = _archive_lvs(paths, task_result)
     ended_at = utcnow()
 
@@ -1062,6 +1592,7 @@ def _finalize_run(
             overall=task_result.overall,
             stages=stage_records,
             results=RunResults(lvs=lvs),
+            patch_reports=patch_reports,
             cancelled_by=("user" if task_result.overall == TaskStatus.CANCELLED else None),
         )
     except Exception:  # noqa: BLE001 — a broken record must not kill the run
@@ -1183,7 +1714,10 @@ def _stage_end_event(sr: StageResult) -> dict[str, Any]:
     record = sr.record
     return {
         "event": "stage_end",
-        "stage": sr.stage,
+        # The step key, not the stage name: identical on the legacy path, and
+        # the only thing that tells ``quantus.ext`` from ``quantus.dspf`` when
+        # a recipe emits both output forms.
+        "stage": sr.key,
         "status": str(sr.status),
         "duration_s": record.duration_s if record else None,
         "exit_code": record.exit_code if record else None,
@@ -1657,16 +2191,44 @@ def _validate_stages(stages: list[str]) -> None:
         )
 
 
-def _validate_tasks(tasks: list[TaskConfig], stages: list[str]) -> None:
+def _validate_tasks(
+    tasks: list[TaskConfig],
+    stages: list[str],
+    *,
+    pipeline: RecipePipeline | None = None,
+) -> None:
+    """Refuse a dispatch that cannot produce a valid jivaro input.
+
+    ``inputView`` is ``library/cell/out_file``, so a reduction run without an
+    ``out_file`` would render a two-segment view name. Who decides reduction is
+    on differs by path: the task's ``jivaro.enabled`` on the legacy path, the
+    recipe's ``reduction.enabled`` on the recipe path -- and on the recipe path
+    the recipe also has to declare the jivaro stage at all.
+    """
+
     if not tasks:
         raise ConfigError("no tasks to run")
-    if "jivaro" in stages:
+    if "jivaro" not in stages:
+        return
+    if pipeline is not None:
+        if not pipeline.recipe.reduction.enabled:
+            return
+        if Stage.JIVARO not in pipeline.recipe.stages:
+            return
         for t in tasks:
-            if t.jivaro.enabled and t.out_file is None:
+            if t.out_file is None:
                 raise ConfigError(
-                    f"task {t.task_id}: jivaro enabled but out_file is not set "
+                    f"task {t.task_id}: recipe {pipeline.recipe.recipe_id!r} enables "
+                    "reduction but out_file is not set "
                     "(jivaro inputView renders to library/cell/out_file)"
                 )
+        return
+    for t in tasks:
+        if t.jivaro.enabled and t.out_file is None:
+            raise ConfigError(
+                f"task {t.task_id}: jivaro enabled but out_file is not set "
+                "(jivaro inputView renders to library/cell/out_file)"
+            )
 
 
 def _publish_si_env_to_output_dir(rendered_si_env: Path, output_dir: Path) -> None:
@@ -1763,6 +2325,7 @@ def _validate_task_outputs(
     resolved_env: dict[str, str],
     *,
     parallel: bool,
+    pipeline: RecipePipeline | None = None,
 ) -> None:
     """Decide what to do about tasks that share one Cadence workspace.
 
@@ -1793,7 +2356,12 @@ def _validate_task_outputs(
     collisions: list[str] = []
     for index, t in enumerate(tasks):
         dut = DutSnapshot.from_task_config(t)
-        slug = make_run_slug(dut, RecipeSnapshot(recipe_id=_derive_recipe_id(t)))
+        recipe_id = (
+            pipeline.recipe.recipe_id
+            if pipeline is not None
+            else _derive_recipe_id(t)
+        )
+        slug = make_run_slug(dut, RecipeSnapshot(recipe_id=recipe_id))
         out = _resolve_output_dir(
             project, t, resolved_env, run_slug=slug, run_id=f"@pending-{index}"
         )

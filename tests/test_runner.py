@@ -14,13 +14,20 @@ rather than by spelling it out.
 from __future__ import annotations
 
 import json
+import os
+import socket
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from auto_ext.core.config import load_project, load_tasks
+from auto_ext.core.errors import AutoExtError
 from auto_ext.core.run_store import read_events, read_record
 from auto_ext.core.runner import run_tasks
+
+if TYPE_CHECKING:
+    from auto_ext.model.pdk import PdkProfile
 
 
 def _load(config_dir: Path):
@@ -1696,3 +1703,492 @@ def test_config_error_after_allocation_leaves_no_orphan_run(
         )
 
     assert _run_dirs(ae_root) == []
+
+
+# ---- the catalog-driven render path ----------------------------------------
+#
+# Everything above this line runs the legacy path: no ``recipe=``, so templates
+# come from ``project.templates`` and values from the manifest knob merge. The
+# tests below pass a Recipe and a PdkProfile, which is the *only* thing that
+# switches the runner over to :mod:`auto_ext.core.render`. Both paths have to
+# stay green at the same time until the knob machinery is deleted.
+
+
+def _profile(workarea: Path) -> "PdkProfile":
+    """A PdkProfile equivalent to what ``project_tools_config`` describes.
+
+    Same deck directories, same corner literal, same tech name -- so a recipe
+    run and a legacy run of the same task produce comparable files.
+    """
+    from auto_ext.model.pdk import (
+        CornerSpec,
+        LvsDeckSet,
+        LvsDeckVariant,
+        PdkProfile,
+        QrcDeck,
+    )
+
+    wa = workarea.as_posix()
+    return PdkProfile(
+        profile_id="hn001",
+        display_name="HN001 (test)",
+        tech_name="HN001",
+        layer_map=f"{wa}/fake/layers.map",
+        lvs_decks=LvsDeckSet(
+            dir_expr="$calibre_source_added_place|parent",
+            variants=[LvsDeckVariant(name="wodio", rules_suffix="wodio")],
+            default_variant="wodio",
+        ),
+        qrc=QrcDeck(
+            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
+        ),
+        corners=[
+            CornerSpec(
+                name="typical", technology_corner="TYPICAL", default_temperature_c=55.0
+            )
+        ],
+        default_corner="typical",
+        env_overrides={
+            "WORK_ROOT": wa,
+            "WORK_ROOT2": wa,
+            "VERIFY_ROOT": f"{wa}/fake/verify",
+            "SETUP_ROOT": f"{wa}/fake/setup",
+            "PDK_LAYER_MAP_FILE": f"{wa}/fake/layers.map",
+            "calibre_source_added_place": (
+                f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
+            ),
+        },
+    )
+
+
+def _recipe(**overrides):
+    from auto_ext.model.recipe import Recipe
+
+    fields = {"recipe_id": "rc-coupled-typical", "name": "RC coupled, typical"}
+    fields.update(overrides)
+    return Recipe(**fields)
+
+
+def test_recipe_path_runs_every_stage_and_names_files_after_the_artifact(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["si", "strmout", "calibre", "quantus", "jivaro"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        recipe=_recipe(reduction={"enabled": True}),
+        profile=_profile(workarea),
+    )
+
+    assert summary.passed == 1
+    run_dir = _only_run_dir(ae_root)
+    rendered = run_dir / "rendered"
+    # Named after what the file *is*, not after whichever template made it.
+    assert sorted(p.name for p in rendered.iterdir()) == [
+        "ext.cmd",
+        "jivaro.xml",
+        "lvs.qci",
+        "si.env",
+    ]
+    assert {s.stage: s.status for s in summary.tasks[0].stages} == {
+        "si": "passed",
+        "strmout": "passed",
+        "calibre": "passed",
+        "quantus": "passed",
+        "jivaro": "passed",
+    }
+
+
+def test_recipe_path_records_catalog_version_and_profile_id(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    from auto_ext.catalog import builtin_catalog
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["si"],
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(), profile=_profile(workarea),
+    )
+
+    record = read_record(_only_run_dir(ae_root))
+    assert record.catalog_version == builtin_catalog().catalog_version
+    assert record.pdk_profile_id == "hn001"
+    assert record.recipe.recipe_id == "rc-coupled-typical"
+    assert record.recipe.name == "RC coupled, typical"
+    # to_snapshot fills the seven legacy knob names from the typed fields, so a
+    # recipe run and a knob run stay comparable in the history list.
+    assert record.recipe.knobs["calibre"]["lvs_variant"] == "wodio"
+    assert record.recipe.knobs["quantus"]["min_res"] == 0.001
+    assert record.stage("si").render_target == "si.env"
+
+
+def test_legacy_path_records_no_catalog_and_no_profile(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """The new run.json fields exist on both paths and stay empty on the old
+    one, so "which pipeline made this run" is answerable from the record."""
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["si"], auto_ext_root=ae_root, workarea=workarea
+    )
+
+    record = read_record(_only_run_dir(ae_root))
+    assert record.catalog_version is None
+    assert record.pdk_profile_id is None
+    assert record.patch_reports == []
+    assert record.stage("si").render_target is None
+
+
+def test_recipe_path_flattens_the_namespaced_context_into_the_record(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["si"],
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(), profile=_profile(workarea),
+    )
+
+    ctx = read_record(_only_run_dir(ae_root)).context
+    assert ctx["cell"] == "inv"
+    assert ctx["pdk.corner"] == "TYPICAL"
+    assert ctx["recipe.extraction.min_res_ohm"] == 0.001
+    assert ctx["recipe.lvs.deck_variant"] == "wodio"
+    assert ctx["run.id"].endswith("_inv-rc-coupled-typical")
+
+
+def test_recipe_emitting_both_output_forms_runs_quantus_twice(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """``ProjectConfig.templates`` has one quantus slot, so this is a shape the
+    legacy path structurally cannot produce."""
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["quantus"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        recipe=_recipe(output={"emit": ["extracted_view", "dspf"]}),
+        profile=_profile(workarea),
+    )
+
+    assert summary.passed == 1
+    keys = [s.key for s in summary.tasks[0].stages]
+    assert keys == ["quantus.ext", "quantus.dspf"]
+    run_dir = _only_run_dir(ae_root)
+    assert (run_dir / "rendered" / "ext.cmd").is_file()
+    assert (run_dir / "rendered" / "dspf.cmd").is_file()
+    # One log per invocation, so neither overwrites the other.
+    assert (run_dir / "logs" / "quantus.ext.log").is_file()
+    assert (run_dir / "logs" / "quantus.dspf.log").is_file()
+    record = read_record(run_dir)
+    assert [s.key for s in record.stages] == ["quantus.ext", "quantus.dspf"]
+    assert [s.stage for s in record.stages] == ["quantus", "quantus"]
+    assert record.requested_stages == ["quantus.ext", "quantus.dspf"]
+
+
+def test_recipe_stages_narrow_the_run(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["si", "strmout", "calibre", "quantus", "jivaro"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        recipe=_recipe(stages=["si", "calibre"]),
+        profile=_profile(workarea),
+    )
+
+    assert [s.stage for s in summary.tasks[0].stages] == ["si", "calibre"]
+
+
+def test_reduction_enabled_comes_from_the_recipe_not_the_task(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """tasks.yaml in this fixture sets ``jivaro.enabled: true``; on the recipe
+    path that field is not consulted at all."""
+
+    project, tasks = _load(project_tools_config)
+    assert tasks[0].jivaro.enabled is True
+    ae_root = tmp_path / "project_root"
+
+    summary = run_tasks(
+        project, tasks, stages=["jivaro"],
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(reduction={"enabled": False}), profile=_profile(workarea),
+    )
+
+    stage = summary.tasks[0].stages[0]
+    assert stage.status == "skipped"
+    assert stage.error == "jivaro disabled for task"
+
+
+def test_recipe_without_a_profile_is_refused(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    from auto_ext.core.errors import ConfigError
+
+    project, tasks = _load(project_tools_config)
+    with pytest.raises(ConfigError, match="needs a pdk profile"):
+        run_tasks(
+            project, tasks, stages=["si"],
+            auto_ext_root=tmp_path / "project_root", workarea=workarea,
+            recipe=_recipe(),
+        )
+
+
+def test_profile_without_a_recipe_is_refused(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    from auto_ext.core.errors import ConfigError
+
+    project, tasks = _load(project_tools_config)
+    with pytest.raises(ConfigError, match="without a recipe"):
+        run_tasks(
+            project, tasks, stages=["si"],
+            auto_ext_root=tmp_path / "project_root", workarea=workarea,
+            profile=_profile(workarea),
+        )
+
+
+def test_an_unknown_corner_fails_the_run_before_any_file_is_written(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """The corner is translated through the profile, so a name it does not
+    define has to stop here rather than reach Quantus as an unknown string."""
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+
+    with pytest.raises(AutoExtError, match="rcworst"):
+        run_tasks(
+            project, tasks, stages=["quantus"],
+            auto_ext_root=ae_root, workarea=workarea,
+            recipe=_recipe(extraction={"corner": "rcworst"}),
+            profile=_profile(workarea),
+        )
+    assert _run_dirs(ae_root) == []
+
+
+def test_a_setting_the_template_hardcodes_fails_its_stage_with_a_reason(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+
+    summary = run_tasks(
+        project, tasks, stages=["quantus"],
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(extraction={"decoupling_factor": 0.5}),
+        profile=_profile(workarea),
+    )
+
+    stage = summary.tasks[0].stages[0]
+    assert stage.status == "failed"
+    assert "decoupling_factor" in stage.error
+    assert "Recipe.patches" in stage.error
+    assert not (_only_run_dir(ae_root) / "rendered" / "ext.cmd").exists()
+
+
+def test_recipe_patches_land_in_the_rendered_file_and_in_run_json(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """The escape hatch, end to end: capture an edit against one render, then
+    run again and find both the edit in the file and its outcome in run.json."""
+
+    from auto_ext.core.env import substitute_env
+    from auto_ext.core.patch import (
+        capture_patch,
+        mask_values,
+        render_masked,
+        sha256_text,
+    )
+    from auto_ext.core.render import plan_targets
+    from auto_ext.core.template import make_jinja_env
+
+    project, tasks = _load(project_tools_config)
+    profile = _profile(workarea)
+    ae_root = tmp_path / "project_root"
+
+    # First run: no patches. Read back the context it recorded so the capture
+    # sees exactly the render the runner produced.
+    run_tasks(
+        project, tasks, stages=["si"],
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(), profile=profile,
+    )
+    first = _only_run_dir(ae_root)
+    base_real = (first / "rendered" / "si.env").read_text(encoding="utf-8")
+
+    plan = plan_targets(_recipe())[0]
+    source = plan.spec.template_path.read_text(encoding="utf-8")
+    env = {**project.env_overrides, **profile.env_overrides}
+    substituted = substitute_env(source, env)
+    context = _si_context(project, tasks[0], profile, first, workarea, env)
+    assert make_jinja_env().from_string(substituted).render(**context) == base_real
+
+    patch = capture_patch(
+        template_source=substituted,
+        template_sha256=sha256_text(source),
+        stage="si",
+        template_id=plan.spec.template_id,
+        profile_id=profile.profile_id,
+        catalog_version=None,
+        base_real=base_real,
+        base_masked=render_masked(substituted, context),
+        edited_real=base_real.replace(
+            'simSimulator = "auCdl"\n',
+            'simSimulator = "auCdl"\nsimExtra = "yes"\n',
+        ),
+        values=mask_values(substituted, context),
+        intents={0: "office asked for the extra si line"},
+    )
+
+    second_root = tmp_path / "project_root2"
+    run_tasks(
+        project, tasks, stages=["si"],
+        auto_ext_root=second_root, workarea=workarea,
+        recipe=_recipe(patches=[patch]), profile=profile,
+    )
+    run_dir = _only_run_dir(second_root)
+    assert 'simExtra = "yes"' in (run_dir / "rendered" / "si.env").read_text(
+        encoding="utf-8"
+    )
+
+    record = read_record(run_dir)
+    assert len(record.patch_reports) == 1
+    report = record.patch_reports[0]
+    assert report.stage == "si"
+    assert report.template_id == "si/default.env.j2"
+    assert report.blocked is False
+    assert [o.status for o in report.outcomes] == ["clean"]
+    assert report.outcomes[0].intent == "office asked for the extra si line"
+
+
+def _si_context(project, task, profile, run_dir, workarea, env):
+    """Rebuild the render context the runner used for a si stage.
+
+    Only the patch test needs this; every other assertion reads the context the
+    runner already recorded in run.json.
+    """
+    from auto_ext.core import render
+    from auto_ext.model.run import DutSnapshot, parse_run_id
+
+    run_id = run_dir.name
+    _, slug = parse_run_id(run_id)
+    return render.build_context(
+        dut=DutSnapshot.from_task_config(task),
+        recipe=_recipe(),
+        profile=profile,
+        run=render.RunFacts(
+            run_id=run_id,
+            run_slug=slug,
+            run_dir=run_dir,
+            workarea=workarea,
+            output_dir=f"{workarea.as_posix()}/cds/verify/QCI_PATH_{task.cell}",
+            intermediate_dir=workarea.as_posix(),
+            dspf_out_path=f"{workarea.as_posix()}/{task.cell}.dspf",
+            stages=("si",),
+        ),
+        resolved_env=env,
+        site=render.SiteFacts(
+            employee_id=project.employee_id or "unknown",
+            user=os.environ.get("USER") or os.environ.get("USERNAME"),
+            host=socket.gethostname(),
+        ),
+    )
+
+
+def test_both_render_paths_produce_the_same_bytes_for_the_shipped_defaults(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """The migration's load-bearing claim: at their defaults, Recipe +
+    PdkProfile reproduce exactly what the manifest knobs produced.
+
+    Byte equality, not "looks similar". The patch escape hatch diffs against
+    the generated text, so a pipeline that repainted a file on switchover would
+    bury every real manual edit in noise -- and a single changed literal in a
+    Quantus command file is a different extraction, not a cosmetic difference.
+
+    All four generated files come out identical; only their names change,
+    because the recipe path names a file after the artifact it is
+    (``si.env``) rather than after the template that made it
+    (``default.env``).
+    """
+    project, tasks = _load(project_tools_config)
+    stages = ["si", "calibre", "quantus", "jivaro"]
+
+    legacy_root = tmp_path / "legacy"
+    run_tasks(
+        project, tasks, stages=stages,
+        auto_ext_root=legacy_root, workarea=workarea, dry_run=True,
+    )
+    recipe_root = tmp_path / "recipe"
+    run_tasks(
+        project, tasks, stages=stages,
+        auto_ext_root=recipe_root, workarea=workarea, dry_run=True,
+        recipe=_recipe(reduction={"enabled": True}), profile=_profile(workarea),
+    )
+
+    legacy = _only_run_dir(legacy_root) / "rendered"
+    modern = _only_run_dir(recipe_root) / "rendered"
+    for old_name, new_name in (
+        ("si.env", "si.env"),
+        ("calibre_lvs.qci", "lvs.qci"),
+        ("ext.cmd", "ext.cmd"),
+        ("default.xml", "jivaro.xml"),
+    ):
+        assert (legacy / old_name).read_text(encoding="utf-8") == (
+            modern / new_name
+        ).read_text(encoding="utf-8"), new_name

@@ -1,0 +1,804 @@
+"""The built-in parameter catalog: schema, loader, self-validation, queries.
+
+``options.yaml`` next to this module is the data; everything here is the
+contract that keeps the data honest. It replaces the per-template
+``*.manifest.yaml`` knob system with one table that covers **every** value a
+generated EDA input file contains -- not only the seven that happened to be
+promoted to knobs -- and records, for each of them, who owns it, where it
+lands, and exactly how it is spelled on the page.
+
+Three ideas do most of the work:
+
+**Owner is not section.** ``owner`` answers "which object holds this value"
+(recipe / profile / cells / run / resources / fixed) and nothing else. Which
+part of which file it is written into is a property of the *landing site*
+(``target`` + ``section``). The two draft catalogs used one ``group`` column
+for both, with the result that ``netlist`` meant "DSPF output options" in one
+file and "si.env netlisting" in the other, and the two tables could not be
+merged at all.
+
+**Observation is not confidence.** ``observed`` says the row was transcribed
+out of a file in this repo, and ``source_ref`` says which line -- that is a
+fact, always certain, because copying is not judging. ``choices_confidence``
+says how sure we are of the legal *value set*, which for most Quantus options
+is pure guesswork. A row can be certainly hardcoded and completely unknown at
+the same time; ``extract_type`` is exactly that, and one column cannot say so.
+
+**Rendering is data.** The patch escape hatch (``docs/refactor/02-patch.md``)
+diffs a user's manual edit against the *generated* text. A catalog that cannot
+reproduce a file's quoting, line breaking and indentation byte for byte would
+repaint the whole file on every catalog upgrade and drown the user's real
+edits in noise. So each landing site carries its own rendering rule, and each
+target carries the defaults those rules fall back to. This is why
+``-array_vias_spacing auto`` (bare) and ``-max_via_array_size "auto"``
+(quoted) are recorded as different rather than tidied into agreement.
+
+What this module does NOT do: render anything. It answers questions about
+options; the renderer is a separate concern and lands with the C2 work.
+
+Verification claims. Nothing in ``options.yaml`` has been checked against a
+real Cadence installation -- there is none on the development machine. Every
+row that depends on one is marked in place with a ``question:`` and mirrored
+in ``docs/refactor/OFFICE_TODO.md``. In particular **no** ``range`` in the
+file has been verified (``range_verified`` is false on every row), and the
+``unit`` of ``coupling_cap_threshold_absolute`` is transcribed from a
+hand-written manifest that is physically impossible as written.
+"""
+
+from __future__ import annotations
+
+import re
+from enum import StrEnum
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from pydantic import Field, ValidationError, model_validator
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
+
+from auto_ext.core.errors import AutoExtError
+from auto_ext.model.common import Frozen, RenderTarget, Stage
+
+__all__ = [
+    "BUILTIN_CATALOG_PATH",
+    "Catalog",
+    "CatalogError",
+    "Confidence",
+    "Currently",
+    "LandingSite",
+    "Layout",
+    "OptionSpec",
+    "OptionType",
+    "Owner",
+    "Quoting",
+    "RenderRule",
+    "RenderTargetSpec",
+    "TemplateVarAudit",
+    "audit_template_vars",
+    "builtin_catalog",
+    "default_templates_root",
+    "load_catalog",
+]
+
+#: The catalog data file. Resolved from ``__file__`` and never from the
+#: current directory: the test suite runs with cwd inside the repository and a
+#: cwd-relative lookup would silently pass by finding the repo's own copy.
+BUILTIN_CATALOG_PATH = Path(__file__).resolve().parent / "options.yaml"
+
+#: ``<repo>/templates``. Same reasoning: absolute, derived from ``__file__``.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class CatalogError(AutoExtError):
+    """``options.yaml`` is missing, unparsable, or internally inconsistent."""
+
+
+# ---- enums -----------------------------------------------------------------
+
+
+class Owner(StrEnum):
+    """Which object holds the value. Object identity only, never file layout."""
+
+    #: A shared, portable extraction recipe. Must contain no PDK literal, no
+    #: cell name and no machine property, or it stops being portable.
+    RECIPE = "recipe"
+    #: A PdkProfile: process facts (deck paths, corner literals, supply name
+    #: tables, parasitic device names).
+    PROFILE = "profile"
+    #: A row of the cell table: the DUT identity.
+    CELLS = "cells"
+    #: Derived per run: workspace paths, result artifacts, invocation choices.
+    RUN = "run"
+    #: Machine- and site-local: core counts, license waits, employee id.
+    #: Separate from RECIPE on purpose -- carrying a core count inside a
+    #: Recipe means moving from an 8-core box to a 64-core box edits the
+    #: recipe, which defeats portability (DECISIONS.md #21).
+    RESOURCES = "resources"
+    #: Not a setting: structure, plumbing, provenance, dead panel remnants.
+    #: Recorded so nobody has to rediscover why the line is there.
+    FIXED = "fixed"
+
+
+class OptionType(StrEnum):
+    STR = "str"
+    INT = "int"
+    FLOAT = "float"
+    BOOL = "bool"
+    #: One value out of a closed set. See ``choices_confidence`` before
+    #: building a combo box out of it.
+    ENUM = "enum"
+    #: Several values; ``choices``, when present, constrains the members.
+    LIST = "list"
+    PATH = "path"
+    #: Structure rather than a value: a comment block, an empty Tcl table, a
+    #: composite line, an extension point.
+    STRUCTURAL = "structural"
+
+
+class Confidence(StrEnum):
+    """How sure we are of the legal value SET (never of the current value)."""
+
+    CERTAIN = "certain"
+    LIKELY = "likely"
+    #: Invented. Never render this as a closed dropdown (DECISIONS.md #19):
+    #: free text plus the default, with the choices shown as hints.
+    GUESS = "guess"
+
+
+class Currently(StrEnum):
+    """How the value reaches the generated file today."""
+
+    #: ``[[var]]`` plus a knob declaration in a ``*.manifest.yaml``. Exactly
+    #: seven of these exist: five in each quantus manifest (the same five,
+    #: declared twice) plus lvs_variant and connect_by_name in the calibre one.
+    MANIFEST_KNOB = "manifest_knob"
+    #: ``[[var]]`` fed straight from ``runner._build_context``.
+    JINJA_VAR = "jinja_var"
+    #: Typed into the ``.j2``. Unreachable without editing the template.
+    HARDCODED_LITERAL = "hardcoded_literal"
+    #: Assembled in ``auto_ext/tools/*.py`` (the strmout stage has no template).
+    PYTHON_ARGV = "python_argv"
+    #: A ProjectConfig / TaskSpec field that never reaches a template as a
+    #: ``[[var]]``.
+    CONFIG_FIELD = "config_field"
+    #: Not emitted at all. Either a proposal (``observed: false``) or a line a
+    #: real export carries that we drop (``observed: true``).
+    ABSENT = "absent"
+
+
+class Quoting(StrEnum):
+    """How the value is spelled at one landing site."""
+
+    BARE = "bare"
+    DOUBLE = "double"
+    #: SKILL boolean: ``'t`` / ``'nil``.
+    SKILL_BOOL = "skill_bool"
+    #: SKILL list: ``'("auCdl" "schematic")``.
+    SKILL_LIST = "skill_list"
+    XML_ATTR = "xml_attr"
+    #: Tcl braces, passed through verbatim.
+    TCL_BRACE = "tcl_brace"
+    #: The row has no value (comment blocks, section markers).
+    NONE = "none"
+
+
+class Layout(StrEnum):
+    """How the line is broken at one landing site."""
+
+    #: ``key: value`` / ``key = value`` on a line of its own.
+    OWN_LINE = "own_line"
+    #: ``-option value`` on one indented continuation line.
+    INLINE = "inline"
+    #: ``-option`` on one line, its value on the next (Quantus does this for
+    #: -cdl_out_map_directory, -technology_corner and -temperature).
+    VALUE_ON_NEXT_LINE = "value_on_next_line"
+    #: ``-option`` then one value per line (Quantus -output_xy).
+    VALUE_PER_LINE = "value_per_line"
+    #: Several tags share one physical line (the Jivaro XML).
+    PACKED = "packed"
+
+
+# ---- rendering --------------------------------------------------------------
+
+
+class RenderRule(Frozen):
+    """A fully resolved rendering rule for one landing site.
+
+    Produced by :meth:`LandingSite.render`; every field is concrete, with the
+    target's defaults already filled in.
+    """
+
+    quoting: Quoting
+    layout: Layout
+    indent: int = Field(ge=0)
+    #: Emits a trailing ``" \\"`` (Quantus command files).
+    continuation: bool
+    #: The line is conditional. Such a line MUST be written in the hugging
+    #: form -- ``[% if x %]LINE`` on one line and ``[% endif %]NEXT`` opening
+    #: the next -- because ``trim_blocks`` is off in this project's Jinja
+    #: environment and an ordinary block leaves a blank line behind.
+    #: ``templates/calibre/calibre_lvs.qci.j2:31-32`` is the reference.
+    optional: bool
+
+
+class RenderTargetSpec(Frozen):
+    """One rendered file: which template makes it, and its rendering defaults."""
+
+    id: RenderTarget
+    stage: Stage
+    #: Repository-relative POSIX path of the template.
+    template: str
+    #: ``<dir>/<file>`` form used by ``TemplatePatch.template_id``.
+    template_id: str = Field(pattern=r"^[a-z0-9_]+/[A-Za-z0-9_.-]+$")
+    syntax: str
+    quoting: Quoting
+    layout: Layout
+    indent: int = Field(ge=0)
+    continuation: bool
+    #: Emission order is fixed (by the ``line`` numbers of the landing sites)
+    #: rather than logical. Reordering diffs against files users already hold.
+    preserve_order: bool = True
+    #: Key of the option holding this file's header block, when it has one.
+    header_option: str | None = None
+    notes: str | None = None
+
+    @property
+    def template_path(self) -> Path:
+        """Absolute path of the template inside this checkout."""
+
+        return _REPO_ROOT / self.template
+
+
+class LandingSite(Frozen):
+    """One place a value is written.
+
+    Rendering fields are ``None`` when the site simply follows its target's
+    default; :meth:`render` resolves them. ``target`` is ``None`` for the
+    strmout stage, which has no rendered file at all -- its argv is built in
+    ``auto_ext/tools/strmout.py``, which is precisely why a catalog derived
+    from ``.j2`` files alone missed the entire stage.
+    """
+
+    target: RenderTarget | None = None
+    stage: Stage | None = None
+    #: Section within the file: a Quantus command name, a ``*lvs`` / ``*cmn``
+    #: group, an XML comment block, ``argv``.
+    section: str
+    #: The literal directive as it appears: ``-ground_net``, ``*lvsRunDir``,
+    #: ``simRunDir``, ``inputView``, ``-topCell``.
+    option: str
+    #: 1-based line in the current template. ``None`` when there is no
+    #: template line to point at.
+    line: int | None = Field(default=None, ge=1)
+    quoting: Quoting | None = None
+    layout: Layout | None = None
+    indent: int | None = Field(default=None, ge=0)
+    continuation: bool | None = None
+    optional: bool = False
+    note: str | None = None
+
+    def render(self, target_spec: RenderTargetSpec | None) -> RenderRule:
+        """Resolve this site's rendering rule against its target's defaults."""
+
+        if target_spec is None:
+            # Target-less sites (strmout argv) have no file layout to inherit.
+            return RenderRule(
+                quoting=self.quoting or Quoting.NONE,
+                layout=self.layout or Layout.OWN_LINE,
+                indent=self.indent or 0,
+                continuation=bool(self.continuation),
+                optional=self.optional,
+            )
+        return RenderRule(
+            quoting=self.quoting if self.quoting is not None else target_spec.quoting,
+            layout=self.layout if self.layout is not None else target_spec.layout,
+            indent=self.indent if self.indent is not None else target_spec.indent,
+            continuation=(
+                self.continuation
+                if self.continuation is not None
+                else target_spec.continuation
+            ),
+            optional=self.optional,
+        )
+
+
+# ---- the option -------------------------------------------------------------
+
+_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_CONTEXT_PATH_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*$")
+
+
+class OptionSpec(Frozen):
+    """One parameter. See ``options.yaml``'s header for the column semantics."""
+
+    key: str = Field(pattern=_KEY_RE.pattern, max_length=64)
+    #: The Jinja variable this value is (or will be) bound to in the flat
+    #: legacy namespace. Unique across the catalog. For ``jinja_var`` and
+    #: ``manifest_knob`` rows it is verifiable against the template today and
+    #: :func:`audit_template_vars` does verify it; for the rest it reserves
+    #: one agreed name so the importer and the patch baseline agree. Catalog
+    #: key and template var are not always equal (``min_res_ohm`` ->
+    #: ``min_res``), and recording that mapping is why this column exists.
+    template_var: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", max_length=64)
+    #: Namespaced key in the new render context (01-schema.md section 4), e.g.
+    #: ``recipe.extraction.min_res_ohm`` / ``pdk.lvs_dir`` / ``cell``.
+    context_path: str | None = None
+    owner: Owner
+    type: OptionType
+    default: Any = None
+    choices: list[Any] | None = None
+    choices_confidence: Confidence
+    range: tuple[float, float] | None = None
+    #: False on every row in the shipped catalog. A range is a guard rail
+    #: somebody invented until a datasheet says otherwise.
+    range_verified: bool = False
+    unit: str | None = None
+    currently: Currently
+    #: True = transcribed from a file in this repo, with ``source_ref`` naming
+    #: it. Always certain when true.
+    observed: bool
+    source_ref: str | None = None
+    lands_in: list[LandingSite] = Field(default_factory=list)
+    #: Why this row exists and why it has this owner. Required: a catalog row
+    #: without a reason is how the last one drifted.
+    why: str = Field(min_length=1)
+    notes: str | None = None
+    #: An unanswered question this row depends on (mirrored in OFFICE_TODO.md).
+    question: str | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> OptionSpec:
+        if self.choices is not None:
+            if self.type not in (OptionType.ENUM, OptionType.LIST):
+                raise ValueError(
+                    f"{self.key}: choices is only meaningful for enum or list "
+                    f"options (got type={self.type})"
+                )
+            if not self.choices:
+                raise ValueError(f"{self.key}: choices must not be empty")
+            if len(set(map(str, self.choices))) != len(self.choices):
+                raise ValueError(f"{self.key}: choices contains duplicates")
+        if self.type is OptionType.ENUM and self.choices is None:
+            raise ValueError(f"{self.key}: an enum option must list its choices")
+
+        if self.range is not None:
+            if self.type not in (OptionType.INT, OptionType.FLOAT):
+                raise ValueError(
+                    f"{self.key}: range is only meaningful for int or float "
+                    f"options (got type={self.type})"
+                )
+            low, high = self.range
+            if low > high:
+                raise ValueError(f"{self.key}: range low {low} > high {high}")
+        elif self.range_verified:
+            raise ValueError(
+                f"{self.key}: range_verified is set but there is no range to verify"
+            )
+
+        self._check_default()
+
+        if self.observed != (self.source_ref is not None):
+            raise ValueError(
+                f"{self.key}: observed={self.observed} but source_ref="
+                f"{self.source_ref!r}; an observed row must say which file and "
+                f"line it was read from, and only an observed row may."
+            )
+        if self.context_path is not None and not _CONTEXT_PATH_RE.match(self.context_path):
+            raise ValueError(f"{self.key}: malformed context_path {self.context_path!r}")
+        if (
+            self.owner is Owner.RECIPE
+            and self.currently is not Currently.ABSENT
+            and (self.context_path is None or not self.context_path.startswith("recipe."))
+        ):
+            raise ValueError(
+                f"{self.key}: a live recipe-owned option must bind to a "
+                f"recipe.* context path (got {self.context_path!r})"
+            )
+        return self
+
+    def _check_default(self) -> None:
+        if self.default is None:
+            return
+        if self.type is OptionType.ENUM:
+            if self.choices is not None and self.default not in self.choices:
+                raise ValueError(
+                    f"{self.key}: default {self.default!r} is not in {self.choices!r}"
+                )
+        elif self.type is OptionType.LIST:
+            if not isinstance(self.default, list):
+                raise ValueError(f"{self.key}: a list option needs a list default")
+            if self.choices is not None:
+                extra = [v for v in self.default if v not in self.choices]
+                if extra:
+                    raise ValueError(
+                        f"{self.key}: default members {extra!r} are not in choices"
+                    )
+        elif self.type is OptionType.BOOL:
+            if not isinstance(self.default, bool):
+                raise ValueError(f"{self.key}: a bool option needs a bool default")
+        elif self.type in (OptionType.INT, OptionType.FLOAT):
+            if isinstance(self.default, bool) or not isinstance(self.default, (int, float)):
+                raise ValueError(f"{self.key}: {self.type} option needs a numeric default")
+            if self.range is not None and not (self.range[0] <= self.default <= self.range[1]):
+                raise ValueError(
+                    f"{self.key}: default {self.default} is outside "
+                    f"[{self.range[0]}, {self.range[1]}]"
+                )
+
+    @property
+    def free_input(self) -> bool:
+        """True when the GUI must offer free text instead of a closed list.
+
+        DECISIONS.md #19: a guessed value set becomes a dropdown half full of
+        invalid entries, which is worse than a text box with a good default.
+        """
+
+        return self.choices is None or self.choices_confidence is Confidence.GUESS
+
+    @property
+    def is_knob_today(self) -> bool:
+        """One of the seven values a user can actually change right now."""
+
+        return self.currently is Currently.MANIFEST_KNOB
+
+    @property
+    def expected_in_templates(self) -> bool:
+        """True when ``template_var`` must literally appear in the templates."""
+
+        return self.currently in (Currently.JINJA_VAR, Currently.MANIFEST_KNOB)
+
+    @property
+    def sections(self) -> tuple[str, ...]:
+        """Template sections this option is written into, in landing order."""
+
+        seen: list[str] = []
+        for site in self.lands_in:
+            if site.section not in seen:
+                seen.append(site.section)
+        return tuple(seen)
+
+    @property
+    def targets(self) -> tuple[RenderTarget, ...]:
+        seen: list[RenderTarget] = []
+        for site in self.lands_in:
+            if site.target is not None and site.target not in seen:
+                seen.append(site.target)
+        return tuple(seen)
+
+    @property
+    def stages(self) -> tuple[Stage, ...]:
+        seen: list[Stage] = []
+        for site in self.lands_in:
+            if site.stage is not None and site.stage not in seen:
+                seen.append(site.stage)
+        return tuple(seen)
+
+    @property
+    def recipe_field_path(self) -> str | None:
+        """``extraction.min_res_ohm`` for a recipe-owned option, else ``None``."""
+
+        if self.owner is not Owner.RECIPE or self.context_path is None:
+            return None
+        if not self.context_path.startswith("recipe."):
+            return None
+        return self.context_path[len("recipe.") :]
+
+
+# ---- the catalog ------------------------------------------------------------
+
+
+class Catalog(Frozen):
+    """The whole table, validated for internal consistency at load time."""
+
+    schema_version: int
+    #: Bumped whenever the data changes. ``TemplatePatch.base.catalog_version``
+    #: records it so a conflict report can name the catalog that moved.
+    catalog_version: str
+    targets: list[RenderTargetSpec]
+    options: list[OptionSpec]
+
+    @model_validator(mode="after")
+    def _check(self) -> Catalog:
+        target_ids = [t.id for t in self.targets]
+        if len(target_ids) != len(set(target_ids)):
+            raise ValueError(f"duplicate render targets: {target_ids}")
+
+        keys = [o.key for o in self.options]
+        dup_keys = sorted({k for k in keys if keys.count(k) > 1})
+        if dup_keys:
+            raise ValueError(f"duplicate option keys: {dup_keys}")
+
+        tvars = [o.template_var for o in self.options]
+        dup_tvars = sorted({v for v in tvars if tvars.count(v) > 1})
+        if dup_tvars:
+            raise ValueError(
+                f"duplicate template_var: {dup_tvars}. One value, one name -- two "
+                f"rows sharing a variable would give the renderer two answers."
+            )
+
+        by_id = {t.id: t for t in self.targets}
+        for opt in self.options:
+            for site in opt.lands_in:
+                if site.target is None:
+                    if site.stage is None:
+                        raise ValueError(
+                            f"{opt.key}: a landing site with no render target must "
+                            f"name its stage (the strmout stage has no template)"
+                        )
+                elif site.target not in by_id:
+                    raise ValueError(f"{opt.key}: unknown render target {site.target}")
+
+        for target in self.targets:
+            if target.header_option and target.header_option not in set(keys):
+                raise ValueError(
+                    f"{target.id}: header_option {target.header_option!r} is not an option key"
+                )
+        return self
+
+    # -- lookup ---------------------------------------------------------
+
+    def target(self, target: RenderTarget) -> RenderTargetSpec:
+        for spec in self.targets:
+            if spec.id == target:
+                return spec
+        raise KeyError(target)
+
+    def option(self, key: str) -> OptionSpec:
+        for opt in self.options:
+            if opt.key == key:
+                return opt
+        raise KeyError(key)
+
+    def by_template_var(self, template_var: str) -> OptionSpec | None:
+        for opt in self.options:
+            if opt.template_var == template_var:
+                return opt
+        return None
+
+    def by_owner(self, owner: Owner) -> list[OptionSpec]:
+        return [o for o in self.options if o.owner is owner]
+
+    def by_stage(self, stage: Stage) -> list[OptionSpec]:
+        return [o for o in self.options if stage in o.stages]
+
+    def by_target(self, target: RenderTarget) -> list[OptionSpec]:
+        return [o for o in self.options if target in o.targets]
+
+    def by_section(self, target: RenderTarget, section: str) -> list[OptionSpec]:
+        return [
+            o
+            for o in self.options
+            if any(s.target == target and s.section == section for s in o.lands_in)
+        ]
+
+    def sections_of(self, target: RenderTarget) -> tuple[str, ...]:
+        """Sections of one file, in the order they first appear in it."""
+
+        ordered: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for opt in self.options:
+            for site in opt.lands_in:
+                if site.target != target or site.section in seen:
+                    continue
+                seen.add(site.section)
+                ordered.append((site.line if site.line is not None else 10**6, site.section))
+        return tuple(section for _, section in sorted(ordered))
+
+    def emission_order(self, target: RenderTarget) -> list[tuple[int, OptionSpec, LandingSite]]:
+        """Every landing site in one file, sorted by line.
+
+        The renderer must follow this rather than any logical grouping:
+        si.env's ``checkCAPPERI`` belongs with the capacitor group and is
+        exported after the diode group, and moving it diffs against every real
+        si.env our users hold.
+        """
+
+        rows = [
+            (site.line, opt, site)
+            for opt in self.options
+            for site in opt.lands_in
+            if site.target == target and site.line is not None
+        ]
+        return sorted(rows, key=lambda r: (r[0], r[1].key))
+
+    # -- audit helpers --------------------------------------------------
+
+    def knobs_today(self) -> list[OptionSpec]:
+        """The seven values a user can change without editing a template."""
+
+        return [o for o in self.options if o.is_knob_today]
+
+    def unverified_ranges(self) -> list[OptionSpec]:
+        return [o for o in self.options if o.range is not None and not o.range_verified]
+
+    def open_questions(self) -> list[OptionSpec]:
+        return [o for o in self.options if o.question]
+
+    def free_input_options(self) -> list[OptionSpec]:
+        return [o for o in self.options if o.free_input]
+
+    def owner_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {owner.value: 0 for owner in Owner}
+        for opt in self.options:
+            counts[opt.owner.value] += 1
+        return counts
+
+
+# ---- loading ----------------------------------------------------------------
+
+
+def default_templates_root() -> Path:
+    """``<repo>/templates``, derived from ``__file__``.
+
+    Never cwd-relative. ``resolve_template_path`` starts with a cwd-relative
+    ``is_file()`` probe, and a test whose cwd is still inside the repository
+    can hit the repository's own templates and pass for the wrong reason.
+    """
+
+    return _REPO_ROOT / "templates"
+
+
+def _read_yaml(path: Path) -> Any:
+    if not path.is_file():
+        raise CatalogError(f"catalog file not found: {path}")
+    yaml = YAML(typ="rt")
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            return yaml.load(fh)
+    except YAMLError as exc:
+        raise CatalogError(f"{path}: YAML parse error: {exc}") from exc
+
+
+def _plain(obj: Any) -> Any:
+    """ruamel CommentedMap/CommentedSeq tree -> plain dicts and lists."""
+
+    if isinstance(obj, dict):
+        return {k: _plain(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_plain(v) for v in obj]
+    return obj
+
+
+def load_catalog(path: Path | None = None) -> Catalog:
+    """Load and fully validate a catalog file.
+
+    Raises :class:`CatalogError` for anything wrong with the file: parse
+    errors, schema violations, duplicate keys or template vars, a default
+    outside its own range, an unknown render target.
+    """
+
+    src = Path(path) if path is not None else BUILTIN_CATALOG_PATH
+    data = _read_yaml(src)
+    if not isinstance(data, dict):
+        raise CatalogError(f"{src}: expected a mapping at top level")
+
+    payload = _plain(data)
+    # A site's stage is implied by its target; filling it here keeps the data
+    # file free of a column that could disagree with the target table.
+    target_stage = {t["id"]: t["stage"] for t in payload.get("targets", [])}
+    for opt in payload.get("options", []):
+        for site in opt.get("lands_in", []) or []:
+            if site.get("stage") is None and site.get("target") is not None:
+                site["stage"] = target_stage.get(site["target"])
+
+    try:
+        return Catalog.model_validate(payload)
+    except ValidationError as exc:
+        raise CatalogError(f"{src}: {exc}") from exc
+
+
+@lru_cache(maxsize=1)
+def builtin_catalog() -> Catalog:
+    """The catalog shipped next to this module. Parsed once per process."""
+
+    return load_catalog(BUILTIN_CATALOG_PATH)
+
+
+# ---- the self-check ---------------------------------------------------------
+
+
+class TemplateVarAudit(Frozen):
+    """Result of cross-checking the catalog against the actual templates.
+
+    Two failure directions, and both matter:
+
+    * ``missing_in_template`` -- the catalog claims a value arrives as
+      ``[[var]]`` in some file, and it does not. Stale row, or a renamed
+      variable.
+    * ``missing_in_catalog`` -- a template references a ``[[var]]`` that no
+      catalog row claims for that file. This is the one that catches "added a
+      template variable, forgot the catalog entry", which is exactly how the
+      manifest system rotted.
+    """
+
+    #: ``(option key, template_var, target)``
+    missing_in_template: list[tuple[str, str, str]] = Field(default_factory=list)
+    #: ``(target, template_var)``
+    missing_in_catalog: list[tuple[str, str]] = Field(default_factory=list)
+    #: Templates named by the catalog that could not be read at all.
+    unreadable_templates: list[str] = Field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return not (
+            self.missing_in_template or self.missing_in_catalog or self.unreadable_templates
+        )
+
+    def describe(self) -> str:
+        """One human-readable block, for a test failure message."""
+
+        if self.ok:
+            return "catalog and templates agree"
+        lines: list[str] = []
+        for key, var, target in self.missing_in_template:
+            lines.append(
+                f"  catalog row {key!r} binds [[{var}]] in {target}, but the "
+                f"template does not reference it"
+            )
+        for target, var in self.missing_in_catalog:
+            lines.append(
+                f"  {target} references [[{var}]] but no catalog row claims that "
+                f"variable for this file -- add a row (or fix template_var)"
+            )
+        for tpl in self.unreadable_templates:
+            lines.append(f"  template named by the catalog is unreadable: {tpl}")
+        return "\n".join(lines)
+
+
+def audit_template_vars(
+    catalog: Catalog | None = None, *, templates_root: Path | None = None
+) -> TemplateVarAudit:
+    """Cross-check every catalog ``template_var`` against the real templates.
+
+    Run as a test. Adding a ``[[var]]`` to a template without adding the
+    matching catalog row fails immediately instead of surfacing months later
+    as a mysteriously missing value in a rendered command file.
+
+    Only rows whose ``currently`` says the value arrives through Jinja today
+    (``jinja_var`` / ``manifest_knob``) are required to appear; a hardcoded
+    literal has, by definition, no variable in the file yet.
+    """
+
+    cat = catalog if catalog is not None else builtin_catalog()
+    root = Path(templates_root) if templates_root is not None else default_templates_root()
+
+    # Imported lazily: core.template pulls in Jinja and core.env, and the
+    # catalog itself must stay importable without them.
+    from auto_ext.core.template import scan_placeholders
+
+    per_target: dict[RenderTarget, set[str]] = {}
+    unreadable: list[str] = []
+    for spec in cat.targets:
+        path = root / Path(spec.template).relative_to("templates")
+        try:
+            per_target[spec.id] = set(scan_placeholders(path).jinja_variables)
+        except Exception:  # noqa: BLE001 - any read/parse failure is one finding
+            unreadable.append(spec.template)
+
+    missing_in_template: list[tuple[str, str, str]] = []
+    for opt in cat.options:
+        if not opt.expected_in_templates:
+            continue
+        for target in opt.targets:
+            found = per_target.get(target)
+            if found is None:
+                continue
+            if opt.template_var not in found:
+                missing_in_template.append((opt.key, opt.template_var, target.value))
+
+    claimed: dict[RenderTarget, set[str]] = {t.id: set() for t in cat.targets}
+    for opt in cat.options:
+        for target in opt.targets:
+            claimed[target].add(opt.template_var)
+
+    missing_in_catalog: list[tuple[str, str]] = []
+    for target, found in per_target.items():
+        for var in sorted(found - claimed.get(target, set())):
+            missing_in_catalog.append((target.value, var))
+
+    return TemplateVarAudit(
+        missing_in_template=sorted(missing_in_template),
+        missing_in_catalog=sorted(missing_in_catalog),
+        unreadable_templates=sorted(unreadable),
+    )

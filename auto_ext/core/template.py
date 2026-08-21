@@ -53,8 +53,15 @@ class PlaceholderInventory:
     jinja_variables: set[str]
 
 
-def _make_jinja_env() -> Environment:
-    """Build the Jinja environment used by both render and scan paths.
+def make_jinja_env() -> Environment:
+    """Build the Jinja environment used by every render and scan path.
+
+    Public because the catalog-driven pipeline in
+    :mod:`auto_ext.core.render` renders from a template *source string* rather
+    than a path and must use exactly this environment: same delimiters, same
+    ``StrictUndefined``, same ``keep_trailing_newline``. A second environment
+    built by hand elsewhere is how two renderers of one template start
+    disagreeing about whitespace.
 
     Delimiters are ``[[ ]]`` / ``[% %]`` / ``[# #]`` instead of Jinja's
     defaults. Rationale: Calibre ``.qci`` files use Tcl brace literals such
@@ -75,6 +82,12 @@ def _make_jinja_env() -> Environment:
         comment_start_string="[#",
         comment_end_string="#]",
     )
+
+
+#: Pre-existing private spelling, kept because :mod:`auto_ext.core.patch` and
+#: :mod:`auto_ext.core.diff_template` import it by this name. One environment,
+#: two names -- never two environments.
+_make_jinja_env = make_jinja_env
 
 
 def resolve_template_path(
@@ -173,7 +186,7 @@ def render_template(
     # Catch the silent "None stringifies to 'None'" trap before Jinja
     # paints "None.None.qcilvs" into a path. StrictUndefined only catches
     # missing keys; a present-but-None value falls through.
-    referenced = _referenced_jinja_vars(substituted)
+    referenced = referenced_jinja_vars(substituted)
     none_keys = sorted(
         name for name in referenced
         if name in merged_context and merged_context[name] is None
@@ -186,7 +199,7 @@ def render_template(
             f"tech_name) or task spec before running"
         )
 
-    jenv = _make_jinja_env()
+    jenv = make_jinja_env()
     try:
         template = jenv.from_string(substituted)
         return template.render(**merged_context)
@@ -284,7 +297,7 @@ def collect_var_references(
     return results
 
 
-def _referenced_jinja_vars(source: str) -> set[str]:
+def referenced_jinja_vars(source: str) -> set[str]:
     """Names appearing as ``[[name]]`` in template source.
 
     Catches simple identifier references; ignores filter pipelines and
@@ -314,7 +327,7 @@ def scan_placeholders(template_path: Path) -> PlaceholderInventory:
     literal = {m.group(1) for m in _RE_LITERAL_PLACEHOLDER.finditer(text)}
     user_defined = {m.group(0) for m in _RE_USER_DEFINED.finditer(text)}
 
-    jenv = _make_jinja_env()
+    jenv = make_jinja_env()
     try:
         ast = jenv.parse(text)
         jinja_vars = set(meta.find_undeclared_variables(ast))
@@ -330,3 +343,6 @@ def scan_placeholders(template_path: Path) -> PlaceholderInventory:
     )
 
 
+#: Pre-existing private spelling of :func:`referenced_jinja_vars`, kept so any
+#: caller written against it keeps working.
+_referenced_jinja_vars = referenced_jinja_vars

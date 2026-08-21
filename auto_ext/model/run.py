@@ -36,10 +36,16 @@ Write protocol (this is what makes "never overwrite" true):
 
 Relationship to ``docs/refactor/01-schema.md``:
 
-* This module is the S1 subset of section 1.3. ``Recipe`` / ``PdkProfile`` /
-  ``CellEntry`` do not exist yet, so :class:`RecipeSnapshot` and
-  :class:`DutSnapshot` stand in with the same shape and field names, and the
-  shared ``Base`` / ``Frozen`` bases live here instead of ``model/common.py``.
+* This module is the S1 subset of section 1.3. ``CellEntry`` does not exist
+  yet, so :class:`DutSnapshot` stands in with the same shape and field names,
+  and :class:`RecipeSnapshot` stands in for the real
+  :class:`auto_ext.model.recipe.Recipe` (which
+  :meth:`~auto_ext.model.recipe.Recipe.to_snapshot` now produces, so the
+  runner can switch over one call site at a time).
+* ``Base`` / ``Frozen`` / ``slugify`` / ``utcnow`` moved to
+  ``auto_ext/model/common.py`` (section 1.0) and are re-exported here
+  unchanged, so every existing import and the ``frozen_clock`` fixture's
+  ``monkeypatch.setattr("auto_ext.model.run.utcnow", ...)`` keep working.
 * Section 1.3 spells the end-of-stage timestamp ``finished_at``; the field is
   named ``ended_at`` here, and ``finished_at`` remains available as a
   read-only alias property on :class:`StageRecord` and :class:`RunRecord`.
@@ -63,8 +69,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import (
-    BaseModel,
-    ConfigDict,
     Field,
     JsonValue,
     field_validator,
@@ -72,7 +76,9 @@ from pydantic import (
 )
 
 from auto_ext.core.errors import AutoExtError
+from auto_ext.core.patch_models import StagePatchReport
 from auto_ext.core.progress import StageStatus, TaskStatus
+from auto_ext.model.common import Base, Frozen, RenderTarget, slugify, utcnow
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, keeps the import graph acyclic
     from auto_ext.core.checks import LvsReport
@@ -128,7 +134,6 @@ JsonScalar = str | int | float | bool | None
 
 _TIMESTAMP_RE = re.compile(r"^\d{8}T\d{6}Z$")
 _RUN_ID_RE = re.compile(r"^(?P<ts>\d{8}T\d{6}Z)_(?P<slug>.+)$")
-_SLUG_STRIP = re.compile(r"[^a-z0-9]+")
 _SLUG_ALLOWED = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _ABS_WINDOWS_RE = re.compile(r"^[A-Za-z]:")
 _WINDOWS_DEVICE_NAMES = frozenset(
@@ -140,29 +145,6 @@ _WINDOWS_DEVICE_NAMES = frozenset(
 
 class RunIdError(AutoExtError):
     """A run directory could not be allocated, or a slug is unsafe as a path."""
-
-
-def utcnow() -> datetime:
-    """Timezone-aware "now" in UTC.
-
-    The single injection point for time in the run layer: tests monkeypatch
-    this module attribute (see the ``frozen_clock`` fixture) rather than
-    patching :class:`datetime.datetime` itself.
-    """
-
-    return datetime.now(timezone.utc)
-
-
-class Base(BaseModel):
-    """Base for editable objects: unknown keys are an error, never swallowed."""
-
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
-
-
-class Frozen(BaseModel):
-    """Base for record objects: unknown keys are an error, fields are read-only."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 def _check_run_relative(value: str | None) -> str | None:
@@ -316,6 +298,11 @@ class StageRecord(Frozen):
     log_path: str | None = None
     #: e.g. ``"rendered/lvs.qci"``. Replaces ``runs/task_<id>/rendered/<stem>``.
     rendered_path: str | None = None
+    #: Which catalog render target produced :attr:`rendered_path`. ``None`` on
+    #: the legacy template+knob path, where the file is named after whichever
+    #: template ``project.templates`` happened to point at and there is no
+    #: target concept at all.
+    render_target: RenderTarget | None = None
     #: Absolute paths produced in the Cadence workarea (svdb, query_output,
     #: ``<cell>.calibre.db``, dspf, ...). Carried over from
     #: ``ToolResult.artifact_paths``, which nothing consumed before.
@@ -448,7 +435,11 @@ class RunRecord(Frozen):
     recipe: RecipeSnapshot
 
     # ---- runtime choices for this invocation ----
-    #: Stages actually scheduled (CLI ``--stage`` / the Run tab checkboxes).
+    #: Stage keys actually scheduled (CLI ``--stage`` / the Run tab checkboxes),
+    #: matching :attr:`StageRecord.key` one for one. Stage *names* on the legacy
+    #: path, where a stage runs at most once; a recipe emitting both quantus
+    #: output forms schedules ``quantus.ext`` and ``quantus.dspf``, and listing
+    #: ``quantus`` twice -- or once -- would misdescribe the run.
     requested_stages: list[str] = Field(default_factory=list)
     dry_run: bool = False
     continue_on_lvs_fail: bool = False
@@ -478,6 +469,12 @@ class RunRecord(Frozen):
     # ---- process and outcome ----
     stages: list[StageRecord] = Field(default_factory=list)
     results: RunResults = Field(default_factory=RunResults)
+    #: Per-hunk outcome of the recipe's manual edits, one entry per generated
+    #: file that carried a patch. This list is the escape hatch's to-do queue:
+    #: a hunk reported ``noop`` or ``absorbed`` has been overtaken by the
+    #: catalog and can be deleted, a ``review`` / ``lost`` one needs a human.
+    #: Empty on the legacy path, which has no patches.
+    patch_reports: list[StagePatchReport] = Field(default_factory=list)
 
     # ---- provenance ----
     #: Resolved absolute path of each EDA binary, keyed by tool name.
@@ -488,6 +485,14 @@ class RunRecord(Frozen):
     auto_ext_version: str | None = None
     python_version: str | None = None
     cancelled_by: str | None = None
+    #: ``Catalog.catalog_version`` in force when the files were generated, so a
+    #: later patch conflict can name the catalog that moved underneath it.
+    #: ``None`` on the legacy path, which reads no catalog.
+    catalog_version: str | None = None
+    #: ``PdkProfile.profile_id`` this run rendered against. ``None`` on the
+    #: legacy path, where process facts were scattered across project.yaml and
+    #: the templates and no single object owned them.
+    pdk_profile_id: str | None = None
 
     @model_validator(mode="after")
     def _check_identity(self) -> RunRecord:
@@ -583,19 +588,6 @@ class RunBatch(Base):
 
 
 # ---- identity: slug, directory name, layout ----------------------------------
-
-
-def slugify(text: str, *, max_len: int = 24) -> str:
-    """Reduce ``text`` to ``[a-z0-9-]``, collapsing runs of anything else.
-
-    Never returns an empty string (``"x"`` is the fallback), so a cell named
-    entirely out of punctuation still produces a usable directory name. Path
-    separators, ``..``, drive colons and shell metacharacters all collapse to
-    ``-`` here; :func:`validate_run_slug` is the enforcing gate.
-    """
-
-    s = _SLUG_STRIP.sub("-", text.strip().lower()).strip("-")
-    return s[:max_len].rstrip("-") or "x"
 
 
 def validate_run_slug(slug: str) -> str:

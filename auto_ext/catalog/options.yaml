@@ -1,0 +1,3319 @@
+# Auto_ext built-in parameter catalog.
+#
+# ONE row per parameter -- not per line of output. A parameter written into
+# three files (``output_dir``) is one row with three landing sites; a line that
+# carries three parameters (``*lvsRulesFile``) is three rows.
+#
+# Reading the columns
+# -------------------
+# key                 snake_case name of this parameter inside Auto_ext.
+# template_var        the Jinja variable it is (or will be) bound to in the
+#                     FLAT legacy namespace. For ``currently: jinja_var`` and
+#                     ``manifest_knob`` rows this is verifiable today by
+#                     grepping the .j2, and tests/catalog/test_catalog.py
+#                     asserts it in both directions. For every other row it is
+#                     the name the catalog-driven renderer will bind, reserved
+#                     here so importer and patch baselines have one agreed name
+#                     per value. Catalog key and template var are NOT always
+#                     equal (``min_res_ohm`` -> ``min_res``); recording that
+#                     mapping is the whole reason this column exists.
+# context_path        namespaced key in the new render context (01-schema.md
+#                     section 4). ``null`` = not exposed to templates.
+# owner               WHICH OBJECT HOLDS IT, and nothing else. One of
+#                     recipe / profile / cells / run / resources / fixed.
+#                     Template section is a separate column, on the landing
+#                     site (``section``) -- conflating the two is what made the
+#                     two draft catalogs unmergeable.
+# type                str | int | float | bool | enum | list | path | structural
+# choices             candidate legal values. Read them WITH
+#                     choices_confidence: ``guess`` means "do not build a combo
+#                     box out of this" (DECISIONS.md #19) -- the UI renders
+#                     free text plus the default, and the choices stay here as
+#                     documented candidates.
+# choices_confidence  certain | likely | guess -- how sure the VALUE SET is.
+#                     Deliberately NOT the same column as ``observed``: a value
+#                     can be certainly hardcoded (observed) while its legal
+#                     alternatives are pure guesswork.
+# range               inclusive [lo, hi], int/float only.
+# range_verified      false on every row in this file. Not one range here has
+#                     been checked against a tool manual -- they are guard
+#                     rails someone invented, and reading them as spec is a
+#                     bug. Only a real datasheet flips one to true.
+# unit                display only, and itself sometimes wrong -- see
+#                     coupling_cap_threshold_absolute.
+# default             today's effective value.
+# currently           how the value reaches the file TODAY:
+#                     manifest_knob     - [[var]] plus a knob in a manifest
+#                     jinja_var         - [[var]] fed by runner._build_context
+#                     hardcoded_literal - typed into the .j2
+#                     python_argv       - assembled in auto_ext/tools/*.py
+#                     config_field      - a ProjectConfig/TaskSpec field that
+#                                         never reaches a template as [[var]]
+#                     absent            - we do not emit it at all
+# observed            true = transcribed out of a file in this repo, with
+#                     source_ref naming file and line. Always certain when
+#                     true, because it is a transcription and not a judgement.
+#                     false = proposed, exists nowhere yet. ``observed: true``
+#                     together with ``currently: absent`` means "seen in a real
+#                     export, but our renderer drops it".
+# source_ref          file:line backing ``observed``.
+# lands_in            every place the value is written: target / section /
+#                     option / line, plus that site's rendering rule.
+# question            an unanswered question this row depends on; the same
+#                     items are listed in docs/refactor/OFFICE_TODO.md.
+#
+# Rendering rules
+# ---------------
+# Each ``targets:`` entry declares the file default quoting / layout / indent;
+# a landing site names only what differs. This is not decoration. The patch
+# escape hatch diffs against the GENERATED text, so a catalog that cannot
+# reproduce a file exact quoting and line breaks repaints the whole file on
+# upgrade and buries the user real edits in noise.
+#   quoting: bare | double | skill_bool | skill_list | xml_attr | tcl_brace | none
+#   layout:  own_line | inline | value_on_next_line | value_per_line | packed
+#   indent:  leading spaces
+#   continuation: emits a trailing " \" (Quantus command files)
+#   optional: line is conditional -> MUST use the hugging
+#             "[% if x %]LINE" / "[% endif %]NEXT" form, because trim_blocks is
+#             OFF and an ordinary block emits a stray blank line.
+#
+# Counting note: the 7 knobs that exist today are 5 in each quantus manifest
+# (same 5, declared twice) plus lvs_variant and connect_by_name in the calibre
+# manifest. si and jivaro manifests declare none.
+
+schema_version: 1
+
+# Bumped whenever the DATA below changes. TemplatePatch.base.catalog_version
+# records it, so a conflict report can name the catalog that moved.
+catalog_version: "2026.08.21"
+
+targets:
+  - id: si.env
+    stage: si
+    template: templates/si/default.env.j2
+    template_id: si/default.env.j2
+    syntax: skill
+    quoting: double
+    layout: own_line
+    indent: 0
+    continuation: false
+    preserve_order: true
+    notes: >-
+      SKILL assignments, one per line. Booleans are "'t" / "'nil"; line 6 is a
+      bare "nil" (historical noise -- normalise to "'nil" on regeneration).
+      Field order is the order si exported them, not a logical order:
+      checkCAPPERI (line 22) sits after the diode group instead of with the
+      cap group. Regrouping it would diff against every real si.env our users
+      hold, so emission order is pinned to the line numbers below.
+      One invariant here is not a field at all: when simRunDir is missing, si
+      writes the netlist into cwd and Quantus never finds it (Cadence bug
+      LBRCXM-756). core/importer.py:476-485 injects the line on import, and
+      the renderer must always emit it.
+
+  - id: lvs.qci
+    stage: calibre
+    template: templates/calibre/calibre_lvs.qci.j2
+    template_id: calibre/calibre_lvs.qci.j2
+    syntax: calibre_runset
+    quoting: bare
+    layout: own_line
+    indent: 0
+    continuation: false
+    preserve_order: true
+    notes: >-
+      "*key: value", one per line, values unquoted. Tcl brace literals appear
+      verbatim in the trigger and slave-table rows, which is exactly why the
+      Jinja delimiters in this project are [[ ]] and not the default braces.
+      Line 31 is the only conditional line in the whole template and uses the
+      hugging form; core/importer.py:355-400 anchors on "*cmnShowOptions:"
+      when injecting, so that row must keep its position relative to it.
+      A real export also carries a "==<name>==" section header
+      (docs/calibre_raw.txt:1) that this template does not emit -- see
+      runset_section_header.
+
+  - id: quantus.ext.cmd
+    stage: quantus
+    template: templates/quantus/ext.cmd.j2
+    template_id: quantus/ext.cmd.j2
+    syntax: quantus_cmd
+    quoting: double
+    layout: inline
+    indent: 14
+    continuation: true
+    preserve_order: true
+    header_option: quantus_cmd_header
+    notes: >-
+      Command sections: each command name on column 0, its argument lines
+      indented 14 spaces, every line but the last of a section ending in a
+      backslash continuation. Quoting is per-argument and genuinely
+      inconsistent in the source (line 14 "auto" bare, line 17 quoted; line 21
+      "true" bare, line 48 quoted) -- reproduced here exactly, not normalised.
+      Emits an extracted view, whose artifact is a DFII library/cell/view
+      triple rather than a file, which is why output_setup has no -file_name.
+
+  - id: quantus.dspf.cmd
+    stage: quantus
+    template: templates/quantus/dspf.cmd.j2
+    template_id: quantus/dspf.cmd.j2
+    syntax: quantus_cmd
+    quoting: double
+    layout: inline
+    indent: 14
+    continuation: true
+    preserve_order: true
+    header_option: quantus_cmd_header
+    notes: >-
+      Same file format as quantus.ext.cmd and about 90% the same lines. It
+      differs by exactly: no -design_cell_name / -format /
+      -device_properties_file, an extra metal_fill section, an input_db
+      -hierarchy_delimiter, the whole output_db block, and output_setup
+      -file_name / -net_name_space. ProjectConfig.templates has ONE quantus
+      slot, so today a run emits this OR the extracted view and never both;
+      recipe.output.emit is what removes that limit.
+
+  - id: jivaro.xml
+    stage: jivaro
+    template: templates/jivaro/default.xml.j2
+    template_id: jivaro/default.xml.j2
+    syntax: xml
+    quoting: xml_attr
+    layout: packed
+    indent: 0
+    continuation: false
+    preserve_order: true
+    notes: >-
+      NOT pretty-printed XML. Line 1 carries four tags, line 21 carries a
+      comment plus two closing tags, and the middle is one element per line
+      with no indentation. Re-emitting this as conventionally indented XML
+      would diff against the entire file, so the packing is part of the
+      contract. Comment lines act as section markers.
+
+options:
+
+  # ---- identity: the DUT. Owner is the Cells table, never a Recipe. --------
+
+  - key: library
+    template_var: library
+    context_path: library
+    owner: cells
+    type: str
+    default: null
+    choices_confidence: certain
+    currently: jinja_var
+    observed: true
+    source_ref: templates/si/default.env.j2:1
+    lands_in:
+      - {target: si.env, section: identity, option: simLibName, line: 1}
+      - {target: lvs.qci, section: lvs_layout, option: "*lvsLayoutLibrary", line: 5}
+      - {target: lvs.qci, section: lvs_source, option: "*lvsSourceLibrary", line: 10}
+      - {target: lvs.qci, section: cmn_fdi, option: "*cmnFDILayoutLibrary", line: 42}
+      - {target: quantus.ext.cmd, section: input_db, option: -design_cell_name, line: 32}
+      - {target: jivaro.xml, section: general, option: inputView, line: 2}
+    why: >-
+      One column of the cell table. A Recipe that named a library would stop
+      being portable, which is the one property a Recipe has to keep.
+
+  - key: cell
+    template_var: cell
+    context_path: cell
+    owner: cells
+    type: str
+    default: null
+    choices_confidence: certain
+    currently: jinja_var
+    observed: true
+    source_ref: templates/si/default.env.j2:2
+    lands_in:
+      - {target: si.env, section: identity, option: simCellName, line: 2}
+      - {target: lvs.qci, section: lvs_layout, option: "*lvsLayoutPrimary", line: 4}
+      - {target: lvs.qci, section: lvs_source, option: "*lvsSourcePrimary", line: 9}
+      - {target: quantus.ext.cmd, section: input_db, option: -design_cell_name, line: 32}
+      - {target: jivaro.xml, section: general, option: inputView, line: 2}
+      - {target: null, stage: strmout, section: argv, option: -topCell, line: null}
+    notes: >-
+      The cell name is also baked into seven derived file names, each of which
+      is its own row: netlist_out_name, layout_db_name, lvs_spice_file,
+      erc_database, erc_summary_file, lvs_report_file, fdi_def_layout_path.
+    why: One column of the cell table; the primary axis of a run.
+
+  - key: layout_view
+    template_var: lvs_layout_view
+    context_path: lvs_layout_view
+    owner: cells
+    type: str
+    default: layout
+    choices_confidence: certain
+    currently: jinja_var
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:6
+    lands_in:
+      - {target: lvs.qci, section: lvs_layout, option: "*lvsLayoutView", line: 6}
+      - {target: lvs.qci, section: cmn_fdi, option: "*cmnFDILayoutView", line: 43}
+      - {target: quantus.ext.cmd, section: input_db, option: -design_cell_name, line: 32}
+      - {target: null, stage: strmout, section: argv, option: -view, line: null}
+    notes: >-
+      Catalog key drops the lvs_ prefix (CellEntry.layout_view) but the
+      template var keeps it, because renaming it in five templates buys
+      nothing. This row is the mapping.
+    why: One column of the cell table.
+
+  - key: source_view
+    template_var: lvs_source_view
+    context_path: lvs_source_view
+    owner: cells
+    type: str
+    default: schematic
+    choices_confidence: certain
+    currently: jinja_var
+    observed: true
+    source_ref: templates/si/default.env.j2:3
+    lands_in:
+      - {target: si.env, section: identity, option: simViewName, line: 3}
+      - {target: lvs.qci, section: lvs_source, option: "*lvsSourceView", line: 11}
+    why: One column of the cell table.
+
+  - key: ground_net
+    template_var: ground_net
+    context_path: ground_net
+    owner: cells
+    type: str
+    default: vss
+    choices_confidence: certain
+    currently: jinja_var
+    observed: true
+    source_ref: auto_ext/core/config.py:245
+    lands_in:
+      - {target: quantus.ext.cmd, section: capacitance, option: -ground_net, line: 9}
+      - {target: quantus.dspf.cmd, section: capacitance, option: -ground_net, line: 9}
+    notes: >-
+      The draft catalog said "gnd!" and marked it certain. It is "vss":
+      TaskSpec.ground_net defaults to vss (config.py:245) and both shipped
+      tasks.yaml files say vss. The template itself carries no default, only
+      the variable.
+    why: >-
+      Per-DUT: which net Quantus grounds capacitance to. A cell table column,
+      not an extraction condition.
+
+  - key: out_file
+    template_var: out_file
+    context_path: out_file
+    owner: cells
+    type: str
+    default: av_ext
+    choices_confidence: certain
+    currently: jinja_var
+    observed: true
+    source_ref: config/tasks.yaml:26
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -view_name, line: 54}
+      - {target: jivaro.xml, section: general, option: inputView, line: 2}
+      - {target: jivaro.xml, section: general, option: outputView, line: 3}
+    notes: >-
+      TaskSpec.out_file itself defaults to None; av_ext is what both shipped
+      tasks.yaml files carry. Note the collision with
+      reduction_views_to_reduce, which is hardcoded to a DIFFERENT name.
+    why: >-
+      Names the extracted view this DUT produces, and therefore the view
+      Jivaro reads. Per-DUT, so it belongs to the cell table.
+
+  # ---- si.env: CDL netlisting ---------------------------------------------
+  # Every one of these is hardcoded in the template today and the si manifest
+  # declares zero knobs, so not a single one of them can be changed right now.
+
+  - key: netlist_simulator
+    template_var: sim_simulator
+    context_path: recipe.netlist.simulator
+    owner: recipe
+    type: enum
+    choices: [auCdl, spectre, hspiceD]
+    choices_confidence: guess
+    default: auCdl
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:4
+    lands_in:
+      - {target: si.env, section: netlist_control, option: simSimulator, line: 4}
+    notes: >-
+      Only auCdl has ever been used here, and auCdlDefNetlistProc /
+      hnlNetlistFileName below assume it. The other two are candidates, not
+      verified alternatives.
+    why: >-
+      Which netlister si runs. Changing it changes the netlist syntax Calibre
+      then reads, so it is an extraction condition and belongs to the Recipe.
+
+  - key: netlist_not_incremental
+    template_var: sim_not_incremental
+    context_path: recipe.netlist.not_incremental
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:5
+    lands_in:
+      - {target: si.env, section: netlist_control, option: simNotIncremental, line: 5, quoting: skill_bool}
+    notes: >-
+      The draft proposed folding this and simReNetlistAll into one tri-state
+      enum. That is wrong: "no incremental netlist" plus "do not force a
+      re-netlist of every cellview" is a normal, and the currently shipped,
+      combination, and a tri-state cannot express it. Two independent booleans.
+    why: Controls whether si reuses a previous netlist. Directly an extraction condition.
+
+  - key: netlist_renetlist_all
+    template_var: sim_renetlist_all
+    context_path: recipe.netlist.renetlist_all
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:6
+    lands_in:
+      - {target: si.env, section: netlist_control, option: simReNetlistAll, line: 6, quoting: skill_bool}
+    notes: >-
+      Line 6 is the one bare "nil" in the file; every other false is "'nil".
+      Regeneration normalises it, which is a deliberate one-line diff against
+      the current template.
+    why: Forces every cellview to be re-netlisted. An extraction condition.
+
+  - key: netlist_view_list
+    template_var: sim_view_list
+    context_path: recipe.netlist.view_list
+    owner: recipe
+    type: list
+    choices_confidence: likely
+    default: [auCdl, schematic]
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:7
+    lands_in:
+      - {target: si.env, section: netlist_control, option: simViewList, line: 7, quoting: skill_list}
+    why: >-
+      The cellview search order si walks. A design that keeps its CDL under a
+      different view name cannot be netlisted without changing this.
+
+  - key: netlist_stop_list
+    template_var: sim_stop_list
+    context_path: recipe.netlist.stop_list
+    owner: recipe
+    type: list
+    choices_confidence: likely
+    default: [auCdl]
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:8
+    lands_in:
+      - {target: si.env, section: netlist_control, option: simStopList, line: 8, quoting: skill_list}
+    why: >-
+      Where si stops descending. Decides how deep the netlist goes, which is
+      an extraction condition.
+
+  - key: netlist_out_name
+    template_var: hnl_netlist_file_name
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: certain
+    default: "{cell}.src.net"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:9
+    lands_in:
+      - {target: si.env, section: output, option: hnlNetlistFileName, line: 9}
+      - {target: lvs.qci, section: lvs_source, option: "*lvsSourcePath", line: 8}
+    notes: >-
+      A cross-file hard coupling: si writes this name and the Calibre runset
+      reads it. Two files, one literal, no shared definition today -- exactly
+      the class of bug this catalog exists to remove. Fixed rather than
+      exposed because there is no reason to change it and every reason for
+      both sides to agree.
+    why: Producer/consumer contract between the si and calibre stages.
+
+  - key: netlist_resistor_model
+    template_var: resistor_model
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: guess
+    default: ""
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:11
+    notes: >-
+      Empty in every sample. The draft bundled this with pinMAP and setEQUIV
+      as one "rarely used fields" row; splitting them was worth it, because
+      pinMAP turns out not to be a string at all (see netlist_pin_map).
+    lands_in:
+      - {target: si.env, section: device_reduction, option: resistorModel, line: 11}
+    why: Empty everywhere we have seen; kept literal so the file stays complete.
+
+  - key: netlist_short_res
+    template_var: short_res
+    context_path: recipe.netlist.short_res_ohm
+    owner: recipe
+    type: float
+    choices_confidence: guess
+    unit: ohm
+    default: 2000.0
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:12
+    question: >-
+      Is a resistor shorted BELOW this value or above it? Is the unit ohms?
+      Does it have to agree with the Calibre deck?
+    lands_in:
+      - {target: si.env, section: device_reduction, option: shortRES, line: 12, quoting: bare}
+    why: >-
+      Decides which resistors si collapses to shorts, i.e. what the LVS source
+      netlist even contains. One of the sharpest extraction conditions in the
+      flow, and it is currently unreachable.
+
+  - key: netlist_preserve_res
+    template_var: preserve_res
+    context_path: recipe.netlist.preserve_res
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:13
+    lands_in:
+      - {target: si.env, section: device_preserve, option: preserveRES, line: 13, quoting: skill_bool}
+    why: Keep resistors in the source netlist. Changes what LVS has to match.
+
+  - key: netlist_check_res_val
+    template_var: check_res_val
+    context_path: recipe.netlist.check_res_val
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:14
+    lands_in:
+      - {target: si.env, section: device_check, option: checkRESVAL, line: 14, quoting: skill_bool}
+    why: Emits resistor values for LVS to compare. An LVS-matching condition.
+
+  - key: netlist_check_res_size
+    template_var: check_res_size
+    context_path: recipe.netlist.check_res_size
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:15
+    lands_in:
+      - {target: si.env, section: device_check, option: checkRESSIZE, line: 15, quoting: skill_bool}
+    why: Emits resistor w/l for LVS to compare. An LVS-matching condition.
+
+  - key: netlist_preserve_cap
+    template_var: preserve_cap
+    context_path: recipe.netlist.preserve_cap
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:16
+    lands_in:
+      - {target: si.env, section: device_preserve, option: preserveCAP, line: 16, quoting: skill_bool}
+    why: Keep capacitors in the source netlist.
+
+  - key: netlist_check_cap_val
+    template_var: check_cap_val
+    context_path: recipe.netlist.check_cap_val
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:17
+    lands_in:
+      - {target: si.env, section: device_check, option: checkCAPVAL, line: 17, quoting: skill_bool}
+    why: Emits capacitor values for LVS to compare.
+
+  - key: netlist_check_cap_area
+    template_var: check_cap_area
+    context_path: recipe.netlist.check_cap_area
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:18
+    lands_in:
+      - {target: si.env, section: device_check, option: checkCAPAREA, line: 18, quoting: skill_bool}
+    why: Emits capacitor area for LVS to compare.
+
+  - key: netlist_preserve_dio
+    template_var: preserve_dio
+    context_path: recipe.netlist.preserve_dio
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:19
+    lands_in:
+      - {target: si.env, section: device_preserve, option: preserveDIO, line: 19, quoting: skill_bool}
+    why: Keep diodes in the source netlist.
+
+  - key: netlist_check_dio_area
+    template_var: check_dio_area
+    context_path: recipe.netlist.check_dio_area
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:20
+    lands_in:
+      - {target: si.env, section: device_check, option: checkDIOAREA, line: 20, quoting: skill_bool}
+    why: Emits diode area for LVS to compare.
+
+  - key: netlist_check_dio_peri
+    template_var: check_dio_peri
+    context_path: recipe.netlist.check_dio_peri
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:21
+    lands_in:
+      - {target: si.env, section: device_check, option: checkDIOPERI, line: 21, quoting: skill_bool}
+    why: Emits diode perimeter for LVS to compare.
+
+  - key: netlist_check_cap_peri
+    template_var: check_cap_peri
+    context_path: recipe.netlist.check_cap_peri
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:22
+    notes: >-
+      Physically a member of the capacitor group (lines 16-18) but exported
+      after the diode group. Keep it at line 22: si.env is SKILL assignment,
+      order carries no meaning to the tool, but reordering it produces a
+      whole-file diff against the si.env our users already have.
+    lands_in:
+      - {target: si.env, section: device_check, option: checkCAPPERI, line: 22, quoting: skill_bool}
+    why: Emits capacitor perimeter for LVS to compare.
+
+  - key: netlist_print_inherited_conn
+    template_var: sim_print_inh_conn_attributes
+    context_path: recipe.netlist.print_inherited_conn
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:23
+    lands_in:
+      - {target: si.env, section: netlist_control, option: simPrintInhConnAttributes, line: 23, quoting: skill_bool}
+    why: >-
+      Prints inherited-connection attributes into the CDL. Designs that use
+      inherited supply nets need it on, so it is an extraction condition.
+
+  - key: netlist_check_scale
+    template_var: check_scale
+    context_path: recipe.netlist.check_scale
+    owner: recipe
+    type: enum
+    choices: [meter, micron]
+    choices_confidence: guess
+    default: meter
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:24
+    question: Does your Calibre deck expect meter or micron here?
+    notes: >-
+      Only "meter" has ever been observed; "micron" is invented. The draft
+      called this profile-owned on the grounds that it must agree with the
+      Calibre deck. It is modelled as a Recipe field per 01-schema.md section
+      1.2; if the office answer says the deck dictates it, moving it to the
+      PdkProfile is a field move and nothing more.
+    lands_in:
+      - {target: si.env, section: device_check, option: checkScale, line: 24}
+    why: Scale of the device properties si writes. Must agree with the LVS deck.
+
+  - key: netlist_check_ldd
+    template_var: check_ldd
+    context_path: recipe.netlist.check_ldd
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:25
+    lands_in:
+      - {target: si.env, section: device_check, option: checkLDD, line: 25, quoting: skill_bool}
+    why: Emits LDD device properties. An LVS-matching condition.
+
+  - key: netlist_pin_map
+    template_var: pin_map
+    context_path: null
+    owner: fixed
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:26
+    notes: >-
+      Written "'nil", i.e. a SKILL boolean, not the empty string the draft
+      assumed when it bundled this with resistorModel and setEQUIV.
+    lands_in:
+      - {target: si.env, section: netlist_control, option: pinMAP, line: 26, quoting: skill_bool}
+    why: Off everywhere we have seen; kept literal so the file stays complete.
+
+  - key: netlist_preserve_bang
+    template_var: preserve_bang_in_netlist
+    context_path: recipe.netlist.preserve_bang
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:27
+    lands_in:
+      - {target: si.env, section: netlist_control, option: preserveBangInNetlist, line: 27, quoting: skill_bool}
+    why: >-
+      Keeps the "!" of global net names in the CDL. Whether vdd! survives as
+      vdd! decides whether LVS matches supplies at all.
+
+  - key: netlist_shrink_factor
+    template_var: shrink_factor
+    context_path: recipe.netlist.shrink_factor
+    owner: recipe
+    type: float
+    choices_confidence: guess
+    default: 0.0
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:28
+    notes: >-
+      The draft called it profile-owned. Modelled as a Recipe field per
+      01-schema.md section 1.2; it is a per-run scaling choice in the same
+      sense temperature is.
+    lands_in:
+      - {target: si.env, section: device_check, option: shrinkFACTOR, line: 28, quoting: bare}
+    why: Optical shrink applied to device dimensions. Changes every extracted value.
+
+  - key: netlist_global_power_sig
+    template_var: global_power_sig
+    context_path: recipe.netlist.global_power_sig
+    owner: recipe
+    type: str
+    choices_confidence: likely
+    default: ""
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:29
+    question: >-
+      Do your schematics always declare their own globals? Should the cell
+      table grow a "power net" column to pair with the existing ground one?
+    notes: >-
+      Empty today, so the flow relies entirely on the schematic globals. Note
+      the asymmetry with ground_net, which IS a cell column.
+    lands_in:
+      - {target: si.env, section: globals, option: globalPowerSig, line: 29}
+    why: Written into the CDL .GLOBAL line. Decides how LVS resolves supplies.
+
+  - key: netlist_global_gnd_sig
+    template_var: global_gnd_sig
+    context_path: recipe.netlist.global_gnd_sig
+    owner: recipe
+    type: str
+    choices_confidence: likely
+    default: ""
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:30
+    notes: >-
+      Distinct from the cells column ground_net, which goes to Quantus. This
+      one goes into the CDL .GLOBAL line.
+    lands_in:
+      - {target: si.env, section: globals, option: globalGndSig, line: 30}
+    why: Written into the CDL .GLOBAL line. Decides how LVS resolves grounds.
+
+  - key: netlist_display_pin_info
+    template_var: display_pin_info
+    context_path: recipe.netlist.display_pin_info
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:31
+    lands_in:
+      - {target: si.env, section: netlist_control, option: displayPININFO, line: 31, quoting: skill_bool}
+    why: Emits pin direction info into the CDL, which LVS pin matching consumes.
+
+  - key: netlist_preserve_all
+    template_var: preserve_all
+    context_path: recipe.netlist.preserve_all
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:32
+    lands_in:
+      - {target: si.env, section: device_preserve, option: preserveALL, line: 32, quoting: skill_bool}
+    why: Keeps every device si would otherwise prune. The broadest netlist condition of the set.
+
+  - key: netlist_set_equiv
+    template_var: set_equiv
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: guess
+    default: ""
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:33
+    lands_in:
+      - {target: si.env, section: netlist_control, option: setEQUIV, line: 33}
+    why: Empty everywhere we have seen; kept literal so the file stays complete.
+
+  - key: cdl_include_file
+    template_var: inc_file
+    context_path: pdk.cdl_include_files
+    owner: profile
+    type: path
+    choices_confidence: certain
+    default: $calibre_source_added_place
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:34
+    question: >-
+      Run si once and confirm the generated .src.net really carries the device
+      subckt definitions. Do you ever need MORE than one CDL prepended?
+    notes: >-
+      Modelled on the profile as a LIST (PdkProfile.cdl_include_files) because
+      one slot cannot express a PDK that needs several CDLs prepended; today
+      the list has exactly one element and renders as one SKILL string.
+      Note this is the same env var whose parent gives calibre_lvs_dir.
+    lands_in:
+      - {target: si.env, section: include, option: incFILE, line: 34}
+    why: A PDK-supplied device CDL. Pure process fact, so it lives on the profile.
+
+  - key: netlist_aucdl_proc
+    template_var: au_cdl_def_netlist_proc
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: certain
+    default: ansCdlSubcktCall
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/si/default.env.j2:35
+    lands_in:
+      - {target: si.env, section: netlist_control, option: auCdlDefNetlistProc, line: 35}
+    why: >-
+      The SKILL callback auCdl uses to emit subckt calls. Coupled to
+      netlist_simulator=auCdl; changing it independently just breaks the netlist.
+
+  # ---- calibre LVS runset (.qci) -------------------------------------------
+
+  - key: lvs_deck_dir
+    template_var: calibre_lvs_dir
+    context_path: pdk.lvs_dir
+    owner: profile
+    type: path
+    choices_confidence: certain
+    default: $calibre_source_added_place|parent
+    currently: jinja_var
+    observed: true
+    source_ref: config/project.yaml:31
+    lands_in:
+      - {target: lvs.qci, section: lvs_rules, option: "*lvsRulesFile", line: 1}
+    notes: >-
+      Reaches the template through ProjectConfig.paths, not through a knob.
+      The real deck path seen in docs/calibre_raw.txt:2 is
+      .../LVS/Ver_Plus_1.0l_0.9/CFXXX/ -- version segment plus PDK subdir, and
+      both are separate rows below.
+    why: Where this PDK keeps its LVS rule decks. Pure process fact.
+
+  - key: lvs_deck_basename
+    template_var: calibre_lvs_basename
+    context_path: pdk.lvs_basename
+    owner: profile
+    type: str
+    choices_confidence: certain
+    default: null
+    currently: jinja_var
+    observed: true
+    source_ref: auto_ext/core/runner.py:1422
+    lands_in:
+      - {target: lvs.qci, section: lvs_rules, option: "*lvsRulesFile", line: 1}
+    notes: >-
+      The draft gave the default as "CFXXX" and marked it certain. There is no
+      such default: runner._build_context derives it as
+      PurePosixPath(calibre_lvs_dir).name, and CFXXX is merely the value in
+      the one export we have. null here means "keep deriving it"; a PDK that
+      breaks the convention sets PdkProfile.lvs_decks.basename explicitly.
+    why: >-
+      The rules-file stem. Derived from a PDK directory name, so it is a PDK
+      fact with a PDK-shaped escape hatch.
+
+  - key: lvs_deck_variant
+    template_var: lvs_variant
+    context_path: recipe.lvs.deck_variant
+    owner: recipe
+    type: enum
+    choices: [wodio, widio]
+    choices_confidence: likely
+    default: wodio
+    currently: manifest_knob
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2.manifest.yaml:5
+    question: Does the LVS deck directory hold suffixes other than wodio and widio?
+    notes: >-
+      One of the 7 knobs that exist today. Only "wodio" has ever been seen in
+      a real path (docs/calibre_raw.txt:2); "widio" exists only in the
+      hand-written manifest and in core/importer.py:415-416, so the value SET
+      is likely, not certain. WHICH variants exist is a PDK fact and lives on
+      PdkProfile.lvs_decks.variants; which one this run uses is the recipe
+      choice recorded here.
+    lands_in:
+      - {target: lvs.qci, section: lvs_rules, option: "*lvsRulesFile", line: 1}
+    why: Picks the LVS rule deck, i.e. what LVS actually checks. The archetypal recipe choice.
+
+  - key: lvs_rules_filename_pattern
+    template_var: lvs_rules_filename_pattern
+    context_path: null
+    owner: profile
+    type: str
+    choices_confidence: certain
+    default: "{basename}.{suffix}.qcilvs"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:1
+    lands_in:
+      - {target: lvs.qci, section: lvs_rules, option: "*lvsRulesFile", line: 1}
+    notes: >-
+      Today the ".{variant}.qcilvs" half is spelled inside the template, so a
+      PDK that names its decks differently cannot be described at all. Moved
+      onto PdkProfile.lvs_decks.filename_pattern.
+    why: How this PDK assembles a rules-file name out of basename and variant.
+
+  - key: lvs_runset_version
+    template_var: lvs_runset_version
+    context_path: pdk.lvs_runset_version
+    owner: profile
+    type: str
+    choices_confidence: certain
+    default: null
+    currently: absent
+    observed: true
+    source_ref: docs/calibre_raw.txt:2
+    notes: >-
+      Ver_Plus_1.0l_0.9 in the sample. Kept SEPARATE from qrc_runset_version
+      because the two demonstrably drift apart (1.0l_0.9 vs 1.0a), which the
+      draft lost by storing both decks as one opaque path string. The old flat
+      context key of this name was a dead reserved name and section 4.2 of the
+      schema doc deletes it; this row is its replacement, on the profile.
+    why: Which deck generation this profile is bound to. Explains a whole class of LVS diffs.
+
+  - key: qrc_runset_version
+    template_var: qrc_runset_version
+    context_path: pdk.qrc_runset_version
+    owner: profile
+    type: str
+    choices_confidence: certain
+    default: null
+    currently: absent
+    observed: true
+    source_ref: docs/calibre_raw.txt:27
+    notes: Ver_Plus_1.0a in the sample -- a different version from the LVS deck.
+    why: Same as lvs_runset_version, for the QRC deck.
+
+  - key: pdk_subdir
+    template_var: pdk_subdir
+    context_path: pdk.lvs_basename
+    owner: profile
+    type: str
+    choices_confidence: certain
+    default: null
+    currently: absent
+    observed: true
+    source_ref: docs/calibre_raw.txt:2
+    notes: >-
+      CFXXX in the sample. The LVS deck directory ends in <pdk_subdir> while
+      the QRC deck directory has one MORE level (QCI_deck) below it -- which is
+      the actual reason qrc_deck_dir cannot be derived with "|parent" and has
+      to be typed by hand, the thing project.yaml complains about in a comment.
+      Same string as lvs_deck_basename by PDK convention, hence the shared
+      context path.
+    why: The per-PDK directory segment both decks are keyed by.
+
+  - key: layout_db_name
+    template_var: lvs_layout_paths
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: certain
+    default: "{cell}.calibre.db"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: auto_ext/tools/strmout.py:31
+    question: >-
+      The old script exported <cell>.gds and let you choose the drop location
+      (default dir / cwd / a named subdir). Do you still need those choices?
+    notes: >-
+      The other cross-file hard coupling, and the reason a catalog reverse
+      engineered from templates alone would miss it: the producing side is
+      Python (strmout -strmFile), not a template. Content is GDSII; Calibre
+      sniffs the format from the magic bytes, not the suffix.
+    lands_in:
+      - {target: lvs.qci, section: lvs_layout, option: "*lvsLayoutPaths", line: 3}
+      - {target: null, stage: strmout, section: argv, option: -strmFile, line: null}
+    why: Producer/consumer contract between the strmout and calibre stages.
+
+  - key: lvs_layout_get_from_viewer
+    template_var: lvs_layout_get_from_viewer
+    context_path: null
+    owner: fixed
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:7
+    lands_in:
+      - {target: lvs.qci, section: lvs_layout, option: "*lvsLayoutGetFromViewer", line: 7}
+    why: >-
+      Calibre Interactive batch-mode plumbing. Meaningless outside the GUI
+      panel this runset was exported from; kept literal so the runset parses.
+
+  - key: lvs_source_get_from_viewer
+    template_var: lvs_source_get_from_viewer
+    context_path: null
+    owner: fixed
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:12
+    lands_in:
+      - {target: lvs.qci, section: lvs_source, option: "*lvsSourceGetFromViewer", line: 12}
+    why: Same as lvs_layout_get_from_viewer.
+
+  - key: lvs_spice_file
+    template_var: lvs_spice_file
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: certain
+    default: "{cell}.sp"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:13
+    lands_in:
+      - {target: lvs.qci, section: lvs_source, option: "*lvsSpiceFile", line: 13}
+    notes: >-
+      The third file-name convention in the flow, after <cell>.src.net and
+      <cell>.calibre.db. Calibre writes it; nothing in this repo reads it.
+    why: Declared output of the LVS run. No consumer, but the runset needs the row.
+
+  - key: lvs_device_filter_enabled
+    template_var: lvs_device_filter_options_enabled
+    context_path: recipe.lvs.device_filter_options_enabled
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:14
+    question: What do AG / RC / RE / RG mean, and do you want filtering on?
+    lands_in:
+      - {target: lvs.qci, section: lvs_devices, option: "*lvsDeviceFilterOptionsEnabled", line: 14}
+    why: Master switch for device filtering. Changes what LVS compares.
+
+  - key: lvs_layout_device_filter_options
+    template_var: lvs_layout_device_filter_options
+    context_path: recipe.lvs.layout_device_filter_options
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: AG RC RE RG
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:15
+    question: What do AG / RC / RE / RG mean?
+    notes: >-
+      The VALUE is certain (it is right there in the template); the MEANING of
+      the four letters is entirely unknown, so the value set is a guess.
+    lands_in:
+      - {target: lvs.qci, section: lvs_devices, option: "*lvsLayoutDeviceFilterOptions", line: 15}
+    why: Which layout devices LVS filters out, once filtering is enabled.
+
+  - key: lvs_source_device_filter_options
+    template_var: lvs_source_device_filter_options
+    context_path: recipe.lvs.source_device_filter_options
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: AG RC RE RG
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:16
+    notes: Same value as the layout side today, but a separate setting in the runset.
+    lands_in:
+      - {target: lvs.qci, section: lvs_devices, option: "*lvsSourceDeviceFilterOptions", line: 16}
+    why: Which source devices LVS filters out, once filtering is enabled.
+
+  - key: power_names
+    template_var: lvs_power_names
+    context_path: pdk.power_names
+    owner: profile
+    type: list
+    choices_confidence: certain
+    default: [AHVDD, AHVDDB, AHVDDG, AHVDDR, AHVDDWELL, AVDD, AVDDB, AVDDBG, AVDDG, AVDDR, AVDWELL, DHVDD, DVDD, HVDDWELL, TACVDD, TAVD33, TAVD33PST, TAVDD, TAVDDPST, TVDD, VD33, VDD, VDD5V, VDDESD, VDDG, VDDM, VDDPST, VDDSA, VDWELL]
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:17
+    notes: >-
+      29 names, space separated on one line. A pure PDK naming table that has
+      no business sitting in a template. Feeds both supply recognition and
+      ERC.
+    lands_in:
+      - {target: lvs.qci, section: lvs_supplies, option: "*lvsPowerNames", line: 17}
+    why: The PDK list of supply net names. Process fact, identical for every recipe.
+
+  - key: ground_names
+    template_var: lvs_ground_names
+    context_path: pdk.ground_names
+    owner: profile
+    type: list
+    choices_confidence: certain
+    default: [AGND, AHVSS, AHVSSB, AHVSSG, AHVSSR, AHVSSUB, AVSS, AVSSB, AVSSBG, AVSSG, AVSSR, AVSSUB, DHVSS, DVSS, GND, HVSSUB, TACVSS, TAVSS, TAVSSPST, TVSS, VS33, VSS, VSSESD, VSSG, VSSM, VSSPST, VSSUB]
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:18
+    lands_in:
+      - {target: lvs.qci, section: lvs_supplies, option: "*lvsGroundNames", line: 18}
+    why: The PDK list of ground net names. Process fact, identical for every recipe.
+
+  - key: lvs_extra_power_names
+    template_var: lvs_extra_power_names
+    context_path: null
+    owner: recipe
+    type: list
+    choices_confidence: likely
+    default: []
+    currently: absent
+    observed: false
+    notes: >-
+      Proposed, not present anywhere today, and therefore NOT a Recipe field
+      yet -- it would need the renderer to append to the PDK list, which is a
+      C2 job. Recorded here so the ownership split (PDK list on the profile,
+      project-specific extras on the recipe) is decided before someone hard
+      codes a second list into a template.
+    why: A project that invents its own supply names should not have to edit the PDK list.
+
+  - key: lvs_extra_ground_names
+    template_var: lvs_extra_ground_names
+    context_path: null
+    owner: recipe
+    type: list
+    choices_confidence: likely
+    default: []
+    currently: absent
+    observed: false
+    notes: As lvs_extra_power_names. Proposed only; not a Recipe field yet.
+    why: As lvs_extra_power_names, for grounds.
+
+  - key: lvs_recognize_gates
+    template_var: lvs_recognize_gates
+    context_path: recipe.lvs.recognize_gates
+    owner: recipe
+    type: enum
+    choices: [NONE, ALL, GATES]
+    choices_confidence: guess
+    default: NONE
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:19
+    notes: Only NONE observed; ALL and GATES are candidates from Calibre folklore, unverified.
+    lands_in:
+      - {target: lvs.qci, section: lvs_options, option: "*lvsRecognizeGates", line: 19}
+    why: >-
+      Whether LVS folds transistor groups into gates before comparing. Changes
+      the comparison itself, so it is a recipe-level choice.
+
+  - key: erc_database
+    template_var: lvs_erc_database
+    context_path: null
+    owner: run
+    type: str
+    choices_confidence: certain
+    default: "{cell}.erc.results"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:20
+    question: Should ERC results be archived per run, and should they gate pass/fail?
+    notes: >-
+      Declared but orphaned: the runset has no ERC switch at all and
+      core/checks.py only ever parses <cell>.lvs.report. So the file is
+      produced and never read. That fact belongs in the catalog, not in
+      somebody memory.
+    lands_in:
+      - {target: lvs.qci, section: lvs_results, option: "*lvsERCDatabase", line: 20}
+    why: A result artifact of the run. Where it is archived is a Run decision.
+
+  - key: erc_summary_file
+    template_var: lvs_erc_summary_file
+    context_path: null
+    owner: run
+    type: str
+    choices_confidence: certain
+    default: "{cell}.erc.summary"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:21
+    notes: As erc_database -- produced, never read.
+    lands_in:
+      - {target: lvs.qci, section: lvs_results, option: "*lvsERCSummaryFile", line: 21}
+    why: A result artifact of the run.
+
+  - key: lvs_report_file
+    template_var: lvs_report_file
+    context_path: null
+    owner: run
+    type: str
+    choices_confidence: certain
+    default: "{cell}.lvs.report"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:22
+    notes: >-
+      The only result file anything reads (core/checks.py). Its copy in
+      runs/<id>/results/ is what makes a run explain itself after the Cadence
+      workspace has been overwritten.
+    lands_in:
+      - {target: lvs.qci, section: lvs_results, option: "*lvsReportFile", line: 22}
+    why: THE result artifact. Named per run, archived per run.
+
+  - key: lvs_svdb_cci
+    template_var: lvs_svdb_cci
+    context_path: recipe.lvs.svdb_cci
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:23
+    lands_in:
+      - {target: lvs.qci, section: lvs_options, option: "*lvsSVDBcci", line: 23}
+    why: >-
+      Writes the connectivity data QRC later queries out of the svdb. Turning
+      it off breaks the quantus stage, so it is a recipe-level condition tied
+      to whether extraction follows.
+
+  - key: lvs_report_options
+    template_var: lvs_report_options
+    context_path: recipe.lvs.report_options
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: S
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:24
+    question: Which extra report sections do you normally need?
+    notes: >-
+      Handle with care, but the risk is narrower than the draft claimed:
+      core/checks.py falls back to CELL SUMMARY only when the banner says
+      CORRECT and no DISCREPANCIES line exists, so dropping letters is fatal
+      only on Calibre versions that omit the DISCREPANCIES line (v2019.2 is
+      named in the code comment).
+    lands_in:
+      - {target: lvs.qci, section: lvs_options, option: "*lvsReportOptions", line: 24}
+    why: Which sections the LVS report contains, i.e. what the checker can parse.
+
+  - key: lvs_pre_triggers
+    template_var: lvs_pre_triggers
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: certain
+    default: "{{rm -rf %d/svdb} process 1}"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:25
+    lands_in:
+      - {target: lvs.qci, section: lvs_triggers, option: "*lvsPreTriggers", line: 25, quoting: tcl_brace}
+    notes: >-
+      Tcl brace literal with a %d placeholder Calibre expands itself. This row
+      is why the project uses [[ ]] Jinja delimiters.
+    why: Clears the previous svdb so a rerun cannot read stale connectivity.
+
+  - key: lvs_post_triggers
+    template_var: lvs_post_triggers
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: certain
+    default: "{{rm -rf %d/query_output} process 1} {{mkdir %d/query_output} process 1} {{calibre -query_input {qrc_query_cmd} -query svdb } process 1}"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:26
+    lands_in:
+      - {target: lvs.qci, section: lvs_triggers, option: "*lvsPostTriggers", line: 26, quoting: tcl_brace}
+    notes: >-
+      The structure is fixed; the query_cmd path inside it comes from the
+      profile (qrc_deck_dir + qrc_query_cmd_name) and whether the third
+      trigger runs at all is recipe.lvs.run_qrc_query. Also the line that
+      hardcodes "-query svdb", i.e. that the LVS engine is Calibre.
+    why: The bridge from LVS to extraction. Its shape is not a user choice.
+
+  - key: run_qrc_query
+    template_var: run_qrc_query
+    context_path: recipe.lvs.run_qrc_query
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:26
+    lands_in:
+      - {target: lvs.qci, section: lvs_triggers, option: "*lvsPostTriggers", line: 26, quoting: tcl_brace}
+    why: >-
+      A recipe that only runs LVS should not pay for the query_output dump.
+      Today it always runs because the trigger is part of one hardcoded line.
+
+  - key: lvs_abort_on_supply_error
+    template_var: lvs_abort_on_supply_error
+    context_path: recipe.lvs.abort_on_supply_error
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:27
+    question: >-
+      Turn it on? With those two supply-name lists in play, would a lot of
+      blocks suddenly stop passing?
+    notes: >-
+      The draft justified exposing it by claiming the two supply lists are
+      currently inert. Nothing in the repo shows that -- the lists also feed
+      ERC, and the runset does declare ERC outputs. The conclusion stands, the
+      reasoning does not.
+    lands_in:
+      - {target: lvs.qci, section: lvs_options, option: "*lvsAbortOnSupplyError", line: 27}
+    why: Turns supply-connection errors into hard failures. A recipe-level strictness choice.
+
+  - key: cmn_warn_layout_overwrite
+    template_var: cmn_warn_layout_overwrite
+    context_path: null
+    owner: fixed
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:28
+    lands_in:
+      - {target: lvs.qci, section: cmn_options, option: "*cmnWarnLayoutOverwrite", line: 28}
+    why: >-
+      Batch-mode plumbing -- a prompt nobody can answer in batch. Must stay 0.
+
+  - key: cmn_warn_source_overwrite
+    template_var: cmn_warn_source_overwrite
+    context_path: null
+    owner: fixed
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:29
+    lands_in:
+      - {target: lvs.qci, section: cmn_options, option: "*cmnWarnSourceOverwrite", line: 29}
+    why: As cmn_warn_layout_overwrite.
+
+  - key: cmn_show_options
+    template_var: cmn_show_options
+    context_path: null
+    owner: fixed
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:30
+    notes: >-
+      core/importer.py:355-400 uses this exact row as its injection anchor, so
+      it must keep its position relative to the conditional line that follows.
+    lands_in:
+      - {target: lvs.qci, section: cmn_options, option: "*cmnShowOptions", line: 30}
+    why: Batch-mode plumbing, plus a load-bearing anchor for the importer.
+
+  - key: lvs_connect_by_name
+    template_var: connect_by_name
+    context_path: recipe.lvs.connect_by_name
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: manifest_knob
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:31
+    question: >-
+      Only "connect everything by name" and "connect nothing" exist today.
+      Have you ever needed name-connection for supplies only?
+    notes: >-
+      One of the 7 knobs that exist today, and the only conditional line in
+      any template. When false the row is omitted entirely rather than written
+      as NONE -- whether "omitted" and "NONE" really mean the same thing to
+      Calibre is NOT verified. Any new optional line must copy this hugging
+      form exactly, because trim_blocks is off.
+    lands_in:
+      - {target: lvs.qci, section: cmn_options, option: "*cmnVConnectNamesState", line: 31, optional: true}
+    why: Decides how LVS resolves connectivity. The second archetypal recipe choice.
+
+  - key: lvs_connect_by_name_nets
+    template_var: cmn_v_connect_names
+    context_path: null
+    owner: recipe
+    type: list
+    choices_confidence: guess
+    default: []
+    currently: absent
+    observed: false
+    notes: >-
+      Proposed: a non-empty list would emit *cmnVConnectNames plus
+      *cmnVConnectNamesState SOME. Not a Recipe field yet -- the SOME spelling
+      is unverified and shipping a field the renderer cannot honour would be
+      worse than not having it.
+    why: The "supplies only" middle setting the office question asks about.
+
+  - key: cmn_specify_license_wait_time
+    template_var: cmn_specify_license_wait_time
+    context_path: null
+    owner: fixed
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:32
+    lands_in:
+      - {target: lvs.qci, section: cmn_options, option: "*cmnSpecifyLicenseWaitTime", line: 32}
+    notes: The enable flag for lvs_license_wait_time. Always 1; the wait itself is the setting.
+    why: Structural companion of lvs_license_wait_time.
+
+  - key: lvs_license_wait_time
+    template_var: cmn_license_wait_time
+    context_path: resources.lvs_license_wait_time
+    owner: resources
+    type: int
+    range: [0, 1440]
+    range_verified: false
+    choices_confidence: certain
+    unit: unknown
+    default: 10
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:33
+    question: Is the license wait time in minutes?
+    notes: >-
+      Unit genuinely unknown -- the draft asserted minutes without evidence.
+      The range is invented (see range_verified).
+    lands_in:
+      - {target: lvs.qci, section: cmn_parallel, option: "*cmnLicenseWaitTime", line: 33}
+    why: >-
+      How long to queue for a license depends on the site license pool, not on
+      the extraction being performed. Carrying it inside a portable Recipe is
+      the same mistake as carrying a CPU count.
+
+  - key: cmn_release_license
+    template_var: cmn_release_license
+    context_path: null
+    owner: fixed
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:34
+    lands_in:
+      - {target: lvs.qci, section: cmn_parallel, option: "*cmnReleaseLicense", line: 34}
+    why: Hand the license back when done. There is no case for 0 in batch.
+
+  - key: lvs_num_turbo
+    template_var: cmn_num_turbo
+    context_path: resources.lvs_num_turbo
+    owner: resources
+    type: int
+    range: [1, 64]
+    range_verified: false
+    choices_confidence: certain
+    default: 2
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:35
+    question: Does your site have Hyperscaling licenses? How many Turbo cores?
+    lands_in:
+      - {target: lvs.qci, section: cmn_parallel, option: "*cmnNumTurbo", line: 35}
+    why: >-
+      Core count. Carry a Recipe from an 8-core box to a 64-core box and it
+      would have to be edited, which defeats the one property a Recipe must
+      keep. Hence a separate resources object (DECISIONS.md #21).
+
+  - key: lvs_run_mt
+    template_var: cmn_run_mt
+    context_path: resources.lvs_run_mt
+    owner: resources
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:36
+    lands_in:
+      - {target: lvs.qci, section: cmn_parallel, option: "*cmnRunMT", line: 36}
+    why: Multithreading. A machine property, not an extraction condition.
+
+  - key: lvs_run_hyper
+    template_var: cmn_run_hyper
+    context_path: resources.lvs_run_hyper
+    owner: resources
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:37
+    question: Does your site have a Hyperscaling license at all?
+    lands_in:
+      - {target: lvs.qci, section: cmn_parallel, option: "*cmnRunHyper", line: 37}
+    why: Hyperscaling. A site license property, not an extraction condition.
+
+  - key: cmn_slave_hosts
+    template_var: cmn_slave_hosts
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: certain
+    default: "{use {}} {hostName {}} {cpuCount {}} {a32a64 {}} {rsh {}} {maxMem {}} {workingDir {}} {layerDir {}} {launchName {}}"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:39
+    lands_in:
+      - {target: lvs.qci, section: cmn_remote, option: "*cmnSlaveHosts", line: 39, quoting: tcl_brace}
+    notes: >-
+      An empty remote-execution table. Kept verbatim (including the mgcLibPath
+      column the default above elides for width) so the runset stays complete;
+      if remote execution is ever wanted it becomes a resources row, not this
+      one.
+    why: Empty Calibre Interactive table. Structural filler.
+
+  - key: cmn_lsf_slave_table
+    template_var: cmn_lsf_slave_table
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: certain
+    default: "{use 1} {totalCpus 1} {minCpus 1} {architecture {{}}} {minMemory {{}}} {resourceOptions {{}}} {submitOptions {{}}}"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:40
+    lands_in:
+      - {target: lvs.qci, section: cmn_remote, option: "*cmnLSFSlaveTbl", line: 40, quoting: tcl_brace}
+    why: Empty LSF table. Structural filler.
+
+  - key: cmn_grid_slave_table
+    template_var: cmn_grid_slave_table
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: certain
+    default: "{use 1} {totalCpus 1} {minCpus 1} {architecture {{}}} {minMemory {{}}} {resourceOptions {{}}} {submitOptions {{}}}"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:41
+    lands_in:
+      - {target: lvs.qci, section: cmn_remote, option: "*cmnGridSlaveTbl", line: 41, quoting: tcl_brace}
+    why: Empty grid table. Structural filler.
+
+  - key: fdi_def_layout_path
+    template_var: cmn_fdi_def_layout_path
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: certain
+    default: "{cell}.def"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:44
+    notes: >-
+      A DEAD FIELD. No stage in this pipeline produces or reads a .def file.
+      Left in the runset as a Calibre Interactive panel remnant so the file
+      stays complete -- documented here so the next reader does not spend an
+      afternoon on it.
+    lands_in:
+      - {target: lvs.qci, section: cmn_fdi, option: "*cmnFDIDEFLayoutPath", line: 44}
+    why: Dead panel remnant, retained verbatim.
+
+  - key: runset_section_header
+    template_var: runset_section_header
+    context_path: null
+    owner: run
+    type: str
+    choices_confidence: certain
+    default: null
+    currently: absent
+    observed: true
+    source_ref: docs/calibre_raw.txt:1
+    notes: >-
+      A real export begins with "==Calibre_wiodio_noConnectByNetName==", and
+      the rendered file in examples/runs/ is likewise named
+      wiodio_noConnectByNetName.qci. Both encode variant plus connect_by_name
+      in a string a human maintains by hand -- which is precisely the job the
+      Recipe object takes over. Header and file name should both be generated
+      from the run slug.
+    why: Today the recipe identity is managed as a file name. That is the thing being replaced.
+
+  # ---- quantus command files (ext.cmd / dspf.cmd) ---------------------------
+
+  - key: quantus_cmd_header
+    template_var: quantus_cmd_header
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: certain
+    default: "#--------------------------------------------------------------------------------------\n\n#OPTION COMMAND FILE created by Cadence Extraction Quantus UI Version {quantus_ui_version}\n\n#--------------------------------------------------------------------------------------\n"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:1
+    lands_in:
+      - {target: quantus.ext.cmd, section: header, option: "#", line: 1, quoting: none, continuation: false, indent: 0}
+      - {target: quantus.dspf.cmd, section: header, option: "#", line: 1, quoting: none, continuation: false, indent: 0}
+    notes: >-
+      Five lines, two of them blank, carrying the tool version watermark. Pure
+      comment, so a patch diff has to be able to recognise the whole block as
+      non-semantic; and it must survive regeneration verbatim or every
+      generated file diffs against the ones already sitting in users
+      workspaces.
+    why: Provenance. Nothing reads it, and it must not change.
+
+  - key: quantus_ui_version
+    template_var: quantus_ui_version
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: certain
+    default: 18.21-s340
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:3
+    lands_in:
+      - {target: quantus.ext.cmd, section: header, option: "#OPTION COMMAND FILE", line: 3, quoting: none, continuation: false, indent: 0}
+      - {target: quantus.dspf.cmd, section: header, option: "#OPTION COMMAND FILE", line: 3, quoting: none, continuation: false, indent: 0}
+    notes: >-
+      This string decides which generation of the option syntax the file is
+      written in, which in turn decides the answer to about half the "guess"
+      rows in this catalog. Archive it per run so a stale command file can be
+      told apart from a genuine option error after a QRC upgrade.
+    why: The syntax version the whole quantus half of this catalog is pinned to.
+
+  - key: decoupling_factor
+    template_var: decoupling_factor
+    context_path: recipe.extraction.decoupling_factor
+    owner: recipe
+    type: float
+    range: [0.0, 1.0]
+    range_verified: false
+    choices_confidence: likely
+    default: 1.0
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:8
+    lands_in:
+      - {target: quantus.ext.cmd, section: capacitance, option: -decoupling_factor, line: 8, quoting: bare}
+      - {target: quantus.dspf.cmd, section: capacitance, option: -decoupling_factor, line: 8, quoting: bare}
+    why: >-
+      How much coupling capacitance is folded into grounded capacitance. A
+      direct accuracy / runtime trade, hardcoded today.
+
+  - key: extract_selection
+    template_var: extract_selection
+    context_path: recipe.extraction.selection
+    owner: recipe
+    type: enum
+    choices: [all, specified_nets, selected_nets]
+    choices_confidence: guess
+    default: all
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:11
+    notes: Only "all" observed; the other two spellings are unverified.
+    lands_in:
+      - {target: quantus.ext.cmd, section: extract, option: -selection, line: 11}
+      - {target: quantus.dspf.cmd, section: extract, option: -selection, line: 11}
+    why: Extract every net or a named subset. An extraction condition.
+
+  - key: extract_type
+    template_var: extract_type
+    context_path: recipe.extraction.extract_type
+    owner: recipe
+    type: enum
+    choices: [rc_coupled, rc_decoupled, r_only, c_only]
+    choices_confidence: guess
+    default: rc_coupled
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:12
+    question: Which extraction types do you actually use, and what are the exact spellings your QRC accepts?
+    notes: >-
+      That the file says rc_coupled is certain; that the other three spellings
+      are what QRC accepts is a guess. The draft also listed rcc and rlck --
+      dropped here rather than shipping four unverified spellings, since RLCK
+      would additionally require the inductor half of the parasitic device
+      contract, which no template mentions.
+    lands_in:
+      - {target: quantus.ext.cmd, section: extract, option: -type, line: 12}
+      - {target: quantus.dspf.cmd, section: extract, option: -type, line: 12}
+    why: >-
+      The single most important extraction condition. C-only for early
+      iteration, RC-coupled for signoff -- and today it cannot be changed.
+
+  - key: array_vias_spacing
+    template_var: array_vias_spacing
+    context_path: recipe.extraction.array_vias_spacing
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: auto
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:14
+    question: Can these take a number as well as "auto"?
+    notes: >-
+      Written BARE here while -max_via_array_size three lines down is written
+      QUOTED, with the same kind of value. Not normalised: the quoting is
+      transcribed per site because the patch baseline depends on it.
+    lands_in:
+      - {target: quantus.ext.cmd, section: extraction_setup, option: -array_vias_spacing, line: 14, quoting: bare}
+      - {target: quantus.dspf.cmd, section: extraction_setup, option: -array_vias_spacing, line: 14, quoting: bare}
+    why: How via arrays are modelled. Affects both accuracy and runtime on power grids.
+
+  - key: max_fracture_length
+    template_var: max_fracture_length
+    context_path: recipe.extraction.max_fracture_length
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: infinite
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:15
+    question: What do you set this to for long RF transmission lines?
+    lands_in:
+      - {target: quantus.ext.cmd, section: extraction_setup, option: -max_fracture_length, line: 15, quoting: bare}
+      - {target: quantus.dspf.cmd, section: extraction_setup, option: -max_fracture_length, line: 15, quoting: bare}
+    why: >-
+      Segment length for long wires, i.e. how many RC sections a transmission
+      line becomes. An RF-critical knob that is hardcoded to "no fracturing".
+
+  - key: max_fracture_length_unit
+    template_var: max_fracture_length_unit
+    context_path: recipe.extraction.max_fracture_length_unit
+    owner: recipe
+    type: enum
+    choices: [MICRONS, MILS, MILLIMETERS, DBU]
+    choices_confidence: guess
+    default: MICRONS
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:16
+    notes: >-
+      Missing from the Recipe sketch in 01-schema.md section 1.2, which is an
+      omission: setting a fracture length without its unit is meaningless.
+    lands_in:
+      - {target: quantus.ext.cmd, section: extraction_setup, option: -max_fracture_length_unit, line: 16}
+      - {target: quantus.dspf.cmd, section: extraction_setup, option: -max_fracture_length_unit, line: 16}
+    why: The unit max_fracture_length is expressed in. Useless apart from it.
+
+  - key: max_via_array_size
+    template_var: max_via_array_size
+    context_path: recipe.extraction.max_via_array_size
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: auto
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:17
+    lands_in:
+      - {target: quantus.ext.cmd, section: extraction_setup, option: -max_via_array_size, line: 17}
+      - {target: quantus.dspf.cmd, section: extraction_setup, option: -max_via_array_size, line: 17}
+    notes: Quoted, unlike -array_vias_spacing and -max_fracture_length. Transcribed, not normalised.
+    why: Upper bound on via-array merging. Large power vias make this a runtime lever.
+
+  - key: qrc_preserve_cell_list_name
+    template_var: preserve_cell_list_name
+    context_path: pdk.qrc_preserve_cell_list
+    owner: profile
+    type: str
+    choices_confidence: certain
+    default: preserveCellList.txt
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:18
+    notes: >-
+      The draft treated the whole path as one "parameter" and called it
+      extraction-owned. It is neither: the directory comes from the profile
+      and the file name is a QRC deck convention, so both halves are profile
+      facts and neither is a recipe choice.
+    lands_in:
+      - {target: quantus.ext.cmd, section: extraction_setup, option: -parasitic_blocking_device_cells_file, line: 18}
+      - {target: quantus.dspf.cmd, section: extraction_setup, option: -parasitic_blocking_device_cells_file, line: 18}
+    why: A file the PDK QRC deck ships. Pure process fact.
+
+  - key: qrc_deck_dir
+    template_var: qrc_deck_dir
+    context_path: pdk.qrc_deck_dir
+    owner: profile
+    type: path
+    choices_confidence: certain
+    default: null
+    currently: jinja_var
+    observed: true
+    source_ref: config/project.yaml:35
+    lands_in:
+      - {target: lvs.qci, section: lvs_triggers, option: "*lvsPostTriggers", line: 26, quoting: tcl_brace}
+      - {target: quantus.ext.cmd, section: extraction_setup, option: -parasitic_blocking_device_cells_file, line: 18}
+      - {target: quantus.dspf.cmd, section: extraction_setup, option: -parasitic_blocking_device_cells_file, line: 18}
+    notes: >-
+      Has to be typed by hand because the QRC deck sits one level deeper than
+      the LVS deck (an extra QCI_deck) and its version segment can differ, so
+      no "|parent" trick derives it -- the reason project.yaml carries that
+      apologetic comment about there being no standard env-var convention.
+    why: Where this PDK keeps its QRC deck. Pure process fact.
+
+  - key: qrc_query_cmd_name
+    template_var: qrc_query_cmd_name
+    context_path: pdk.qrc_query_cmd
+    owner: profile
+    type: str
+    choices_confidence: certain
+    default: query_cmd
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/calibre/calibre_lvs.qci.j2:26
+    lands_in:
+      - {target: lvs.qci, section: lvs_triggers, option: "*lvsPostTriggers", line: 26, quoting: tcl_brace}
+    notes: >-
+      This script is what actually produces query_output/Design.gds.map and
+      Design.props, which is why the "Design" basename is not ours to choose.
+    why: A file the PDK QRC deck ships. Pure process fact.
+
+  - key: extraction_net_name_space
+    template_var: extraction_net_name_space
+    context_path: recipe.extraction.net_name_space
+    owner: recipe
+    type: enum
+    choices: [SCHEMATIC, LAYOUT]
+    choices_confidence: guess
+    default: SCHEMATIC
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:19
+    lands_in:
+      - {target: quantus.ext.cmd, section: extraction_setup, option: -net_name_space, line: 19}
+      - {target: quantus.dspf.cmd, section: extraction_setup, option: -net_name_space, line: 19}
+    why: >-
+      Whether extracted nets are named after the schematic or the layout.
+      Decides whether the post-layout netlist is usable with the original
+      testbench at all.
+
+  - key: exclude_self_cap
+    template_var: exclude_self_cap
+    context_path: recipe.extraction.exclude_self_cap
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:21
+    lands_in:
+      - {target: quantus.ext.cmd, section: filter_cap, option: -exclude_self_cap, line: 21, quoting: bare}
+      - {target: quantus.dspf.cmd, section: filter_cap, option: -exclude_self_cap, line: 21, quoting: bare}
+    notes: Bare true/false here, but quoted "false" in the output_db include_* rows. Transcribed as found.
+    why: Drops net-to-itself capacitance. A filtering condition on the result.
+
+  - key: exclude_floating_nets
+    template_var: exclude_floating_nets
+    context_path: recipe.extraction.exclude_floating_nets
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:22
+    lands_in:
+      - {target: quantus.ext.cmd, section: filter_cap, option: -exclude_floating_nets, line: 22, quoting: bare}
+      - {target: quantus.dspf.cmd, section: filter_cap, option: -exclude_floating_nets, line: 22, quoting: bare}
+    why: Drops floating nets. A filtering condition on the result.
+
+  - key: exclude_floating_nets_limit
+    template_var: exclude_floating_nets_limit
+    context_path: recipe.extraction.exclude_floating_nets_limit
+    owner: recipe
+    type: int
+    range: [100, 100000]
+    range_verified: false
+    choices_confidence: certain
+    default: 5000
+    currently: manifest_knob
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:5
+    notes: >-
+      The live specimen of the four-layer knob problem: manifest says 5000,
+      project.yaml says 100, tasks.yaml says 200, and --knob can say a fourth
+      thing. One Recipe field replaces all four layers.
+    lands_in:
+      - {target: quantus.ext.cmd, section: filter_cap, option: -exclude_floating_nets_limit, line: 23, quoting: bare}
+      - {target: quantus.dspf.cmd, section: filter_cap, option: -exclude_floating_nets_limit, line: 23, quoting: bare}
+    why: Cap on how many floating nets are dropped. Already a knob; stays tunable.
+
+  - key: coupling_cap_threshold_absolute
+    template_var: coupling_cap_threshold_absolute
+    context_path: recipe.extraction.coupling_cap_threshold_absolute
+    owner: recipe
+    type: float
+    choices_confidence: certain
+    unit: F
+    default: 0.01
+    currently: manifest_knob
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:10
+    question: What value and unit do you normally use here?
+    notes: >-
+      DEFAULT AND UNIT DISAGREE WITH PHYSICS: 0.01 F is a 10 mF coupling
+      capacitance threshold. Either the unit is not farads or the default is
+      simply wrong. The value is carried over unchanged on purpose (changing
+      it blind would silently change every extraction) but it must not be read
+      as a verified fact -- the manifest was written by hand, and a
+      hand-written manifest is not evidence.
+    lands_in:
+      - {target: quantus.ext.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_absolute, line: 25, quoting: bare}
+      - {target: quantus.dspf.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_absolute, line: 25, quoting: bare}
+    why: Absolute floor on kept coupling caps. Sets netlist size and accuracy.
+
+  - key: coupling_cap_threshold_relative
+    template_var: coupling_cap_threshold_relative
+    context_path: recipe.extraction.coupling_cap_threshold_relative
+    owner: recipe
+    type: float
+    choices_confidence: certain
+    default: 0.001
+    currently: manifest_knob
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:14
+    lands_in:
+      - {target: quantus.ext.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_relative, line: 26, quoting: bare}
+      - {target: quantus.dspf.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_relative, line: 26, quoting: bare}
+    why: Ratio floor on kept coupling caps. Sets netlist size and accuracy.
+
+  - key: merge_parallel_res
+    template_var: merge_parallel_res
+    context_path: recipe.extraction.merge_parallel_res
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:28
+    lands_in:
+      - {target: quantus.ext.cmd, section: filter_res, option: -merge_parallel_res, line: 28, quoting: bare}
+      - {target: quantus.dspf.cmd, section: filter_res, option: -merge_parallel_res, line: 28, quoting: bare}
+    why: Collapses parallel resistors. A reduction condition on the result.
+
+  - key: min_res_ohm
+    template_var: min_res
+    context_path: recipe.extraction.min_res_ohm
+    owner: recipe
+    type: float
+    choices_confidence: certain
+    unit: ohm
+    default: 0.001
+    currently: manifest_knob
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:18
+    notes: Catalog key carries the unit; the template variable is the bare "min_res".
+    lands_in:
+      - {target: quantus.ext.cmd, section: filter_res, option: -min_res, line: 29, quoting: bare}
+      - {target: quantus.dspf.cmd, section: filter_res, option: -min_res, line: 29, quoting: bare}
+    why: Smallest resistor kept. Sets netlist size.
+
+  - key: remove_dangling_res
+    template_var: remove_dangling_res
+    context_path: recipe.extraction.remove_dangling_res
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:30
+    lands_in:
+      - {target: quantus.ext.cmd, section: filter_res, option: -remove_dangling_res, line: 30, quoting: bare}
+      - {target: quantus.dspf.cmd, section: filter_res, option: -remove_dangling_res, line: 30, quoting: bare}
+    why: Drops dangling resistors. A reduction condition on the result.
+
+  - key: input_db_type
+    template_var: input_db_type
+    context_path: null
+    owner: fixed
+    type: enum
+    choices: [calibre]
+    choices_confidence: certain
+    default: calibre
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:31
+    notes: >-
+      The draft wanted this exposed. It cannot be: tools/calibre.py:70 hard
+      codes the LVS engine and the post-trigger hard codes "-query svdb", so a
+      user who set this to pvs would only get a self-contradictory state. It
+      is derived from "which LVS tool this pipeline runs", not chosen.
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -type, line: 31, layout: own_line, indent: 0}
+      - {target: quantus.dspf.cmd, section: input_db, option: -type, line: 31, layout: own_line, indent: 0}
+    why: Which LVS database QRC reads. Determined by the pipeline, not by the user.
+
+  - key: input_db_design_cell_name
+    template_var: input_db_design_cell_name
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: certain
+    default: "{cell} {layout_view} {library}"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:32
+    notes: >-
+      One of TWO serialisations of the same DUT triple, and they disagree:
+      here it is space separated in the order cell / view / library, while the
+      Jivaro inputView is slash separated in the order library / cell / view.
+      Anyone assuming one shared render helper will produce a broken file.
+      Absent from dspf.cmd entirely -- see the question on dspf_top_cell.
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -design_cell_name, line: 32}
+    why: How the extracted-view flow identifies the top cell.
+
+  - key: dspf_top_cell
+    template_var: dspf_top_cell
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: guess
+    default: null
+    currently: absent
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:31
+    question: >-
+      dspf.cmd has no -design_cell_name. What determines the top cell in the
+      DSPF flow -- whatever the svdb in query_output happens to contain?
+    notes: >-
+      A real hole, not a footnote: dspf.cmd is missing -design_cell_name,
+      -format and -device_properties_file all three. Recorded as its own row
+      so it cannot be lost.
+    why: The DSPF flow has no explicit top-cell binding and nobody has confirmed why.
+
+  - key: device_property_value
+    template_var: device_property_value
+    context_path: null
+    owner: fixed
+    type: int
+    choices_confidence: guess
+    default: 7
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:33
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -device_property_value, line: 33, quoting: bare}
+      - {target: quantus.dspf.cmd, section: input_db, option: -device_property_value, line: 32, quoting: bare}
+    notes: >-
+      A QRC property-selection bitmask whose meaning nobody here knows. Fixed
+      because a value nobody understands must not be offered as a choice.
+    why: Which device properties QRC reads out of the svdb. Meaning unknown; value transcribed.
+
+  - key: input_db_run_name
+    template_var: input_db_run_name
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: certain
+    default: Design
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:34
+    question: Open <qrc_deck_dir>/query_cmd and confirm the basename it writes.
+    notes: >-
+      One of four appearances of the same basename: here, in
+      query_layer_map_file, in query_device_properties_file, and in
+      output_temporary_directory_name. Those files are produced by the PDK
+      query_cmd that the LVS post-trigger invokes, so the name is the deck
+      choice and not ours -- core/importer.py:522,529 even bakes it into
+      regexes. The draft called this one "likely exposable" while calling two
+      of its derived paths untouchable, which cannot both be true. All four
+      are fixed, pending the deck check above.
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -run_name, line: 34}
+      - {target: quantus.dspf.cmd, section: input_db, option: -run_name, line: 33}
+    why: The basename the PDK query_cmd writes under. Determined by the deck.
+
+  - key: input_db_format
+    template_var: input_db_format
+    context_path: null
+    owner: fixed
+    type: enum
+    choices: [DFII]
+    choices_confidence: guess
+    default: DFII
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:36
+    notes: ext.cmd only; the DSPF flow has no such row.
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -format, line: 36}
+    why: >-
+      Says the layout database is DFII. Follows from writing an extracted view
+      back into the Cadence library, so it is not an independent choice.
+
+  - key: instance_property_value
+    template_var: instance_property_value
+    context_path: null
+    owner: fixed
+    type: int
+    choices_confidence: guess
+    default: 6
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:37
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -instance_property_value, line: 37, quoting: bare}
+      - {target: quantus.dspf.cmd, section: input_db, option: -instance_property_value, line: 36, quoting: bare}
+    why: As device_property_value. Meaning unknown; value transcribed.
+
+  - key: net_property_value
+    template_var: net_property_value
+    context_path: null
+    owner: fixed
+    type: int
+    choices_confidence: guess
+    default: 5
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:39
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -net_property_value, line: 39, quoting: bare}
+      - {target: quantus.dspf.cmd, section: input_db, option: -net_property_value, line: 38, quoting: bare}
+    why: As device_property_value. Meaning unknown; value transcribed.
+
+  - key: input_db_hierarchy_delimiter
+    template_var: input_db_hierarchy_delimiter
+    context_path: recipe.output.dspf.input_hierarchy_delimiter
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: "/"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:35
+    notes: >-
+      DSPF only, like its output_db counterpart. ext.cmd has no delimiter
+      setting anywhere, because an extracted view goes back into the DFII
+      hierarchy and never flattens a name -- worth writing down, or someone
+      will helpfully "fix" the asymmetry by adding the row to ext.cmd.
+    lands_in:
+      - {target: quantus.dspf.cmd, section: input_db, option: -hierarchy_delimiter, line: 35}
+    why: How hierarchical names are spelled on the way in. Must match the DSPF consumer.
+
+  - key: metal_fill_type
+    template_var: metal_fill_type
+    context_path: recipe.extraction.metal_fill
+    owner: recipe
+    type: enum
+    choices: [none, virtual, actual]
+    choices_confidence: guess
+    default: virtual
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:39
+    question: Should the two flows really treat metal fill differently?
+    notes: >-
+      The whole section is MISSING from ext.cmd. That it is therefore
+      equivalent to "no fill handling" is an inference, not a fact: with the
+      section absent, the behaviour is whatever the deck defaults to, which
+      could equally be "real". Until the office check, "extracted view emits
+      no section" is preserved as-is rather than normalised to none.
+    lands_in:
+      - {target: quantus.dspf.cmd, section: metal_fill, option: -type, line: 40, quoting: bare}
+    why: >-
+      How dummy fill is modelled -- a first-order effect on RF coupling
+      capacitance, and an unexplained difference between the two flows.
+
+  - key: output_form
+    template_var: output_form
+    context_path: recipe.output.emit
+    owner: recipe
+    type: list
+    choices: [extracted_view, dspf]
+    choices_confidence: certain
+    default: [extracted_view]
+    currently: config_field
+    observed: true
+    source_ref: auto_ext/core/config.py:85
+    question: Do you ever need an extracted view AND a DSPF from one run? Do you need SPEF?
+    notes: >-
+      Certain, not likely, and more serious than the draft made it look:
+      TemplatePaths has exactly ONE quantus slot, so a single run structurally
+      cannot produce both files today. Choosing between them is done by
+      pointing a template path at a different file. Turning that into a list
+      is the headline feature of removing the template slots.
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -type, line: 41, layout: own_line, indent: 0}
+      - {target: quantus.dspf.cmd, section: output_db, option: -type, line: 41, layout: own_line, indent: 0}
+    why: Which artifacts the extraction produces. The defining choice of a recipe.
+
+  - key: cap_component
+    template_var: cap_component
+    context_path: pdk.parasitics.cap_component
+    owner: profile
+    type: str
+    choices_confidence: likely
+    default: pcapacitor
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:42
+    question: Are these the device names in your PDK? Must both tools agree?
+    notes: >-
+      Belongs to one parasitic-device contract together with res_component and
+      the four Jivaro models: change one side without the other and Jivaro
+      cannot read the devices Quantus wrote. Modelled on
+      PdkProfile.parasitics, not in the Recipe, because the device names are a
+      property of the library. The asymmetry is itself a fact worth keeping:
+      Jivaro also names an inductor and a mutual, Quantus names neither,
+      because RLCK extraction is not enabled.
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -cap_component, line: 42}
+    why: Which analogLib device parasitic caps are instantiated as. A PDK/library fact.
+
+  - key: cap_property_name
+    template_var: cap_property_name
+    context_path: recipe.output.extracted_view.cap_property_name
+    owner: recipe
+    type: str
+    choices_confidence: likely
+    default: c
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:43
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -cap_property_name, line: 43}
+    why: Property name the capacitance value is written under in the extracted view.
+
+  - key: enable_cellview_check
+    template_var: enable_cellview_check
+    context_path: recipe.output.extracted_view.enable_cellview_check
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:44
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -enable_cellview_check, line: 44, quoting: bare}
+    why: Whether QRC validates the target cellview before writing it.
+
+  - key: device_finger_delimiter
+    template_var: device_finger_delimiter
+    context_path: recipe.output.common.device_finger_delimiter
+    owner: recipe
+    type: str
+    choices_confidence: likely
+    default: "@"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:45
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -device_finger_delimiter, line: 45}
+      - {target: quantus.dspf.cmd, section: output_db, option: -device_finger_delimiter, line: 43}
+    notes: >-
+      Same value in both output forms, so it is ONE parameter with two landing
+      sites and therefore one Recipe field (recipe.output.common), not a field
+      duplicated per output form.
+    why: Separator in multi-finger device names. Must match what the simulator expects.
+
+  - key: cdl_out_map_directory
+    template_var: cdl_out_map_directory
+    context_path: paths.output_dir
+    owner: run
+    type: path
+    choices_confidence: certain
+    default: "{output_dir}/"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:46
+    notes: >-
+      The one place where the option and its value are on SEPARATE lines while
+      everything around them is inline; and note the trailing slash. In real
+      exports this path carries the employee directory, which is how the
+      absolute-path-leaks-your-employee-id constraint got into this project.
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -cdl_out_map_directory, line: 46, layout: value_on_next_line}
+    why: A run-derived workspace path, not a user setting.
+
+  - key: include_cap_model
+    template_var: include_cap_model
+    context_path: recipe.output.common.include_cap_model
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:48
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -include_cap_model, line: 48}
+      - {target: quantus.dspf.cmd, section: output_db, option: -include_cap_model, line: 47}
+    notes: Quoted "false", unlike the bare true/false in filter_cap. Transcribed as found.
+    why: Whether model statements accompany the extracted caps. A netlist-shape choice.
+
+  - key: include_parasitic_cap_model
+    template_var: include_parasitic_cap_model
+    context_path: recipe.output.common.include_parasitic_cap_model
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:49
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -include_parasitic_cap_model, line: 49}
+      - {target: quantus.dspf.cmd, section: output_db, option: -include_parasitic_cap_model, line: 48}
+    why: As include_cap_model, for parasitic caps.
+
+  - key: include_res_model
+    template_var: include_res_model
+    context_path: recipe.output.common.include_res_model
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:50
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -include_res_model, line: 50}
+      - {target: quantus.dspf.cmd, section: output_db, option: -include_res_model, line: 49}
+    why: As include_cap_model, for resistors.
+
+  - key: include_parasitic_res_model
+    template_var: include_parasitic_res_model
+    context_path: recipe.output.common.include_parasitic_res_model
+    owner: recipe
+    type: enum
+    choices: ["true", "false", comment]
+    choices_confidence: guess
+    default: comment
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:51
+    question: What does "comment" mean in your post-layout sim, and when is each of the three used?
+    notes: >-
+      That it is three-valued rather than boolean is certain (the file says
+      "comment", which is neither true nor false); what the three values do is
+      a guess.
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -include_parasitic_res_model, line: 51}
+      - {target: quantus.dspf.cmd, section: output_db, option: -include_parasitic_res_model, line: 50}
+    why: Emits, suppresses, or comments out parasitic resistor model statements.
+
+  - key: res_component
+    template_var: res_component
+    context_path: pdk.parasitics.res_component
+    owner: profile
+    type: str
+    choices_confidence: likely
+    default: presistor
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:52
+    notes: Half of the parasitic-device contract; see cap_component.
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -res_component, line: 52}
+    why: Which analogLib device parasitic resistors are instantiated as. A PDK/library fact.
+
+  - key: res_property_name
+    template_var: res_property_name
+    context_path: recipe.output.extracted_view.res_property_name
+    owner: recipe
+    type: str
+    choices_confidence: likely
+    default: r
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:53
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -res_property_name, line: 53}
+    why: Property name the resistance value is written under in the extracted view.
+
+  - key: extracted_view_artifact
+    template_var: extracted_view_artifact
+    context_path: null
+    owner: run
+    type: structural
+    choices_confidence: certain
+    default: null
+    currently: absent
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:55
+    notes: >-
+      output_setup in ext.cmd has NO -file_name, because the extracted-view
+      artifact is a DFII library/cell/view triple rather than a file. The run
+      record therefore needs a second artifact shape next to the DSPF path;
+      the draft only ever modelled a file path.
+    why: Half the runs in this flow produce an artifact that is not a file.
+
+  - key: dspf_subtype
+    template_var: dspf_subtype
+    context_path: recipe.output.dspf.subtype
+    owner: recipe
+    type: enum
+    choices: [extended, standard]
+    choices_confidence: guess
+    default: extended
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:42
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_db, option: -subtype, line: 42, quoting: bare}
+    why: Which DSPF dialect is written. Decides what the simulator can read back.
+
+  - key: busbit_delimiter
+    template_var: busbit_delimiter
+    context_path: recipe.output.dspf.busbit_delimiter
+    owner: recipe
+    type: str
+    choices_confidence: likely
+    default: "[]"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:44
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_db, option: -busbit_delimiter, line: 44}
+    why: How bus bits are spelled in the DSPF. Must match the simulator.
+
+  - key: disable_instances
+    template_var: disable_instances
+    context_path: recipe.output.dspf.disable_instances
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:45
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_db, option: -disable_instances, line: 45, quoting: bare}
+    why: Whether device instances are written into the DSPF.
+
+  - key: output_hierarchy_delimiter
+    template_var: output_hierarchy_delimiter
+    context_path: recipe.output.dspf.hierarchy_delimiter
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: "/"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:46
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_db, option: -hierarchy_delimiter, line: 46}
+    why: How hierarchical names are spelled on the way out. Must match the DSPF consumer.
+
+  - key: output_xy
+    template_var: output_xy
+    context_path: recipe.output.dspf.output_xy
+    owner: recipe
+    type: list
+    choices: [CANONICAL_RES, PARASITIC_RES, CANONICAL_CAP, PARASITIC_CAP, DIODE, MOS, BIPOLAR, GENERIC]
+    choices_confidence: guess
+    default: [CANONICAL_RES, PARASITIC_RES, CANONICAL_CAP, PARASITIC_CAP, DIODE, MOS, BIPOLAR, GENERIC]
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:51
+    notes: >-
+      Nine physical lines: the option on one, then one quoted value per line,
+      each with a continuation. The only value_per_line site in the catalog,
+      and the reason the layout column exists.
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_db, option: -output_xy, line: 51, layout: value_per_line}
+    why: Which element classes get coordinates in the DSPF. Affects file size and back-annotation.
+
+  - key: netlist_coupling_values
+    template_var: netlist_coupling_values
+    context_path: recipe.output.dspf.netlist_coupling_values
+    owner: recipe
+    type: enum
+    choices: [double, single]
+    choices_confidence: guess
+    default: double
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:60
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_db, option: -netlist_coupling_values, line: 60}
+    why: How coupling caps are written into the DSPF. Changes what the simulator sees.
+
+  - key: add_bulk_terminal
+    template_var: add_bulk_terminal
+    context_path: recipe.output.dspf.add_bulk_terminal
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:61
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_db, option: -add_bulk_terminal, line: 61, quoting: bare}
+    why: Whether devices get an explicit bulk terminal in the DSPF.
+
+  - key: sub_node_char
+    template_var: sub_node_char
+    context_path: recipe.output.dspf.sub_node_char
+    owner: recipe
+    type: str
+    choices_confidence: likely
+    default: "#"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:62
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_db, option: -sub_node_char, line: 62}
+    why: Character introducing subnodes of a split net. Must match the simulator.
+
+  - key: query_output_dir
+    template_var: query_output_dir
+    context_path: paths.query_output_dir
+    owner: run
+    type: path
+    choices_confidence: certain
+    default: "{output_dir}/query_output"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:35
+    notes: >-
+      Created by the LVS post-trigger and read by QRC. Derived from
+      output_dir, so it is a run-layout fact and not a setting. Only the
+      output_dir prefix is a Jinja variable; the rest of each of these
+      derived paths is a literal repeated at every site, which is the
+      coupling these rows exist to name.
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -directory_name, line: 35}
+      - {target: quantus.ext.cmd, section: output_setup, option: -directory_name, line: 56}
+      - {target: quantus.dspf.cmd, section: input_db, option: -directory_name, line: 34}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -directory_name, line: 64}
+    why: Where LVS drops what QRC reads. A derived run path.
+
+  - key: query_layer_map_file
+    template_var: query_layer_map_file
+    context_path: paths.query_layer_map_file
+    owner: run
+    type: path
+    choices_confidence: certain
+    default: "{output_dir}/query_output/Design.gds.map"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:38
+    notes: Basename comes from input_db_run_name, i.e. from the PDK query_cmd.
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -layer_map_file, line: 38}
+      - {target: quantus.dspf.cmd, section: input_db, option: -layer_map_file, line: 37}
+    why: A derived run path. Distinct from pdk.layer_map, which strmout uses.
+
+  - key: query_device_properties_file
+    template_var: query_device_properties_file
+    context_path: paths.query_device_properties_file
+    owner: run
+    type: path
+    choices_confidence: certain
+    default: "{output_dir}/query_output/Design.props"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:40
+    notes: ext.cmd only; basename again from the PDK query_cmd.
+    lands_in:
+      - {target: quantus.ext.cmd, section: input_db, option: -device_properties_file, line: 40}
+    why: A derived run path.
+
+  - key: dspf_out_path
+    template_var: dspf_out_path
+    context_path: paths.dspf_out
+    owner: run
+    type: path
+    choices_confidence: certain
+    default: "${WORK_ROOT2}/{cell}.dspf"
+    currently: jinja_var
+    observed: true
+    source_ref: auto_ext/core/config.py:220
+    notes: >-
+      The draft called this an existing knob. It is not -- it is a
+      ProjectConfig field with a per-task override, i.e. a different
+      configuration path entirely, so deleting the knob machinery will not
+      touch it. The pattern itself belongs to WorkspaceConfig; the resolved
+      value is a run fact.
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_setup, option: -file_name, line: 65}
+    why: Where the DSPF lands. Derived from the workspace pattern per run.
+
+  - key: output_net_name_space
+    template_var: output_net_name_space
+    context_path: recipe.output.dspf.net_name_space
+    owner: recipe
+    type: enum
+    choices: [SCHEMATIC, LAYOUT]
+    choices_confidence: guess
+    default: SCHEMATIC
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/dspf.cmd.j2:66
+    notes: DSPF only. Separate from the extraction_setup one, which both files carry.
+    lands_in:
+      - {target: quantus.dspf.cmd, section: output_setup, option: -net_name_space, line: 66}
+    why: Whether DSPF net names follow the schematic or the layout.
+
+  - key: output_temporary_directory_name
+    template_var: output_temporary_directory_name
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: certain
+    default: Design
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:57
+    notes: The fourth appearance of the query_cmd basename; see input_db_run_name.
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_setup, option: -temporary_directory_name, line: 57}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -temporary_directory_name, line: 67}
+    why: Determined by the PDK query_cmd, like the other three "Design" rows.
+
+  - key: technology_corner
+    template_var: technology_corner
+    context_path: pdk.corner
+    owner: profile
+    type: str
+    choices_confidence: guess
+    default: TYPICAL
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:60
+    question: Open this PDK assura_tech.lib and copy out the corner names it actually offers.
+    notes: >-
+      The tool literal lives here, on the profile; the Recipe only names a
+      semantic corner (recipe.extraction.corner) and the profile maps it. That
+      seam is what lets one Recipe move between PDKs. The draft mixed two
+      generations of corner naming (CBEST/... and CBEST_CCBEST/...) in one
+      choices list; a real assura_tech.lib usually offers only one of the two,
+      so shipping the union would give a dropdown half full of invalid
+      entries. No choices are offered here at all until the office check.
+      Rendered with the option and the value on SEPARATE lines.
+    lands_in:
+      - {target: quantus.ext.cmd, section: process_technology, option: -technology_corner, line: 59, layout: value_on_next_line}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_corner, line: 69, layout: value_on_next_line}
+    why: The process corner. Its literal spelling is a PDK fact; choosing one is a recipe act.
+
+  - key: technology_library_file
+    template_var: technology_library_file
+    context_path: pdk.tech_library_file
+    owner: profile
+    type: path
+    choices_confidence: certain
+    default: $env(SETUP_ROOT)/assura_tech.lib
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:61
+    notes: >-
+      The only env reference left in any template. Rendering substitutes it
+      before Jinja runs, because si and jivaro do not expand env vars inside
+      string values.
+    lands_in:
+      - {target: quantus.ext.cmd, section: process_technology, option: -technology_library_file, line: 61}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_library_file, line: 71}
+    why: The PDK technology library. Pure process fact.
+
+  - key: tech_name
+    template_var: tech_name
+    context_path: pdk.tech_name
+    owner: profile
+    type: str
+    choices_confidence: certain
+    default: null
+    currently: jinja_var
+    observed: true
+    source_ref: auto_ext/core/runner.py:1393
+    notes: >-
+      null means "derive it", by taking the parent directory name of whichever
+      of tech_name_env_vars resolves first.
+    lands_in:
+      - {target: quantus.ext.cmd, section: process_technology, option: -technology_name, line: 62}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_name, line: 72}
+    why: Which technology QRC loads. Pure process fact.
+
+  - key: temperature_c
+    template_var: temperature
+    context_path: recipe.extraction.temperature_c
+    owner: recipe
+    type: float
+    range: [-55.0, 175.0]
+    range_verified: false
+    choices_confidence: certain
+    unit: C
+    default: 55.0
+    currently: manifest_knob
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:22
+    notes: >-
+      The named example of parameterisation going crooked: -temperature and
+      -technology_corner sit in the same process_technology statement, but
+      only temperature was ever promoted to a knob, so one is tunable and its
+      neighbour is frozen. Both are typed fields now. The Recipe field is
+      nullable and falls back to the corner suggested temperature; this 55.0
+      is the manifest value, which reproduces today behaviour exactly.
+      Rendered with the option and the value on separate lines.
+    lands_in:
+      - {target: quantus.ext.cmd, section: process_technology, option: -temperature, line: 63, layout: value_on_next_line, quoting: bare}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -temperature, line: 73, layout: value_on_next_line, quoting: bare}
+    why: Extraction temperature. Already a knob; stays tunable.
+
+  - key: quantus_cpu_count
+    template_var: quantus_cpu_count
+    context_path: resources.quantus_cpu_count
+    owner: resources
+    type: int
+    range: [1, 64]
+    range_verified: false
+    choices_confidence: guess
+    default: 1
+    currently: absent
+    observed: false
+    question: Does your QRC support multiple cores, and which section spells that?
+    notes: >-
+      No multi_cpu section exists in either template, so extraction is
+      single-threaded today. Nothing is emitted until the office answer names
+      the section.
+    why: A machine property, so it belongs to resources rather than to a portable Recipe.
+
+  # ---- jivaro reduction xml -------------------------------------------------
+
+  - key: jivaro_schema_version
+    template_var: jivaro_schema_version
+    context_path: null
+    owner: fixed
+    type: str
+    choices_confidence: certain
+    default: "2024.1"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:1
+    lands_in:
+      - {target: jivaro.xml, section: header, option: reductionParameters@version, line: 1}
+    notes: >-
+      Same role as quantus_ui_version: it pins which generation of the option
+      vocabulary this file is written in, and it has to be archived per run so
+      a Jivaro upgrade can be told apart from a genuine option error.
+    why: Provenance. Must match the installed Jivaro.
+
+  - key: jivaro_input_view
+    template_var: jivaro_input_view
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: certain
+    default: "{library}/{cell}/{out_file}"
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:2
+    lands_in:
+      - {target: jivaro.xml, section: general, option: inputView, line: 2}
+    notes: >-
+      The second serialisation of the DUT triple: slash separated, library
+      first -- the reverse of the Quantus -design_cell_name order. Recorded so
+      nobody writes one shared helper for both.
+    why: How Jivaro identifies the view to read. Order and separator are its own.
+
+  - key: reduction_output_view_suffix
+    template_var: jivaro_output_view_suffix
+    context_path: recipe.reduction.output_view_suffix
+    owner: recipe
+    type: str
+    choices_confidence: certain
+    default: _red
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:3
+    notes: >-
+      The reduced view is the one the post-layout simulation actually runs on,
+      so the user has to know its name and may want to change it. The old
+      flow used the same <OutFileName>_red convention, so this is inherited,
+      not arbitrary.
+    lands_in:
+      - {target: jivaro.xml, section: general, option: outputView, line: 3}
+    why: Names the view that post-layout simulation will be pointed at.
+
+  - key: reduction_log_level
+    template_var: jivaro_log_verbose_level
+    context_path: recipe.reduction.log_verbose_level
+    owner: recipe
+    type: enum
+    choices: [error, warning, info, debug, trace]
+    choices_confidence: guess
+    default: trace
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:4
+    lands_in:
+      - {target: jivaro.xml, section: general, option: logVerboseLevel, line: 4}
+    why: How much Jivaro logs. trace is very loud for a production flow.
+
+  - key: reduction_cpu
+    template_var: jivaro_cpu
+    context_path: resources.reduction_cpu
+    owner: resources
+    type: int
+    range: [1, 64]
+    range_verified: false
+    choices_confidence: certain
+    default: 1
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:5
+    lands_in:
+      - {target: jivaro.xml, section: general, option: cpu, line: 5}
+    why: Core count. A machine property, not an extraction condition.
+
+  - key: reduction_views_to_reduce
+    template_var: jivaro_views_to_reduce
+    context_path: recipe.reduction.views_to_reduce
+    owner: recipe
+    type: str
+    choices_confidence: certain
+    default: av_extracted
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:6
+    question: Should this always equal out_file? (Suspected live bug.)
+    notes: >-
+      THE MOST SUSPICIOUS ROW IN THE CATALOG. Three places name the view to
+      work on: inputView uses out_file, the Quantus -view_name uses out_file,
+      and this one is a separate literal "av_extracted" while both shipped
+      task tables set out_file to "av_ext". Jivaro is probably being told to
+      reduce a view that does not exist. Left at the observed value on
+      purpose -- guessing the fix would be worse than leaving the bug visible
+      -- but it should be derived from out_file once confirmed.
+    lands_in:
+      - {target: jivaro.xml, section: general, option: viewsToReduce, line: 6}
+    why: Which view Jivaro reduces. Should almost certainly be derived, not literal.
+
+  - key: parasitic_res_model
+    template_var: jivaro_r_model
+    context_path: pdk.parasitics.res_model
+    owner: profile
+    type: str
+    choices_confidence: likely
+    default: analogLib/presistor/symbol
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:9
+    question: Are these four device names right for your PDK, and must both tools agree?
+    notes: Part of the parasitic-device contract; see cap_component.
+    lands_in:
+      - {target: jivaro.xml, section: parsing, option: rModel, line: 9}
+    why: Which library device Jivaro parses parasitic resistors as. A PDK/library fact.
+
+  - key: parasitic_cap_model
+    template_var: jivaro_c_model
+    context_path: pdk.parasitics.cap_model
+    owner: profile
+    type: str
+    choices_confidence: likely
+    default: analogLib/pcapacitor/symbol
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:10
+    lands_in:
+      - {target: jivaro.xml, section: parsing, option: cModel, line: 10}
+    why: As parasitic_res_model, for capacitors.
+
+  - key: parasitic_ind_model
+    template_var: jivaro_l_model
+    context_path: pdk.parasitics.ind_model
+    owner: profile
+    type: str
+    choices_confidence: likely
+    default: analogLib/pinductor/symbol
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:11
+    notes: >-
+      Jivaro names an inductor and a mutual; Quantus names neither, because
+      RLCK extraction is off. The asymmetry is real and is recorded rather
+      than smoothed over.
+    lands_in:
+      - {target: jivaro.xml, section: parsing, option: lModel, line: 11}
+    why: As parasitic_res_model, for inductors. Unused until RLCK is enabled.
+
+  - key: parasitic_mutual_model
+    template_var: jivaro_k_model
+    context_path: pdk.parasitics.mutual_model
+    owner: profile
+    type: str
+    choices_confidence: likely
+    default: analogLib/pmind/symbol
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:12
+    lands_in:
+      - {target: jivaro.xml, section: parsing, option: kModel, line: 12}
+    why: As parasitic_ind_model, for mutual inductance.
+
+  - key: reduction_criterion
+    template_var: jivaro_criterion
+    context_path: recipe.reduction.criterion
+    owner: recipe
+    type: enum
+    choices: [standard]
+    choices_confidence: guess
+    default: standard
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:15
+    question: What other criteria does the Jivaro UI offer?
+    lands_in:
+      - {target: jivaro.xml, section: reduction, option: criterion, line: 15}
+    why: The reduction criterion. Directly decides how much accuracy is traded away.
+
+  - key: reduction_frequency_limit_ghz
+    template_var: jivaro_frequency_limit
+    context_path: recipe.reduction.frequency_limit_ghz
+    owner: recipe
+    type: float
+    range: [0.1, 1000.0]
+    range_verified: false
+    choices_confidence: certain
+    unit: GHz
+    default: 14.0
+    currently: jinja_var
+    observed: true
+    source_ref: config/tasks.yaml:29
+    notes: >-
+      The draft called this an existing knob. It is not: the jivaro manifest
+      declares no knobs at all, and the value comes from TaskSpec.jivaro, a
+      different configuration path with a different migration. The template
+      also carries a "| default(14)" fallback, which goes away -- the pydantic
+      default takes that job.
+    lands_in:
+      - {target: jivaro.xml, section: reduction, option: frequencyLimit, line: 16}
+    why: The frequency the reduced network must stay accurate to. An RF-critical condition.
+
+  - key: reduction_error_max_pct
+    template_var: jivaro_error_max
+    context_path: recipe.reduction.error_max_pct
+    owner: recipe
+    type: float
+    range: [0.0, 100.0]
+    range_verified: false
+    choices_confidence: certain
+    unit: percent
+    default: 2.0
+    currently: jinja_var
+    observed: true
+    source_ref: config/tasks.yaml:30
+    notes: As reduction_frequency_limit_ghz -- a TaskSpec field, not a knob, and the "| default(2)" fallback goes away.
+    lands_in:
+      - {target: jivaro.xml, section: reduction, option: errorMax, line: 17}
+    why: How much error the reduction may introduce. The other half of the accuracy trade.
+
+  - key: reduction_reduce_floating_nets
+    template_var: jivaro_reduce_floating_nets
+    context_path: recipe.reduction.reduce_floating_nets
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:18
+    lands_in:
+      - {target: jivaro.xml, section: reduction, option: reduceFloatingNets, line: 18}
+    why: Whether floating nets take part in reduction.
+
+  - key: reduction_decoupling_auto_threshold
+    template_var: jivaro_decoupling_auto_threshold
+    context_path: recipe.reduction.decoupling_auto_threshold
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: hardcoded_literal
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:19
+    lands_in:
+      - {target: jivaro.xml, section: reduction, option: decouplingAutoThreshold, line: 19}
+    why: Lets Jivaro pick its own decoupling threshold instead of the criterion.
+
+  - key: reduction_selectivity
+    template_var: jivaro_selectivity
+    context_path: null
+    owner: fixed
+    type: structural
+    choices_confidence: guess
+    default: null
+    currently: absent
+    observed: true
+    source_ref: templates/jivaro/default.xml.j2:21
+    notes: >-
+      An empty section marked only by a comment. Per-net selective reduction
+      would go here. Declared the official patch entry point for this file:
+      when a user needs selectivity before the catalog models it, this is
+      where the hunk lands, and recording that keeps the hunk anchored to a
+      stable comment rather than to a moving neighbour.
+    lands_in:
+      - {target: jivaro.xml, section: selectivity, option: "<!-- Selectivity settings -->", line: 21, quoting: none}
+    why: A known empty extension point. Better documented than rediscovered.
+
+  - key: reduction_enabled
+    template_var: reduction_enabled
+    context_path: recipe.reduction.enabled
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: config_field
+    observed: true
+    source_ref: auto_ext/core/config.py:36
+    notes: >-
+      Not a knob either, despite the draft: it is JivaroConfig.enabled with a
+      per-cell JivaroOverride on top. The override goes away -- a per-cell
+      difference in reduction settings is a second Recipe, not a patch on the
+      first.
+    why: Whether the jivaro stage runs at all. Gates the stage; emits nothing itself.
+
+  # ---- strmout: a whole stage with no template at all ----------------------
+  # argv is assembled in auto_ext/tools/strmout.py, which is exactly why a
+  # catalog reverse engineered from .j2 files alone missed the entire stage.
+
+  - key: layer_map
+    template_var: layer_map
+    context_path: pdk.layer_map
+    owner: profile
+    type: path
+    choices_confidence: certain
+    default: ${PDK_LAYER_MAP_FILE}
+    currently: config_field
+    observed: true
+    source_ref: auto_ext/core/config.py:196
+    notes: >-
+      Injected into the flat Jinja context by the runner but referenced by no
+      template; only the strmout argv consumes it. Distinct from
+      query_layer_map_file, which QRC reads and the PDK query_cmd writes.
+    lands_in:
+      - {target: null, stage: strmout, section: argv, option: -layerMap, line: null}
+    why: The PDK GDS layer map. Pure process fact.
+
+  - key: strmout_cdslib
+    template_var: strmout_cdslib
+    context_path: null
+    owner: fixed
+    type: path
+    choices_confidence: certain
+    default: null
+    currently: absent
+    observed: true
+    source_ref: auto_ext/tools/si.py:31
+    notes: >-
+      si passes "-cdslib ./cds.lib"; strmout passes nothing and relies on cwd.
+      Two tools in the same pipeline discovering cds.lib two different ways is
+      a real inconsistency, recorded here rather than silently fixed. The file
+      itself is placed by core/workdir.py and is part of the run directory
+      contract.
+    why: Undocumented asymmetry between two stages of the same flow.
+
+  - key: strmout_hier_depth
+    template_var: strmout_hier_depth
+    context_path: null
+    owner: recipe
+    type: int
+    choices_confidence: guess
+    default: null
+    currently: absent
+    observed: false
+    question: Did your manual flow ever specify hierarchy depth, case handling or dot conversion?
+    notes: >-
+      Proposed. Not a Recipe field yet: the strmout argv shape has never been
+      run against the real binary (a standing office item), so adding flags
+      blind risks breaking the only stage that currently works by luck.
+    why: strmout defaults are being relied on without anybody having chosen them.
+
+  - key: strmout_convert_dot
+    template_var: strmout_convert_dot
+    context_path: null
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: null
+    currently: absent
+    observed: false
+    notes: Proposed; see strmout_hier_depth.
+    why: As strmout_hier_depth.
+
+  - key: strmout_case
+    template_var: strmout_case
+    context_path: null
+    owner: recipe
+    type: str
+    choices_confidence: guess
+    default: null
+    currently: absent
+    observed: false
+    notes: Proposed; see strmout_hier_depth.
+    why: As strmout_hier_depth.
+
+  # ---- run-scoped: derived paths, policy, provenance -----------------------
+
+  - key: output_dir
+    template_var: output_dir
+    context_path: paths.output_dir
+    owner: run
+    type: path
+    choices_confidence: certain
+    default: ${WORK_ROOT}/cds/verify/QCI_PATH_{cell}
+    currently: jinja_var
+    observed: true
+    source_ref: auto_ext/core/config.py:208
+    notes: >-
+      The Cadence workspace for this cell. Format keys today are cell,
+      library, task_id, lvs_layout_view, lvs_source_view; task_id goes away
+      and run_slug / run_id arrive. The PATTERN lives on WorkspaceConfig; the
+      resolved value is a run fact, which is why the owner is run.
+      si.env line 10 is load bearing: if simRunDir is missing, si writes the
+      netlist into cwd and Quantus never finds it (Cadence LBRCXM-756), so
+      core/importer.py:476-485 injects the line on import.
+    lands_in:
+      - {target: si.env, section: output, option: simRunDir, line: 10}
+      - {target: lvs.qci, section: lvs_rules, option: "*lvsRunDir", line: 2}
+      - {target: lvs.qci, section: cmn_options, option: "*cmnTemplate_RN", line: 38}
+      - {target: quantus.ext.cmd, section: input_db, option: -directory_name, line: 35}
+      - {target: quantus.ext.cmd, section: input_db, option: -layer_map_file, line: 38}
+      - {target: quantus.ext.cmd, section: input_db, option: -device_properties_file, line: 40}
+      - {target: quantus.ext.cmd, section: output_db, option: -cdl_out_map_directory, line: 47, layout: value_on_next_line}
+      - {target: quantus.ext.cmd, section: output_setup, option: -directory_name, line: 56}
+      - {target: quantus.dspf.cmd, section: input_db, option: -directory_name, line: 34}
+      - {target: quantus.dspf.cmd, section: input_db, option: -layer_map_file, line: 37}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -directory_name, line: 64}
+    why: >-
+      Where the EDA tools work. Reusable and overwritten by the next run, so
+      it carries no identity -- the run directory does.
+
+  - key: intermediate_dir
+    template_var: intermediate_dir
+    context_path: paths.intermediate_dir
+    owner: run
+    type: path
+    choices_confidence: certain
+    default: ${WORK_ROOT2}
+    currently: jinja_var
+    observed: true
+    source_ref: auto_ext/core/config.py:209
+    notes: >-
+      In the flat context but referenced by no template; it exists as the root
+      dspf_out_path is expressed against. Pattern on WorkspaceConfig.
+    why: Root of the derived output paths. Not a per-recipe setting.
+
+  - key: employee_id
+    template_var: employee_id
+    context_path: site.employee_id
+    owner: resources
+    type: str
+    choices_confidence: certain
+    default: null
+    currently: config_field
+    observed: true
+    source_ref: auto_ext/core/runner.py:1386
+    notes: >-
+      Injected into the flat context, referenced by no template, but real
+      exports carry an employee directory inside -cdl_out_map_directory, and
+      core/importer.py:508-511 has hardcoded shapes for two site layouts
+      (/tmpdata/RFIC/rfic_share/<id>/ and /data/RFIC3/<project>/<employee>/).
+      Falls back to $USER, then $USERNAME, then "unknown".
+      OWNER CAVEAT: this is site/user level, and the six-value owner enum has
+      no "site" member; it is filed under resources because both are
+      machine-local and non-portable for the same reason. Its actual home per
+      01-schema.md section 1.4 is ~/.auto_ext/site.yaml, NOT the resources
+      object, and it must never travel inside a Recipe -- an absolute path
+      containing it leaks project plus employee number.
+    why: Site-local identity. Never portable, never part of a shared Recipe.
+
+  - key: max_workers
+    template_var: max_workers
+    context_path: run.max_workers
+    owner: resources
+    type: int
+    range: [1, 64]
+    range_verified: false
+    choices_confidence: certain
+    default: 1
+    currently: config_field
+    observed: true
+    source_ref: auto_ext/cli.py:99
+    notes: How many runs execute at once (CLI --jobs). Recorded per run in RunRecord.max_workers.
+    why: A machine property. Belongs with the other resource settings, not in a Recipe.
+
+  - key: stages
+    template_var: stages
+    context_path: recipe.stages
+    owner: recipe
+    type: list
+    choices: [si, strmout, calibre, quantus, jivaro]
+    choices_confidence: certain
+    default: [si, strmout, calibre, quantus, jivaro]
+    currently: config_field
+    observed: true
+    source_ref: auto_ext/core/runner.py:141
+    notes: >-
+      The persisted default. A CLI --stage may narrow it for one invocation;
+      the narrowed set is what RunRecord.requested_stages records. Listed here
+      so nobody re-files the CLI flag into the Recipe by mistake.
+    why: Which steps this recipe intends to run. A recipe-level intent with a per-run override.
+
+  - key: requested_stages
+    template_var: requested_stages
+    context_path: run.stages
+    owner: run
+    type: list
+    choices: [si, strmout, calibre, quantus, jivaro]
+    choices_confidence: certain
+    default: [si, strmout, calibre, quantus, jivaro]
+    currently: config_field
+    observed: true
+    source_ref: auto_ext/cli.py:66
+    notes: The per-invocation narrowing of recipe.stages ("LVS only", "resume from QRC").
+    why: This invocation, not this recipe. A Run fact.
+
+  - key: dry_run
+    template_var: dry_run
+    context_path: run.dry_run
+    owner: run
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: config_field
+    observed: true
+    source_ref: auto_ext/core/runner.py:560
+    notes: Renders every file and touches no EDA tool and no workspace.
+    why: A property of one invocation.
+
+  - key: continue_on_lvs_fail
+    template_var: continue_on_lvs_fail
+    context_path: recipe.policy.continue_on_lvs_fail
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: false
+    currently: config_field
+    observed: true
+    source_ref: auto_ext/core/config.py:258
+    notes: >-
+      Filed on the Recipe per 01-schema.md section 1.2. There is a defensible
+      argument for calling it a Run policy instead (it describes this attempt,
+      not the extraction conditions); if that wins, it is a one-field move.
+    why: Whether extraction proceeds after LVS fails. A real strategy switch, and nowhere today.
+
+  - key: fail_on_unparsable_lvs_report
+    template_var: fail_on_unparsable_lvs_report
+    context_path: recipe.policy.fail_on_unparsable_lvs_report
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: absent
+    observed: true
+    source_ref: auto_ext/core/checks.py:1
+    notes: >-
+      Today an unparsable report raises and the run fails, with no way to say
+      otherwise. Same behaviour by default, now stated.
+    why: Whether a report we cannot parse is a hard failure. A policy, not a condition.
+
+  - key: run_provenance_header
+    template_var: run_provenance_header
+    context_path: run.id
+    owner: run
+    type: structural
+    choices_confidence: certain
+    default: null
+    currently: absent
+    observed: false
+    notes: >-
+      Proposed by 01-schema.md section 4: stamp a comment such as
+      "# auto_ext run <run.id> recipe <recipe.id>@<version>" at the top of
+      every rendered file, so any stray .cmd found in a Cadence workspace can
+      be traced back to its run directory. Not emitted yet -- adding a line to
+      the top of a file is a patch-baseline change and belongs with the
+      renderer work.
+    why: Makes an orphaned generated file self-identifying.
+
+  - key: quantus_log_artifact
+    template_var: quantus_log_artifact
+    context_path: null
+    owner: run
+    type: structural
+    choices_confidence: certain
+    default: null
+    currently: absent
+    observed: false
+    notes: >-
+      Only the LVS report is archived today. The Quantus log and the Jivaro
+      reduction report are the other two pieces of evidence worth keeping in
+      runs/<id>/results/, alongside the ERC files (see erc_summary_file).
+    why: A run has to be explainable months later, and one report is not enough.

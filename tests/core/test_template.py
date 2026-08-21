@@ -11,8 +11,12 @@ from auto_ext.core.errors import TemplateError
 from auto_ext.core.template import (
     PlaceholderInventory,
     VarReference,
+    _make_jinja_env,
+    _referenced_jinja_vars,
     collect_var_references,
     enumerate_stage_templates,
+    make_jinja_env,
+    referenced_jinja_vars,
     render_template,
     resolve_template_path,
     scan_placeholders,
@@ -418,3 +422,60 @@ def test_enumerate_stage_templates_skips_subdirs(tmp_path: Path) -> None:
     out = enumerate_stage_templates(tmp_path, "calibre")
     names = [p.name for p in out]
     assert names == ["top.j2"]
+
+
+# ---- the shared Jinja environment ------------------------------------------
+#
+# ``make_jinja_env`` and ``referenced_jinja_vars`` became public so the
+# catalog-driven pipeline in :mod:`auto_ext.core.render`, which renders from a
+# source string rather than a path, uses the same environment and the same
+# reference scanner as this module rather than building a second one.
+
+
+def test_the_private_spellings_are_the_same_objects() -> None:
+    """``core/patch.py`` and ``core/diff_template.py`` import the underscore
+    names. One environment, two names -- never two environments."""
+
+    assert _make_jinja_env is make_jinja_env
+    assert _referenced_jinja_vars is referenced_jinja_vars
+
+
+def test_jinja_env_uses_this_project_s_delimiters() -> None:
+    env = make_jinja_env()
+    assert (env.variable_start_string, env.variable_end_string) == ("[[", "]]")
+    assert (env.block_start_string, env.block_end_string) == ("[%", "%]")
+    assert (env.comment_start_string, env.comment_end_string) == ("[#", "#]")
+
+
+def test_jinja_env_keeps_trim_blocks_off() -> None:
+    """The templates' optional lines are written in the hugging
+    ``[% if x %]LINE`` / ``[% endif %]NEXT`` form precisely because
+    ``trim_blocks`` is off. Turning it on would silently change every
+    conditional line's output."""
+
+    env = make_jinja_env()
+    assert env.trim_blocks is False
+    assert env.keep_trailing_newline is True
+    rendered = env.from_string("[% if on %]A\n[% endif %]B\n").render(on=True)
+    assert rendered == "A\nB\n"
+
+
+def test_jinja_env_is_strict_about_undefined_names() -> None:
+    from jinja2 import UndefinedError
+
+    with pytest.raises(UndefinedError):
+        make_jinja_env().from_string("[[ nope ]]").render()
+
+
+def test_referenced_jinja_vars_finds_plain_references() -> None:
+    assert referenced_jinja_vars("a [[ cell ]] b [[library]]\n") == {
+        "cell",
+        "library",
+    }
+
+
+def test_referenced_jinja_vars_ignores_filter_expressions() -> None:
+    """Deliberately conservative: an expression with a filter handles its own
+    None, so the None guard that consumes this must not flag it."""
+
+    assert referenced_jinja_vars("[[ freq | default(14) ]]") == set()
