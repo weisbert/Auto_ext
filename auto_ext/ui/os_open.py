@@ -1,6 +1,6 @@
 """Cross-platform "open with OS default handler" helper.
 
-Used by the Run tab's stage-row context menu and by the results panel to
+Used by the Cells screen's log bar and by the Runs screen's result card to
 launch whatever the user has wired up as the default viewer for a file
 type: the rendered template, the Calibre LVS report, a stage log, or an
 extracted DSPF netlist. All four are plain files, so one entry point

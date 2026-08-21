@@ -41,10 +41,11 @@ def test_read_returns_none_when_unset(isolated_qsettings) -> None:
 
 
 def test_write_then_read_round_trip(
-    isolated_qsettings, project_tools_config: Path
+    isolated_qsettings, v2_config_dir: Path
 ) -> None:
-    _write_last_config_dir(project_tools_config)
-    assert _read_last_config_dir() == project_tools_config.resolve()
+    config = v2_config_dir / "config"
+    _write_last_config_dir(config)
+    assert _read_last_config_dir() == config.resolve()
 
 
 def test_read_ignores_stale_nonexistent_path(
@@ -57,28 +58,33 @@ def test_read_ignores_stale_nonexistent_path(
     assert _read_last_config_dir() is None
 
 
-def test_read_ignores_dir_without_project_yaml(
+def test_read_ignores_dir_without_workspace_yaml(
     isolated_qsettings, tmp_path: Path
 ) -> None:
-    """A directory that exists but no longer carries a project.yaml is
-    treated as stale (e.g. user wiped the contents but kept the dir)."""
+    """A directory that exists but carries no workspace.yaml is stale.
+
+    ``project.yaml`` is no longer the marker: a v1 tree the GUI can only
+    answer with a migration hint must not be auto-loaded into that hint on
+    every launch."""
     bare = tmp_path / "bare_dir"
     bare.mkdir()
+    (bare / "project.yaml").write_text("{}\n", encoding="utf-8")
     _write_last_config_dir(bare)
     assert _read_last_config_dir() is None
 
 
 def test_write_resolves_to_absolute(
-    isolated_qsettings, project_tools_config: Path, monkeypatch
+    isolated_qsettings, v2_config_dir: Path, monkeypatch
 ) -> None:
     """Even if a relative-ish path comes in, the persisted entry is the
     absolute resolved form so it survives cwd changes between sessions."""
-    monkeypatch.chdir(project_tools_config.parent)
-    _write_last_config_dir(Path(project_tools_config.name))
+    config = v2_config_dir / "config"
+    monkeypatch.chdir(config.parent)
+    _write_last_config_dir(Path(config.name))
     settings = QSettings()
     stored = settings.value(_LAST_CONFIG_KEY)
     assert Path(stored).is_absolute()
-    assert Path(stored) == project_tools_config.resolve()
+    assert Path(stored) == config.resolve()
 
 
 def test_write_is_a_noop_for_none(isolated_qsettings) -> None:
@@ -89,14 +95,14 @@ def test_write_is_a_noop_for_none(isolated_qsettings) -> None:
 
 
 def test_subsequent_write_overwrites(
-    isolated_qsettings, project_tools_config: Path, tmp_path: Path
+    isolated_qsettings, v2_config_dir: Path, tmp_path: Path
 ) -> None:
-    """Loading a different project.yaml replaces the persisted entry,
-    not appends — the user's current pick should always win."""
+    """Loading a different project replaces the persisted entry rather than
+    appending -- the user's current pick always wins."""
     other = tmp_path / "other_config"
     other.mkdir()
-    (other / "project.yaml").write_text("{}\n", encoding="utf-8")
+    (other / "workspace.yaml").write_text("pdk_profile: hn001\n", encoding="utf-8")
 
-    _write_last_config_dir(project_tools_config)
+    _write_last_config_dir(v2_config_dir / "config")
     _write_last_config_dir(other)
     assert _read_last_config_dir() == other.resolve()

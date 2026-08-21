@@ -54,7 +54,7 @@ def test_dry_run_projectA_produces_full_preview(
     raw_projectA_dir: Path, tmp_path: Path
 ) -> None:
     preview = dry_run(_inputs(raw_projectA_dir, tmp_path))
-    assert len(preview.files) == 10
+    assert len(preview.files) == 6
     assert all(f.will_overwrite is False for f in preview.files)
     assert preview.merged_identity.cell == "INV1"
     assert preview.merged_identity.library == "INV_LIB"
@@ -71,17 +71,18 @@ def test_dry_run_projectA_produces_full_preview(
         == "$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
     )
     assert not preview.conflicts
-    # Ordering: 4 (template, manifest) pairs then project.yaml then tasks.yaml.
+    # Ordering: 4 templates, then project.yaml, then tasks.yaml. There are no
+    # sidecar manifests any more -- the catalog says which values are settable.
     roles = [f.role for f in preview.files]
     assert roles[-2] == "project_yaml"
     assert roles[-1] == "tasks_yaml"
 
 
-def test_dry_run_jivaro_omitted_yields_8_files(
+def test_dry_run_jivaro_omitted_yields_5_files(
     raw_projectA_dir: Path, tmp_path: Path
 ) -> None:
     preview = dry_run(_inputs(raw_projectA_dir, tmp_path, include_jivaro=False))
-    assert len(preview.files) == 8
+    assert len(preview.files) == 5
     assert "jivaro" not in preview.results
     paths = [f.path for f in preview.files]
     assert not any("jivaro" in p.parts for p in paths)
@@ -179,11 +180,11 @@ def test_commit_writes_all_files_in_order(
     preview = dry_run(_inputs(raw_projectA_dir, tmp_path))
     progress: list[str] = []
     written = commit(preview, progress=progress.append)
-    assert len(written) == 10
+    assert len(written) == 6
     for f in preview.files:
         assert f.path.is_file()
     # Progress callback fired in lockstep, in the same order.
-    assert len(progress) == 10
+    assert len(progress) == 6
     assert progress[-2].endswith("project.yaml")
     assert progress[-1].endswith("tasks.yaml")
     # Written list matches preview.files order.

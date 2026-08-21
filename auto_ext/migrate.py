@@ -95,16 +95,17 @@ from auto_ext.catalog import (
     default_templates_root,
     load_catalog,
 )
-from auto_ext.core.config import (
-    ProjectConfig,
-    TaskConfig,
-    TaskSpec,
-    load_project,
-    load_tasks_with_raw,
-)
 from auto_ext.core.env import discover_required_vars
 from auto_ext.core.errors import AutoExtError, ConfigError
-from auto_ext.core.manifest import load_manifest, resolve_knob_values
+from auto_ext.legacy_v1 import (
+    ProjectConfigV1,
+    TaskConfigV1,
+    TaskSpecV1,
+    load_manifest_v1,
+    load_project_v1,
+    load_tasks_v1_with_raw,
+    resolve_knob_values_v1,
+)
 from auto_ext.core.profile_discover import read_profile_yaml
 from auto_ext.model.cells import CELLS_FILENAME, CellBook, CellEntry, load_cells
 from auto_ext.model.common import RenderTarget, Stage, slugify, utcnow
@@ -167,7 +168,7 @@ _PATH_TOKENS: frozenset[str] = frozenset(
     }
 )
 
-#: Stage slot in ``ProjectConfig.templates`` -> the render target it feeds.
+#: Stage slot in ``ProjectConfigV1.templates`` -> the render target it feeds.
 #: ``quantus`` is absent because one slot feeds two possible targets and the
 #: file's own ``output_db -type`` decides which; see :func:`_quantus_target`.
 _SLOT_TARGETS: dict[str, RenderTarget] = {
@@ -754,7 +755,7 @@ class _GroupKey:
 @dataclass
 class _Group:
     key: _GroupKey
-    members: list[TaskConfig]
+    members: list[TaskConfigV1]
     template_set: _TemplateSet
     knobs: dict[str, dict[str, Any]]
 
@@ -767,12 +768,14 @@ def _freeze_knobs(knobs: Mapping[str, Mapping[str, Any]]) -> tuple[Any, ...]:
 
 
 def _effective_knobs(
-    task: TaskConfig, project: ProjectConfig, template_set: _TemplateSet
+    task: TaskConfigV1, project: ProjectConfigV1, template_set: _TemplateSet
 ) -> dict[str, dict[str, Any]]:
     """manifest default < project.knobs < task.knobs, per stage.
 
-    Exactly what ``runner`` resolves at render time, minus the ``--knob`` CLI
-    layer, which is per-run and therefore not migratable.
+    What the v1 runner resolved at render time, minus the ``--knob`` CLI layer,
+    which was per-run and therefore has nothing to migrate into. A stage whose
+    sidecar manifest is already gone keeps the user's own override values
+    verbatim -- see :func:`auto_ext.legacy_v1.resolve_knob_values_v1`.
     """
 
     resolved: dict[str, dict[str, Any]] = {}
@@ -781,13 +784,12 @@ def _effective_knobs(
         stage_files.setdefault(_TARGET_STAGE[target], path)
     for stage in sorted(set(project.knobs) | set(task.knobs) | set(stage_files)):
         path = stage_files.get(stage)
-        manifest = load_manifest(path) if path is not None else None
+        manifest = load_manifest_v1(path) if path is not None else None
         try:
-            values = resolve_knob_values(
+            values = resolve_knob_values_v1(
                 manifest,
                 dict(project.knobs.get(stage, {})),
                 dict(task.knobs.get(stage, {})),
-                {},
             )
         except ConfigError as exc:
             raise MigrationError(f"task {task.task_id}: cannot resolve {stage} knobs: {exc}") from exc
@@ -1063,8 +1065,8 @@ def migrate_v1_to_v2(
     templates_dir = Path(template_root) if template_root is not None else default_templates_root()
     repo_root = templates_dir.parent
 
-    project = load_project(project_yaml)
-    tasks, raw_tasks = load_tasks_with_raw(tasks_yaml, project)
+    project = load_project_v1(project_yaml)
+    tasks, raw_tasks = load_tasks_v1_with_raw(tasks_yaml, project)
     specs = _raw_specs(raw_tasks, tasks_yaml)
 
     dispositions: list[FieldDisposition] = []
@@ -1264,11 +1266,11 @@ def _load_catalog(catalog_root: Path | None) -> Catalog:
     return load_catalog(path)
 
 
-def _raw_specs(raw_tasks: Any, tasks_yaml: Path) -> list[TaskSpec]:
+def _raw_specs(raw_tasks: Any, tasks_yaml: Path) -> list[TaskSpecV1]:
     """Re-validate the raw entries so ``exclude`` is visible again.
 
     ``load_tasks`` resolves ``exclude`` during expansion and the resolved
-    ``TaskConfig`` list no longer mentions it. The migration has to report
+    ``TaskConfigV1`` list no longer mentions it. The migration has to report
     what was excluded, so the raw entries are validated a second time.
     """
 
@@ -1276,10 +1278,10 @@ def _raw_specs(raw_tasks: Any, tasks_yaml: Path) -> list[TaskSpec]:
         entries = raw_tasks.get("tasks", [])
     else:
         entries = raw_tasks
-    specs: list[TaskSpec] = []
+    specs: list[TaskSpecV1] = []
     for index, entry in enumerate(entries):
         try:
-            specs.append(TaskSpec.model_validate(_plain(entry)))
+            specs.append(TaskSpecV1.model_validate(_plain(entry)))
         except ValidationError as exc:
             raise MigrationError(f"{tasks_yaml} [entry #{index}]: {exc}") from exc
     return specs
@@ -1293,7 +1295,7 @@ def _plain(obj: Any) -> Any:
     return obj
 
 
-def _task_key(task: TaskConfig) -> str:
+def _task_key(task: TaskConfigV1) -> str:
     return f"{task.library}__{task.cell}__{task.lvs_layout_view}__{task.lvs_source_view}"
 
 
@@ -1326,7 +1328,7 @@ def _warn_on_custom_templates(
 
 def _build_profile(
     *,
-    project: ProjectConfig,
+    project: ProjectConfigV1,
     project_yaml: Path,
     templates_dir: Path,
     template_set: _TemplateSet,
@@ -1537,7 +1539,7 @@ def _lvs_variants(
     path = template_set.files.get(RenderTarget.LVS_QCI)
     if path is None:
         return [], None
-    manifest = load_manifest(path)
+    manifest = load_manifest_v1(path)
     knob = manifest.knobs.get("lvs_variant") if manifest is not None else None
     if knob is None or not knob.choices:
         warnings.append(
@@ -1554,7 +1556,7 @@ def _lvs_variants(
     return variants, default
 
 
-def _required_env(project: ProjectConfig, profile: PdkProfile) -> list[str]:
+def _required_env(project: ProjectConfigV1, profile: PdkProfile) -> list[str]:
     """Env vars the profile's own path expressions depend on.
 
     Scanned from the path expressions rather than from the template text: a
@@ -1586,8 +1588,8 @@ def _required_env(project: ProjectConfig, profile: PdkProfile) -> list[str]:
 
 def _group_tasks(
     *,
-    tasks: Sequence[TaskConfig],
-    project: ProjectConfig,
+    tasks: Sequence[TaskConfigV1],
+    project: ProjectConfigV1,
     templates_dir: Path,
     repo_root: Path,
     warnings: list[str],
@@ -1773,14 +1775,14 @@ def _set_path(model: Any, path: str, value: Any) -> None:
 
 def _build_cells(
     *,
-    tasks: Sequence[TaskConfig],
-    specs: Sequence[TaskSpec],
+    tasks: Sequence[TaskConfigV1],
+    specs: Sequence[TaskSpecV1],
     decide: Callable[..., Any],
     dispositions: list[FieldDisposition],
     warnings: list[str],
 ) -> CellBook:
     entries: list[CellEntry] = []
-    seen: dict[str, TaskConfig] = {}
+    seen: dict[str, TaskConfigV1] = {}
     for task in tasks:
         key = _task_key(task)
         previous = seen.get(key)
@@ -1872,7 +1874,7 @@ def _build_cells(
 
 
 def _excluded_combinations(
-    tasks: Sequence[TaskConfig], specs: Sequence[TaskSpec]
+    tasks: Sequence[TaskConfigV1], specs: Sequence[TaskSpecV1]
 ) -> list[tuple[str, CellEntry]]:
     """Combinations a spec's ``exclude`` removed, recovered by subtraction.
 
@@ -1925,9 +1927,9 @@ def _as_list(value: str | list[str]) -> list[str]:
 
 def _build_workspace(
     *,
-    project: ProjectConfig,
+    project: ProjectConfigV1,
     profile: PdkProfile,
-    tasks: Sequence[TaskConfig],
+    tasks: Sequence[TaskConfigV1],
     decide: Callable[..., Any],
     dispositions: list[FieldDisposition],
     warnings: list[str],

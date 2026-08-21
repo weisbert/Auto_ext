@@ -4,10 +4,16 @@ Two halves. The first exercises the pure helpers (formatting, CELL SUMMARY
 round-tripping, failure grouping) with no Qt involved; the second drives the
 widget itself through ``qtbot``.
 
-The layout assertions matter as much as the content ones: the main window is
-already pinned above 900 px by the Project tab, so a new widget that
-contributes a tall minimum size makes the application unusable on a 1080p
-screen. ``test_result_card_min_height_*`` are the nails for that.
+The layout assertions matter as much as the content ones: the window floor is
+940x560 px, so a card that contributes a tall minimum makes the application
+unusable on a 1366x768 laptop screen. ``test_result_card_min_height_*`` are
+the nails for that.
+
+The 1d assertions are the important content ones. That artboard is the card
+this user reaches for most -- LVS failures dominate his week -- and it has to
+carry enough for him to skip the habitual re-check in Calibre Interactive:
+the banner, the count, the movement against the previous run, the sub-cells
+that did not match, and the exact frozen runset a hand-off would open.
 """
 
 from __future__ import annotations
@@ -37,12 +43,15 @@ from auto_ext.model.run import (  # noqa: E402
     RunResults,
     StageRecord,
 )
+from auto_ext.ui import theme  # noqa: E402
+from auto_ext.ui.widgets import failure_chip as fc  # noqa: E402
 from auto_ext.ui.widgets import result_card as rc  # noqa: E402
+from auto_ext.ui.widgets.failure_chip import Chip, FailureChip, PathLabel  # noqa: E402
 from auto_ext.ui.widgets.result_card import ResultCard  # noqa: E402
 
-#: A tab must not push the main window's minimum height up; the card is the
-#: tallest thing inside the Runs tab, so it is where the budget is spent.
-MIN_HEIGHT_BUDGET = 500
+#: A screen must not push the window's minimum height up; the card is the
+#: tallest thing inside the Runs screen, so it is where the budget is spent.
+MIN_HEIGHT_BUDGET = 400
 
 
 # ---- report fixtures --------------------------------------------------------
@@ -356,6 +365,188 @@ def test_group_failures_lvs_mismatch_uses_the_lvs_result(make_run_record) -> Non
     assert "CELL SUMMARY" in groups[0].next_action
 
 
+# ---- stage strip (pure) -----------------------------------------------------
+
+
+def test_stage_chips_one_per_tool_in_pipeline_order(make_run_record) -> None:
+    record = make_run_record(
+        requested_stages=["si", "strmout", "calibre", "quantus"],
+        stages=[
+            _stage("si"),
+            _stage("strmout"),
+            _stage("calibre", status=StageStatus.FAILED),
+        ],
+    )
+    chips = rc.stage_chips(record)
+    assert [c.stage for c in chips] == [
+        "si",
+        "strmout",
+        "calibre",
+        "quantus",
+        "jivaro",
+    ]
+    by_stage = {c.stage: c for c in chips}
+    assert by_stage["si"].text == "si " + theme.STATUS_GLYPH["passed"]
+    assert by_stage["calibre"].text == "calibre " + theme.STATUS_GLYPH["failed"]
+    # Requested but never reached vs never asked for: different sentences.
+    assert by_stage["quantus"].text.endswith("not started")
+    assert by_stage["jivaro"].text.endswith("off in recipe")
+
+
+def test_stage_chips_say_nothing_when_the_record_lists_no_requested_stages(
+    make_run_record,
+) -> None:
+    """An older record cannot distinguish "not started" from "off"; do not guess."""
+
+    record = make_run_record(stages=[_stage("si")])
+    assert [c.stage for c in rc.stage_chips(record)] == ["si"]
+
+
+def test_stage_chips_take_the_worst_status_of_a_split_stage(
+    make_run_record,
+) -> None:
+    """``quantus.ext`` passing must not hide ``quantus.dspf`` failing."""
+
+    record = make_run_record(
+        stages=[
+            _stage("quantus.ext", stage="quantus"),
+            _stage("quantus.dspf", stage="quantus", status=StageStatus.FAILED),
+        ]
+    )
+    chips = rc.stage_chips(record)
+    assert len(chips) == 1
+    assert chips[0].tone == fc.CHIP_TONE_FAILED
+
+
+def test_stage_chips_quote_the_skip_reason(make_run_record) -> None:
+    record = make_run_record(
+        stages=[
+            _stage("calibre", status=StageStatus.FAILED),
+            _stage(
+                "quantus",
+                status=StageStatus.SKIPPED,
+                skip_reason="aborted after earlier stage failure",
+            ),
+        ]
+    )
+    by_stage = {c.stage: c for c in rc.stage_chips(record)}
+    assert "aborted after earlier stage failure" in by_stage["quantus"].text
+
+
+def test_stop_reason_names_the_stage_and_the_switch(make_run_record) -> None:
+    record = make_run_record(
+        continue_on_lvs_fail=False,
+        stages=[
+            _stage("si"),
+            _stage("calibre", status=StageStatus.FAILED),
+            _stage("quantus", status=StageStatus.SKIPPED, skip_reason="aborted"),
+        ],
+    )
+    assert rc.stop_reason_text(record) == (
+        "stopped at calibre - continue_on_lvs_fail is off"
+    )
+
+
+def test_stop_reason_is_silent_when_nothing_was_left_undone(
+    make_run_record,
+) -> None:
+    record = make_run_record(stages=[_stage("si"), _stage("strmout", status=StageStatus.FAILED)])
+    assert rc.stop_reason_text(record) == ""
+    assert rc.stop_reason_text(make_run_record(stages=[_stage("si")])) == ""
+
+
+def test_applied_patch_count_only_counts_hunks_that_changed_a_file(
+    make_run_record,
+) -> None:
+    from auto_ext.core.patch_models import (
+        HunkOutcome,
+        PatchStatus,
+        StagePatchReport,
+    )
+
+    report = StagePatchReport(
+        stage="calibre",
+        template_id="lvs.qci",
+        outcomes=[
+            HunkOutcome(hunk_id="a", status=PatchStatus.CLEAN),
+            HunkOutcome(hunk_id="b", status=PatchStatus.SHIFTED),
+            HunkOutcome(hunk_id="c", status=PatchStatus.NOOP),
+            HunkOutcome(hunk_id="d", status=PatchStatus.DISABLED),
+            HunkOutcome(hunk_id="e", status=PatchStatus.ABSORBED),
+        ],
+    )
+    record = make_run_record(patch_reports=[report])
+    assert rc.applied_patch_count(record) == 2
+    assert rc.applied_patch_count(make_run_record()) == 0
+
+
+# ---- the compact delta (pure) ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("current", "previous", "expected", "color"),
+    [
+        (3, 17, f"17 -> 3 {rc.GLYPH_DOWN}14", rc.COLOR_PASS),
+        (17, 3, f"3 -> 17 {rc.GLYPH_UP}14", rc.COLOR_FAIL),
+        (3, 3, "unchanged at 3", None),
+        (3, None, "first run of this cell", None),
+        (None, 3, "not comparable", None),
+    ],
+)
+def test_delta_chip_text(
+    current: int | None, previous: int | None, expected: str, color: str | None
+) -> None:
+    from auto_ext.core.checks import compare_discrepancies
+
+    text, got = rc.delta_chip_text(compare_discrepancies(current, previous))
+    assert text == expected
+    if color is not None:
+        assert got == color
+    # Never the accent, and never blank.
+    assert got not in theme.accent_colors()
+    assert text.strip()
+
+
+def test_delta_chip_uses_only_whitelisted_glyphs() -> None:
+    assert rc.GLYPH_DOWN in "\u25bc"
+    assert rc.GLYPH_UP in "\u25b4"
+    assert rc.GLYPH_COLLAPSED in "\u25be"
+    assert rc.GLYPH_EXPANDED in "\u25b4"
+
+
+# ---- per-class actions (pure) -----------------------------------------------
+
+
+def test_every_code_gets_exactly_one_primary_and_one_secondary_action() -> None:
+    for code in fc.CODE_ORDER:
+        actions = rc.failure_actions(code, log_name="calibre.log", discrepancies=3)
+        assert len(actions) == 2, code
+        assert [a.primary for a in actions] == [True, False], code
+        assert all(a.label.strip() for a in actions), code
+
+
+def test_action_sets_differ_per_class() -> None:
+    """Canvas 1e gives each class its own pair of buttons."""
+
+    ids = {
+        code: tuple(a.action_id for a in rc.failure_actions(code))
+        for code in fc.CODE_ORDER
+    }
+    assert ids[fc.CODE_LICENSE][0] == rc.ACTION_RERUN
+    assert ids[fc.CODE_CONFIG][0] == rc.ACTION_OPEN_SETUP
+    assert ids[fc.CODE_LVS][0] == rc.ACTION_OPEN_CALIBRE
+    assert ids[fc.CODE_CRASH][0] == rc.ACTION_OPEN_LOG
+    assert len(set(ids.values())) == len(fc.CODE_ORDER), (
+        "each class gets its own pair of buttons"
+    )
+
+
+def test_the_lvs_secondary_action_counts_the_discrepancies() -> None:
+    labelled = rc.failure_actions(fc.CODE_LVS, discrepancies=3)[1].label
+    assert labelled == "Show 3 discrepancies"
+    assert rc.failure_actions(fc.CODE_LVS)[1].label == "Show the LVS detail"
+
+
 # ============================================================================
 # the widget
 # ============================================================================
@@ -529,23 +720,62 @@ def test_result_card_stage_rows_carry_status_duration_and_artifacts(
     assert skipped.toolTip(1) == "aborted after earlier stage failure"
 
 
-def test_result_card_lvs_row_shows_banner_count_and_mismatched_cells(
-    qtbot, populated_run
-) -> None:
+def test_result_card_lvs_band_is_the_1d_headline(qtbot, populated_run) -> None:
+    """Banner, count and CELL SUMMARY, as canvas 1d lays them out."""
+
     record, run_dir = populated_run
     card = ResultCard()
     qtbot.addWidget(card)
     card.set_run(record, run_dir=run_dir)
 
-    body = card._lvs_body.text()
-    assert "LVS failed" in body
-    assert "INCORRECT" in body
-    assert "discrepancies" in body
-    assert ">3<" in body
+    assert card._lvs_banner.text() == "INCORRECT"
+    assert rc.COLOR_FAIL in card._lvs_banner.styleSheet()
+    assert card._lvs_count.text() == "3"
+    assert rc.COLOR_FAIL in card._lvs_count.styleSheet()
+    # Mono 20/700: the one oversized string the design allows.
+    assert f"font-size: {theme.FONT_SIZE_MONO_HERO}px" in card._lvs_banner.styleSheet()
+
     # Names come out of the archived report even though LvsResult.cell_summary
     # is empty, which is what core.checks leaves it as today.
-    assert "amp2, dco_core" in body
-    assert "bias" not in body.split("Mismatched cells")[1].split("</div>")[0]
+    summary = card._cell_summary.text()
+    assert "amp2" in summary and "dco_core" in summary
+    assert summary.index("amp2") < summary.index("bias"), "mismatches lead"
+    assert "INCORRECT" in summary and "CORRECT" in summary
+
+
+def test_result_card_lvs_banner_is_marked_as_the_authority(
+    qtbot, populated_run
+) -> None:
+    """core.checks fails a clean count under an INCORRECT banner; say so."""
+
+    from PyQt5.QtWidgets import QLabel
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    texts = [child.text() for child in card._lvs_band.findChildren(QLabel)]
+    assert any("authoritative" in t for t in texts)
+    assert any(t == "LVS banner" for t in texts)
+    assert any(t == "DISCREPANCIES" for t in texts)
+    assert any(t == "CELL SUMMARY" for t in texts)
+
+
+def test_result_card_states_an_absent_discrepancy_count_as_absent(
+    qtbot, make_run_record
+) -> None:
+    """Calibre v2019.2 omits the count; a guessed 0 would be a lie."""
+
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[_stage("calibre", status=StageStatus.FAILED)],
+        results=RunResults(lvs=LvsResult(passed=False, banner="INCORRECT")),
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    assert card._lvs_count.text() == "?"
+    assert "no DISCREPANCIES count" in card._lvs_count.toolTip()
 
 
 def test_result_card_lvs_row_without_a_result(qtbot, make_run_record) -> None:
@@ -584,7 +814,16 @@ def test_result_card_compares_against_the_previous_run(
 
     body = card._lvs_body.text()
     assert "17 -> 3 (down 14)" in body
-    assert "20260820T101010Z_amp2-ext" in body
+    # The run id is long; it lives in the tooltip so the caption stays short.
+    assert "20260820T101010Z_amp2-ext" in card._lvs_body.toolTip()
+
+    # The compact chip beside the number is the canvas 1d form.
+    assert card._lvs_delta.text() == f"17 -> 3 {rc.GLYPH_DOWN}14"
+    assert rc.COLOR_PASS in card._lvs_delta.styleSheet()
+
+    delta = card.discrepancy_delta
+    assert delta is not None
+    assert (delta.previous, delta.current, delta.delta) == (17, 3, -14)
 
 
 def test_result_card_says_so_when_there_is_nothing_to_compare(
@@ -597,25 +836,255 @@ def test_result_card_says_so_when_there_is_nothing_to_compare(
     assert "No earlier run of this cell" in card._lvs_body.text()
 
 
-def test_result_card_failures_group_shows_a_next_action(
-    qtbot, populated_run
-) -> None:
+def _failure_texts(card: ResultCard) -> list[str]:
     from PyQt5.QtWidgets import QLabel
 
+    return [child.text() for child in card._failures_group.findChildren(QLabel)]
+
+
+def _failure_buttons(card: ResultCard) -> list:
+    from PyQt5.QtWidgets import QPushButton
+
+    return list(card._failures_group.findChildren(QPushButton))
+
+
+def _verdict(cls: FailureClass) -> FailureVerdict:
+    return FailureVerdict(
+        failure_class=cls,
+        confidence=Confidence.CERTAIN,
+        reason=f"{cls.value} happened",
+        next_action="do something",
+    )
+
+
+def _failed_stage(key: str, verdict: FailureVerdict) -> StageRecord:
+    return StageRecord(
+        key=key,
+        stage=key,
+        status=StageStatus.FAILED,
+        details={rc.DETAILS_FAILURE_KEY: verdict.as_dict()},
+    )
+
+
+def test_result_card_failure_row_carries_a_code_a_reason_and_two_buttons(
+    qtbot, populated_run
+) -> None:
     record, run_dir = populated_run
     card = ResultCard()
     qtbot.addWidget(card)
     card.set_run(record, run_dir=run_dir)
 
     assert not card._failures_group.isHidden()
-    texts = [
-        card._failures_layout.itemAt(i).widget().text()
-        for i in range(card._failures_layout.count())
-        if isinstance(card._failures_layout.itemAt(i).widget(), QLabel)
-    ]
+    chips = card._failures_group.findChildren(FailureChip)
+    assert [c.code for c in chips] == [fc.CODE_LVS]
+
+    texts = _failure_texts(card)
     assert any("LVS mismatch" in t for t in texts)
     assert any(t.startswith("Next: ") for t in texts)
-    assert any("CELL SUMMARY" in t for t in texts)
+    assert any("CELL SUMMARY" in t for t in texts), "the core's next_action"
+    # The heading names who has to act, not what class the verdict was.
+    assert any(fc.ACTOR_TITLES[fc.ACTOR_DESIGN] in t for t in texts)
+
+    labels = [b.text() for b in _failure_buttons(card)]
+    assert labels == ["Open in Calibre Interactive", "Show 3 discrepancies"]
+
+
+def test_result_card_orders_failures_by_who_has_to_act(
+    qtbot, make_run_record
+) -> None:
+    """Canvas 1e: environment first, design second, unclassified last."""
+
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[
+            # Deliberately recorded in the *wrong* order.
+            _failed_stage("quantus", _verdict(FailureClass.TOOL_CRASH)),
+            _failed_stage("jivaro", _verdict(FailureClass.UNKNOWN)),
+            _failed_stage("calibre", _verdict(FailureClass.LVS_MISMATCH)),
+            _failed_stage("si", _verdict(FailureClass.LICENSE_UNAVAILABLE)),
+            _failed_stage("strmout", _verdict(FailureClass.ENVIRONMENT)),
+        ],
+    )
+    expected = [
+        fc.CODE_LICENSE,
+        fc.CODE_CONFIG,
+        fc.CODE_LVS,
+        fc.CODE_CRASH,
+        fc.CODE_UNKNOWN,
+    ]
+    groups = rc.sort_failure_groups(rc.group_failures(record))
+    assert [g.code for g in groups] == expected
+
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    chips = card._failures_group.findChildren(FailureChip)
+    assert [c.code for c in chips] == expected
+    # All three headings, once each, in canvas order.
+    texts = _failure_texts(card)
+    headings = [t for t in texts if t in fc.ACTOR_TITLES.values()]
+    assert headings == [
+        fc.ACTOR_TITLES[fc.ACTOR_ENVIRONMENT],
+        fc.ACTOR_TITLES[fc.ACTOR_DESIGN],
+        fc.ACTOR_TITLES[fc.ACTOR_UNCLASSIFIED],
+    ]
+
+
+def test_result_card_header_code_chip_is_the_one_that_outlives_a_fix(
+    qtbot, make_run_record
+) -> None:
+    """Fixing the license does not make the LVS mismatch go away."""
+
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[
+            _failed_stage("si", _verdict(FailureClass.LICENSE_UNAVAILABLE)),
+            _failed_stage("calibre", _verdict(FailureClass.LVS_MISMATCH)),
+        ],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    assert card._code_chip.code == fc.CODE_LVS
+    assert not card._code_chip.isHidden()
+
+
+def test_result_card_hides_the_code_chip_on_a_clean_run(
+    qtbot, make_run_record
+) -> None:
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(make_run_record(overall=TaskStatus.PASSED, stages=[_stage("si")]))
+    assert card._code_chip.isHidden()
+
+
+def test_result_card_exposes_the_ordered_groups_and_computes_them_once(
+    qtbot, populated_run
+) -> None:
+    """Classifying reads the archived log; the header and the band share one."""
+
+    record, run_dir = populated_run
+    calls: list[object] = []
+    real = rc.group_failures
+
+    def counting(rec, **kw):
+        calls.append(rec)
+        return real(rec, **kw)
+
+    card = ResultCard()
+    qtbot.addWidget(card)
+    rc.group_failures = counting  # type: ignore[assignment]
+    try:
+        card.set_run(record, run_dir=run_dir)
+    finally:
+        rc.group_failures = real  # type: ignore[assignment]
+
+    assert len(calls) == 1
+    assert [g.code for g in card.failure_groups] == [fc.CODE_LVS]
+
+
+def test_result_card_an_unclassified_failure_is_never_blank(
+    qtbot, make_run_record
+) -> None:
+    """``failure_signatures.yaml`` is empty, so this is today's common case."""
+
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[_stage("quantus", status=StageStatus.FAILED)],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+
+    chips = card._failures_group.findChildren(FailureChip)
+    assert [c.code for c in chips] == [fc.CODE_UNKNOWN]
+    assert chips[0].text() == "UNK"
+    # Grey, never red: the classifier declined to blame the design.
+    assert theme.STATUS_FAILED not in chips[0].styleSheet()
+
+    texts = _failure_texts(card)
+    assert any("Unclassified" in t for t in texts)
+    assert any("failure_signatures.yaml" in t for t in texts)
+    assert [b.text() for b in _failure_buttons(card)] == [
+        "Open quantus.log",
+        "Copy the log line",
+    ]
+
+
+def test_result_card_a_cancelled_stage_gets_its_own_code(
+    qtbot, make_run_record
+) -> None:
+    record = make_run_record(
+        overall=TaskStatus.CANCELLED,
+        stages=[_stage("calibre", status=StageStatus.CANCELLED)],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    chips = card._failures_group.findChildren(FailureChip)
+    assert [c.code for c in chips] == [fc.CODE_CANCELLED]
+    assert fc.actor_for(fc.CODE_CANCELLED) == fc.ACTOR_ENVIRONMENT
+
+
+def test_result_card_config_failure_offers_the_setup_drawer(
+    qtbot, make_run_record
+) -> None:
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[_stage("strmout", status=StageStatus.FAILED, exit_code=127)],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    button = next(b for b in _failure_buttons(card) if b.text() == "Fix in Setup")
+    with qtbot.waitSignal(card.setup_requested, timeout=1000) as blocker:
+        button.click()
+    assert blocker.args == ["Paths"]
+
+
+def test_result_card_copy_the_evidence_is_disabled_without_evidence(
+    qtbot, make_run_record
+) -> None:
+    # No exit code and no log: nothing to classify and nothing to quote.
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[_stage("quantus", status=StageStatus.FAILED)],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    button = next(
+        b for b in _failure_buttons(card) if b.text() == "Copy the log line"
+    )
+    assert not button.isEnabled()
+    assert "no evidence" in button.toolTip()
+
+
+def test_result_card_copy_the_evidence_copies_the_recorded_line(
+    qtbot, make_run_record
+) -> None:
+    verdict = FailureVerdict(
+        failure_class=FailureClass.LICENSE_UNAVAILABLE,
+        confidence=Confidence.SIGNATURE,
+        reason="log matched signature 'calibre.no_license'",
+        next_action="Check the license server.",
+        evidence="ERROR: could not check out license calibre_lvs (all in use)",
+        signature_id="calibre.no_license",
+    )
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[_failed_stage("calibre", verdict)],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    button = next(
+        b for b in _failure_buttons(card) if b.text() == "Copy the log line"
+    )
+    assert button.isEnabled()
+    with qtbot.waitSignal(card.copy_requested, timeout=1000) as blocker:
+        button.click()
+    assert blocker.args == [verdict.evidence]
 
 
 def test_result_card_hides_the_failures_group_on_a_clean_run(
@@ -629,37 +1098,82 @@ def test_result_card_hides_the_failures_group_on_a_clean_run(
     assert card._failures_group.isHidden()
 
 
-def test_result_card_outputs_list_dspf_view_triple_and_report(
+def _artifact_rows(card: ResultCard) -> dict[str, PathLabel]:
+    """``{label: PathLabel}`` for the artifacts grid, in row order."""
+
+    from PyQt5.QtWidgets import QLabel
+
+    grid = card._artifacts_layout
+    out: dict[str, PathLabel] = {}
+    for row in range(grid.rowCount()):
+        name_item = grid.itemAtPosition(row, 0)
+        value_item = grid.itemAtPosition(row, 1)
+        if name_item is None or value_item is None:
+            continue
+        name = name_item.widget()
+        value = value_item.widget()
+        if isinstance(name, QLabel) and isinstance(value, PathLabel):
+            out[name.text()] = value
+    return out
+
+
+def test_result_card_artifacts_are_the_canvas_1c_rows(
     qtbot, populated_run
 ) -> None:
-    from PyQt5.QtWidgets import QLabel, QPushButton
-
     record, run_dir = populated_run
     card = ResultCard()
     qtbot.addWidget(card)
     card.set_run(record, run_dir=run_dir)
 
-    grid = card._artifacts_layout
-    labels = [
-        grid.itemAt(i).widget().text()
-        for i in range(grid.count())
-        if isinstance(grid.itemAt(i).widget(), QLabel)
-    ]
-    assert "DSPF" in labels
-    assert "Extracted view" in labels
-    assert "LVS report" in labels
-    assert "Run directory" in labels
+    rows = _artifact_rows(card)
+    assert "output dir" in rows
+    assert "extracted" in rows
+    assert "lvs report" in rows
+    assert "rendered calibre" in rows
+    assert "run dir" in rows
     # The extracted view is a lib/cell/view triple, not a filesystem path.
-    assert any("WB_PLL_DCO / amp2 / av_extracted" == t for t in labels)
-    # The archived report exists, so its Open button is live; the DSPF file
-    # was never written, so its button is disabled with an explanatory tooltip.
-    buttons = {
-        grid.itemAt(i).widget().toolTip(): grid.itemAt(i).widget()
-        for i in range(grid.count())
-        if isinstance(grid.itemAt(i).widget(), QPushButton)
-    }
-    disabled = [b for t, b in buttons.items() if t.startswith("Not on this host")]
-    assert disabled and all(not b.isEnabled() for b in disabled)
+    assert rows["extracted"].full_text() == "WB_PLL_DCO / amp2 / av_extracted"
+
+
+def test_result_card_artifact_paths_are_clickable_when_they_exist(
+    qtbot, populated_run
+) -> None:
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    rows = _artifact_rows(card)
+    report = rows["lvs report"]
+    assert report.is_live()
+    assert report.path == run_dir / "results" / "lvs.report"
+    with qtbot.waitSignal(card.artifact_requested, timeout=1000) as blocker:
+        report.clicked.emit(report.path)
+    assert blocker.args == [run_dir / "results" / "lvs.report"]
+
+    # The workarea was never created, so that row is inert and says why.
+    workarea = rows["output dir"]
+    assert not workarea.is_live()
+    assert workarea.toolTip().startswith("Not on this host")
+
+
+def test_result_card_a_deleted_lvs_report_says_what_happened(
+    qtbot, make_run_record
+) -> None:
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        results=RunResults(
+            lvs=LvsResult(
+                passed=False, banner="INCORRECT", source_path="/wa/amp2.lvs.report"
+            )
+        ),
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    row = _artifact_rows(card)["lvs report"]
+    assert not row.is_live()
+    assert "overwrote" in row.toolTip()
 
 
 def test_result_card_copy_button_emits_the_view_triple(
@@ -672,16 +1186,33 @@ def test_result_card_copy_button_emits_the_view_triple(
     qtbot.addWidget(card)
     card.set_run(record, run_dir=run_dir)
 
-    grid = card._artifacts_layout
     copy_btn = next(
-        grid.itemAt(i).widget()
-        for i in range(grid.count())
-        if isinstance(grid.itemAt(i).widget(), QPushButton)
-        and grid.itemAt(i).widget().text() == "Copy"
+        b
+        for b in card._artifacts_group.findChildren(QPushButton)
+        if b.text() == "Copy"
     )
     with qtbot.waitSignal(card.copy_requested, timeout=1000) as blocker:
         copy_btn.click()
     assert blocker.args == ["WB_PLL_DCO / amp2 / av_extracted"]
+
+
+def test_result_card_stage_logs_are_collapsed_until_asked_for(
+    qtbot, populated_run
+) -> None:
+    """Canvas 1c/1d draw no tree; a hidden one also costs no minimum height."""
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    assert not card.stage_logs_visible()
+    assert card._log_toggle.text().endswith(rc.GLYPH_COLLAPSED)
+    card._log_toggle.click()
+    assert card.stage_logs_visible()
+    assert card._log_toggle.text().endswith(rc.GLYPH_EXPANDED)
+    card._log_toggle.click()
+    assert not card.stage_logs_visible()
 
 
 def test_result_card_open_log_button_tracks_the_selection(
@@ -691,6 +1222,7 @@ def test_result_card_open_log_button_tracks_the_selection(
     card = ResultCard()
     qtbot.addWidget(card)
     card.set_run(record, run_dir=run_dir)
+    card.toggle_stage_logs(True)
 
     # Nothing selected yet.
     assert not card._open_log_btn.isEnabled()
@@ -741,6 +1273,7 @@ def test_result_card_stage_context_menu_is_deferred_and_state_aware(
     card = ResultCard()
     qtbot.addWidget(card)
     card.set_run(record, run_dir=run_dir)
+    card.toggle_stage_logs(True)
     card.show()
 
     captured: dict[str, object] = {}
@@ -777,6 +1310,7 @@ def test_result_card_stage_context_menu_disables_missing_files(
     card = ResultCard()
     qtbot.addWidget(card)
     card.set_run(record, run_dir=run_dir)
+    card.toggle_stage_logs(True)
     card.show()
 
     captured: dict[str, object] = {}
@@ -900,3 +1434,162 @@ def test_result_card_clear_drops_the_record_and_the_plan(
     assert card.handoff_plan is None
     assert card._stage_tree.topLevelItemCount() == 0
     assert card._body.isHidden()
+
+
+def test_result_card_prints_the_command_line_and_the_frozen_runset(
+    qtbot, populated_run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1d's reassurance: the hand-off can be verified without pressing it."""
+
+    record, run_dir = populated_run
+    runset = run_dir / "rendered" / "lvs.qci"
+    monkeypatch.setattr(
+        rc,
+        "plan_calibre_handoff",
+        lambda rec, *a, **k: HandoffPlan(
+            argv=("/opt/calibre", "-gui", "-lvs", "-runset", str(runset)),
+            cwd=run_dir,
+            env={},
+            runset=runset,
+            stage_key="calibre",
+            executable="calibre",
+        ),
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    assert "-runset" in card._launch_line.full_text()
+    assert "-batch" not in card._launch_line.full_text()
+    assert card._runset_line.full_text() == str(runset)
+    assert card._runset_line.is_live()
+    assert "frozen" in card._runset_note.text()
+
+
+def test_result_card_says_when_the_frozen_runset_is_gone(
+    qtbot, populated_run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record, run_dir = populated_run
+    missing = run_dir / "rendered" / "gone.qci"
+    monkeypatch.setattr(
+        rc,
+        "plan_calibre_handoff",
+        lambda rec, *a, **k: HandoffPlan(
+            argv=("/opt/calibre", "-gui", "-lvs", "-runset", str(missing)),
+            cwd=run_dir,
+            env={},
+            runset=missing,
+            stage_key="calibre",
+            executable="calibre",
+            reasons=("The Calibre runset for this run is missing.",),
+        ),
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    assert not card._handoff_btn.isEnabled()
+    assert not card._runset_line.is_live()
+    assert card._runset_note.text() == "(missing)"
+
+
+def test_result_card_stage_strip_is_the_1c_row(qtbot, populated_run) -> None:
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    chips = card._stage_strip.findChildren(Chip)
+    texts = [c.text() for c in chips]
+    assert texts[0].startswith("si ")
+    assert any(t.startswith("calibre ") for t in texts)
+    tones = {c.text().split()[0]: c.tone for c in chips}
+    assert tones["si"] == fc.CHIP_TONE_PASSED
+    assert tones["calibre"] == fc.CHIP_TONE_FAILED
+    # Never the accent: a stage state is a status, not a selection.
+    for chip in chips:
+        assert not any(a in chip.styleSheet() for a in theme.accent_colors())
+
+
+def test_result_card_side_buttons_track_what_is_really_on_disk(
+    qtbot, populated_run
+) -> None:
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    assert card._report_btn.isEnabled()
+    assert card._calibre_log_btn.isEnabled()
+    with qtbot.waitSignal(card.artifact_requested, timeout=1000) as blocker:
+        card._report_btn.click()
+    assert blocker.args == [run_dir / "results" / "lvs.report"]
+    with qtbot.waitSignal(card.log_requested, timeout=1000) as blocker:
+        card._calibre_log_btn.click()
+    assert blocker.args == [run_dir / "logs" / "calibre.log"]
+
+
+def test_result_card_side_buttons_explain_themselves_when_dead(
+    qtbot, make_run_record
+) -> None:
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(make_run_record(stages=[_stage("si")]))
+    assert not card._report_btn.isEnabled()
+    assert "no LVS report" in card._report_btn.toolTip()
+    assert not card._calibre_log_btn.isEnabled()
+    assert "no calibre log" in card._calibre_log_btn.toolTip()
+
+
+def test_result_card_rerun_is_a_request_carrying_the_record(
+    qtbot, populated_run
+) -> None:
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    with qtbot.waitSignal(card.rerun_requested, timeout=1000) as blocker:
+        card._rerun_btn.click()
+    assert blocker.args[0].run_id == record.run_id
+
+
+def test_result_card_header_reports_applied_manual_edits(
+    qtbot, make_run_record
+) -> None:
+    """The escape hatch has to be visible in the record it produced."""
+
+    from auto_ext.core.patch_models import (
+        HunkOutcome,
+        PatchStatus,
+        StagePatchReport,
+    )
+
+    record = make_run_record(
+        patch_reports=[
+            StagePatchReport(
+                stage="calibre",
+                template_id="lvs.qci",
+                outcomes=[
+                    HunkOutcome(hunk_id="a", status=PatchStatus.CLEAN),
+                    HunkOutcome(hunk_id="b", status=PatchStatus.SHIFTED),
+                    HunkOutcome(hunk_id="c", status=PatchStatus.CLEAN),
+                ],
+            )
+        ]
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    assert "3 manual edits applied" in card._meta.text()
+
+
+def test_result_card_show_lvs_detail_does_not_raise_off_screen(
+    qtbot, populated_run
+) -> None:
+    """The "Show N discrepancies" action, exercised without a visible window."""
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    card.show_lvs_detail()

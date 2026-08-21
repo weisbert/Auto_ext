@@ -319,36 +319,12 @@ def test_phase59_bc_lvs_report_path_from_runset_relative_runset_dir(
 def test_production_templates_render(
     templates_root: Path, tmp_path: Path, subpath: str
 ) -> None:
-    ctx = {
-        "library": "LIB",
-        "cell": "inv",
-        "lvs_source_view": "schematic",
-        "lvs_layout_view": "layout",
-        "ground_net": "vss",
-        "out_file": "av_ext",
-        "task_id": "LIB__inv__layout__schematic",
-        "output_dir": "/w/cds/out",
-        "intermediate_dir": "/w",
-        "dspf_out_path": "/w/inv.dspf",
-        "employee_id": "alice",
-        "jivaro_frequency_limit": 14,
-        "jivaro_error_max": 2,
-        "tech_name": "HN001",
-        # Phase 5.6.5 paths schema replaces pdk_subdir / runset_versions.
-        "calibre_lvs_dir": "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX",
-        "calibre_lvs_basename": "CFXXX",
-        "qrc_deck_dir": "/v/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck",
-    }
-    env = {
-        "WORK_ROOT": "/w",
-        "WORK_ROOT2": "/w",
-        "VERIFY_ROOT": "/v",
-        "SETUP_ROOT": "/s",
-        "calibre_source_added_place": "/v/empty.cdl",
-    }
     out = tmp_path / Path(subpath).stem
     rendered = SiTool().render_template(
-        templates_root / subpath, context=ctx, env=env, out_path=out
+        templates_root / subpath,
+        context=_production_context(tmp_path),
+        env=_production_env(),
+        out_path=out,
     )
     assert rendered.is_file()
     text = rendered.read_text(encoding="utf-8")
@@ -469,40 +445,39 @@ def test_phase59_a_run_subprocess_flushes_per_line(tmp_path: Path) -> None:
 # ---- S1 shared fixtures for the production templates ----------------------
 
 
-def _production_context(**overrides: Any) -> dict[str, Any]:
-    """Render context matching the one the runner builds for a real task."""
+def _production_context(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+    """The context the runner builds for a real task, built by the runner's code.
 
-    ctx: dict[str, Any] = {
-        "library": "LIB",
-        "cell": "inv",
-        "lvs_source_view": "schematic",
-        "lvs_layout_view": "layout",
-        "ground_net": "vss",
-        "out_file": "av_ext",
-        "task_id": "LIB__inv__layout__schematic",
-        "output_dir": "/w/cds/out",
-        "intermediate_dir": "/w",
-        "dspf_out_path": "/w/inv.dspf",
-        "employee_id": "alice",
-        "jivaro_frequency_limit": 14,
-        "jivaro_error_max": 2,
-        "tech_name": "HN001",
-        "calibre_lvs_dir": "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX",
-        "calibre_lvs_basename": "CFXXX",
-        "qrc_deck_dir": "/v/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck",
-    }
-    ctx.update(overrides)
-    return ctx
+    Deliberately not a hand-written dict any more. The flat names the shipped
+    templates use (``lvs_variant``, ``exclude_floating_nets_limit``,
+    ``technology_corner`` ...) used to come from the manifest knob layer and
+    now come from :func:`auto_ext.core.render.build_context`, one alias per
+    catalog row. A literal dict here would go stale the moment a row is added
+    -- which is exactly how these five tests started failing when the knob
+    layer was removed.
+
+    ``overrides`` are applied last, so a test can still pin one value.
+    """
+
+    from auto_ext.core import render
+
+    from tests.support.v2 import make_dut, make_profile, make_recipe, make_run
+
+    context = render.build_context(
+        dut=make_dut(library="LIB"),
+        recipe=make_recipe(),
+        profile=make_profile(),
+        run=make_run(tmp_path),
+        resolved_env=_production_env(),
+    )
+    context.update(overrides)
+    return context
 
 
 def _production_env() -> dict[str, str]:
-    return {
-        "WORK_ROOT": "/w",
-        "WORK_ROOT2": "/w",
-        "VERIFY_ROOT": "/v",
-        "SETUP_ROOT": "/s",
-        "calibre_source_added_place": "/v/empty.cdl",
-    }
+    from tests.support.v2 import ENV
+
+    return dict(ENV)
 
 
 def _render_production_quantus(
@@ -513,7 +488,7 @@ def _render_production_quantus(
     out = tmp_path / Path(name).stem
     QuantusTool().render_template(
         templates_root / "quantus" / name,
-        context=_production_context(**ctx_overrides),
+        context=_production_context(tmp_path, **ctx_overrides),
         env=_production_env(),
         out_path=out,
     )
@@ -1120,7 +1095,7 @@ def test_jivaro_records_the_view_from_the_production_template(
     out = tmp_path / "default.xml"
     JivaroTool().render_template(
         templates_root / "jivaro" / "default.xml.j2",
-        context=_production_context(),
+        context=_production_context(tmp_path),
         env=_production_env(),
         out_path=out,
     )

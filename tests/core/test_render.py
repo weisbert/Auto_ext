@@ -15,7 +15,6 @@ repo and hits the repo's own templates" trap does not apply.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -29,86 +28,15 @@ from auto_ext.model.common import RenderTarget, Stage
 from auto_ext.model.pdk import (
     CornerSpec,
     LvsDeckSet,
-    LvsDeckVariant,
     ParasiticDeviceContract,
     PdkProfile,
-    QrcDeck,
 )
 from auto_ext.model.recipe import OutputKind, Recipe, ResourceProfile, recipe_from_catalog
-from auto_ext.model.run import DutSnapshot
 
-WORK = "/w"
-
-ENV: dict[str, str] = {
-    "WORK_ROOT": WORK,
-    "WORK_ROOT2": WORK,
-    "VERIFY_ROOT": f"{WORK}/fake/verify",
-    "SETUP_ROOT": f"{WORK}/fake/setup",
-    "PDK_LAYER_MAP_FILE": f"{WORK}/fake/layers.map",
-    "calibre_source_added_place": (
-        f"{WORK}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
-    ),
-}
-
-
-def make_profile(**overrides: object) -> PdkProfile:
-    """A profile shaped like the one office scanning produces for HN001."""
-
-    fields: dict[str, object] = {
-        "profile_id": "hn001",
-        "display_name": "HN001 22nm",
-        "tech_name": "HN001",
-        "lvs_decks": LvsDeckSet(
-            dir_expr="$calibre_source_added_place|parent",
-            variants=[LvsDeckVariant(name="wodio", rules_suffix="wodio")],
-            default_variant="wodio",
-            runset_version="Ver_Plus_1.0l_0.9",
-        ),
-        "qrc": QrcDeck(
-            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck",
-            runset_version="Ver_Plus_1.0a",
-        ),
-        "corners": [
-            CornerSpec(
-                name="typical",
-                technology_corner="TYPICAL",
-                default_temperature_c=55.0,
-                aliases=["nominal"],
-            )
-        ],
-        "default_corner": "typical",
-    }
-    fields.update(overrides)
-    return PdkProfile(**fields)  # type: ignore[arg-type]
-
-
-def make_dut(**overrides: object) -> DutSnapshot:
-    fields: dict[str, object] = {
-        "library": "WB_PLL_DCO",
-        "cell": "inv",
-        "layout_view": "layout",
-        "source_view": "schematic",
-        "ground_net": "vss",
-        "out_file": "av_ext",
-    }
-    fields.update(overrides)
-    return DutSnapshot(**fields)  # type: ignore[arg-type]
-
-
-def make_run(tmp_path: Path, **overrides: object) -> render.RunFacts:
-    fields: dict[str, object] = {
-        "run_id": "20260821T143205Z_inv-rc",
-        "run_slug": "inv-rc",
-        "run_dir": tmp_path / "runs" / "20260821T143205Z_inv-rc",
-        "workarea": tmp_path / "workarea",
-        "output_dir": f"{WORK}/cds/verify/QCI_PATH_inv",
-        "intermediate_dir": WORK,
-        "dspf_out_path": f"{WORK}/inv.dspf",
-        "started_at": datetime(2026, 8, 21, 14, 32, 5, tzinfo=timezone.utc),
-        "stages": ("si", "calibre", "quantus"),
-    }
-    fields.update(overrides)
-    return render.RunFacts(**fields)  # type: ignore[arg-type]
+# The builders live in :mod:`tests.support.v2` so every file that needs a
+# complete v2 object gets the same one; these names are kept because they read
+# better inside a test body than the qualified spelling would.
+from tests.support.v2 import ENV, WORK, make_dut, make_profile, make_run
 
 
 @pytest.fixture
@@ -1130,3 +1058,93 @@ def test_an_undiscovered_variant_table_does_not_block_the_render(
         out_dir=tmp_path / "rendered",
     )
     assert rendered.text.splitlines()[0].endswith("/CFXXX.wodio.qcilvs")
+
+
+# ---- portability: one Recipe, two technologies ------------------------------
+#
+# Section 3.B.4 of the tests disposition. ``tests/test_integration_e2e.py``
+# makes the same claim end-to-end, through the CLI and against real files;
+# this is the seam-level version, which can say something the file-level one
+# cannot: *which half of the context* is allowed to move.
+
+
+def test_the_same_recipe_binds_to_two_profiles_and_only_the_pdk_half_moves(
+    recipe: Recipe, tmp_path: Path
+) -> None:
+    """The recipe subtree is byte-identical; the pdk subtree is not.
+
+    This is the definition of a portable Recipe, expressed at the one place
+    both halves are visible at once. Asserting only "the two renders differ"
+    would pass for a Recipe that had quietly frozen a process fact -- the
+    difference would be there, in the wrong subtree.
+    """
+
+    from tests.support.v2 import ENV, OTHER_ENV, make_other_profile
+
+    env = {**ENV, **OTHER_ENV}
+    first = render.build_context(
+        dut=make_dut(), recipe=recipe, profile=make_profile(), run=make_run(tmp_path),
+        resolved_env=env,
+    )
+    second = render.build_context(
+        dut=make_dut(), recipe=recipe, profile=make_other_profile(),
+        run=make_run(tmp_path), resolved_env=env,
+    )
+
+    # Everything the Recipe owns survived the move untouched.
+    assert first["recipe"] == second["recipe"]
+    # ...as did the DUT and the run.
+    for key in ("library", "cell", "lvs_layout_view", "lvs_source_view", "ground_net"):
+        assert first[key] == second[key]
+
+    # ...and the process facts are genuinely different, or the first assertion
+    # proved nothing.
+    assert first["pdk"] != second["pdk"]
+    assert first["pdk"]["tech_name"] == "HN001"
+    assert second["pdk"]["tech_name"] == "CF028"
+    assert first["pdk"]["lvs_dir"] != second["pdk"]["lvs_dir"]
+
+
+def test_one_semantic_corner_name_reaches_two_different_tool_literals(
+    recipe: Recipe
+) -> None:
+    """``corner: typical`` means "whatever this PDK calls typical".
+
+    The Recipe never writes ``TYPICAL``; the profile's corner table does. That
+    single indirection is what a Recipe carried between two technologies
+    depends on, so it gets its own nail rather than being implied by the
+    context comparison above.
+    """
+
+    from tests.support.v2 import make_other_profile
+
+    named = recipe.model_copy(
+        update={"extraction": recipe.extraction.model_copy(update={"corner": "typical"})}
+    )
+    assert render.resolve_corner(named, make_profile()).technology_corner == "TYPICAL"
+    assert render.resolve_corner(named, make_other_profile()).technology_corner == "NOM_28"
+    # The Recipe itself still says only the semantic name.
+    assert named.extraction.corner == "typical"
+
+
+def test_a_recipe_naming_a_corner_the_second_pdk_lacks_is_refused_there(
+    recipe: Recipe
+) -> None:
+    """Portable is not the same as universal, and the difference has to be loud.
+
+    Moving a Recipe to a PDK whose corner table does not contain the name it
+    asks for is a real situation (``rcworst`` exists in one process and not
+    another). The answer is an error that lists what this PDK does define --
+    never the default corner, which would extract at the wrong one silently.
+    """
+
+    from tests.support.v2 import make_other_profile
+
+    rcworst = recipe.model_copy(
+        update={"extraction": recipe.extraction.model_copy(update={"corner": "rcworst"})}
+    )
+    with pytest.raises(AutoExtError) as excinfo:
+        render.resolve_corner(rcworst, make_other_profile())
+    message = str(excinfo.value)
+    assert "rcworst" in message
+    assert "typical" in message

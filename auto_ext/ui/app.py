@@ -23,6 +23,7 @@ from pathlib import Path
 from PyQt5.QtCore import QSettings
 from PyQt5.QtWidgets import QApplication
 
+from auto_ext.model.workspace import WORKSPACE_FILENAME
 from auto_ext.ui.main_window import MainWindow
 
 logger = logging.getLogger(__name__)
@@ -84,16 +85,18 @@ def _read_last_config_dir() -> Path | None:
 
     Returns ``None`` when no entry exists, the entry is malformed, the
     directory has been moved/deleted, or the directory no longer
-    contains a ``project.yaml``. The check is intentionally permissive:
+    contains a ``workspace.yaml``. The check is intentionally permissive:
     a stale entry should never fail the launch, just fall through to
-    the empty-state banner.
+    the empty-state banner. It looks for ``workspace.yaml`` rather than
+    the retired ``project.yaml`` so a directory the GUI can no longer
+    load is not auto-loaded into an error on every launch.
     """
     settings = QSettings()
     raw = settings.value(_LAST_CONFIG_KEY, "")
     if not raw or not isinstance(raw, str):
         return None
     candidate = Path(raw)
-    if not candidate.is_dir() or not (candidate / "project.yaml").is_file():
+    if not candidate.is_dir() or not (candidate / WORKSPACE_FILENAME).is_file():
         logger.info(
             "QSettings.last_config_dir=%r is no longer valid; ignoring", raw
         )

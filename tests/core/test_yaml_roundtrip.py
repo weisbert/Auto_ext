@@ -150,15 +150,17 @@ def test_yaml_rt_key_order_preserved_after_edit(tmp_path: Path) -> None:
     assert "employee_id: bob" in dumped
 
 
-# ---- 3. tasks.yaml round-trip with paths-bearing comments ------------------
+# ---- 3. tasks.yaml round-trip with per-row comments ------------------------
 
 
-def test_yaml_rt_tasks_yaml_paths_and_comments(tmp_path: Path) -> None:
-    """tasks.yaml round-trip: comments + Phase 5.6.5 dspf_out_path + nested
-    knobs all survive an edit-free dump.
+def test_yaml_rt_tasks_yaml_rows_and_comments(tmp_path: Path) -> None:
+    """tasks.yaml round-trip: every comment survives an edit-free dump.
 
-    Phase 5.6.5 introduced ``dspf_out_path`` overrides on tasks; this exercises
-    that the per-task override + surrounding comments still round-trip.
+    The nested ``knobs`` / ``dspf_out_path`` blocks this used to carry are
+    retired keys now -- ``load_tasks_with_raw`` refuses a file that still has
+    them -- so the round-trip is exercised on the keys the reduced schema
+    keeps. The guarantee under test is unchanged: nothing the user typed is
+    lost by a load-and-save.
     """
     src = (
         "# tasks file header comment\n"
@@ -169,17 +171,8 @@ def test_yaml_rt_tasks_yaml_paths_and_comments(tmp_path: Path) -> None:
         "  lvs_source_view: schematic\n"
         "  ground_net: vss  # inline on ground_net\n"
         "  out_file: av_ext\n"
-        "  jivaro:\n"
-        "    enabled: false\n"
-        "    frequency_limit: 14\n"
-        "    error_max: 2\n"
         "  # comment before continue_on_lvs_fail\n"
         "  continue_on_lvs_fail: false\n"
-        "  # comment before dspf_out_path override\n"
-        "  dspf_out_path: ${output_dir}/{cell}.dspf\n"
-        "  knobs:\n"
-        "    quantus:\n"
-        "      exclude_floating_nets_limit: 200  # inline on knob\n"
         "# trailing comment\n"
     )
     p = _yaml_rt_write(tmp_path, "tasks.yaml", src)
@@ -196,13 +189,119 @@ def test_yaml_rt_tasks_yaml_paths_and_comments(tmp_path: Path) -> None:
             f"dumped:   {dumped_comments}"
         )
 
-    # Phase 5.6.5: dspf_out_path override survives untouched.
-    assert "dspf_out_path: ${output_dir}/{cell}.dspf" in dumped
-    # Nested knob value survives.
-    assert "exclude_floating_nets_limit: 200" in dumped
-    # Spec-level scalars preserved.
+    assert "continue_on_lvs_fail: false" in dumped
     assert "library: TEST_LIB" in dumped
     assert "cell: TEST_CELL" in dumped
+
+
+# ---- 3b. the v2 files: recipe.yaml / cells.yaml / workspace.yaml ------------
+#
+# The guarantee moved hosts with the schema. ``project.yaml`` + ``tasks.yaml``
+# are migration input now; the files a user keeps comments in are the three
+# below, and each has its own loader/dumper pair, so each needs its own nail.
+
+
+def test_yaml_rt_recipe_comments_and_key_order_survive_an_edit(tmp_path: Path) -> None:
+    """A Recipe is the file most likely to carry "why" comments: it is the
+    one a person tunes by hand and shares. Load, change one setting, save."""
+
+    from auto_ext.model.recipe import dump_recipe_yaml, load_recipe_with_raw
+
+    src = (
+        "# RC extraction, typical corner\n"
+        "# Owner: rfv\n"
+        "recipe_id: rc-typical  # slug, also the file name\n"
+        "name: RC coupled typical\n"
+        "extraction:\n"
+        "  # 55 C is what the PLL group signs off at\n"
+        "  temperature_c: 55.0\n"
+        "lvs:\n"
+        "  deck_variant: wodio  # the only variant this PDK ships\n"
+        "# trailing comment\n"
+    )
+    p = _yaml_rt_write(tmp_path, "rc-typical.yaml", src)
+    recipe, raw = load_recipe_with_raw(p)
+
+    edited = recipe.model_copy(
+        update={"extraction": recipe.extraction.model_copy(update={"temperature_c": 85.0})}
+    )
+    dumped = dump_recipe_yaml(edited, raw=raw)
+
+    for comment in _yaml_rt_extract_comment_lines(src):
+        assert comment in _yaml_rt_extract_comment_lines(dumped), comment
+    assert "temperature_c: 85.0" in dumped
+    assert "temperature_c: 55.0" not in dumped
+    keys = _yaml_rt_top_level_keys_in_order(dumped)
+    assert keys[: len(["recipe_id", "name"])] == ["recipe_id", "name"]
+    assert dumped.endswith("\n") and not dumped.endswith("\n\n")
+
+
+def test_yaml_rt_cells_document_comments_survive_an_edit(tmp_path: Path) -> None:
+    """Document-level comments survive; per-row ones deliberately do not.
+
+    ``model.cells._merge_into`` replaces the row list wholesale, and says why:
+    a row has no identity a comment could be re-attached to once rows are
+    added or removed, and a comment re-attached to the wrong row is worse
+    than a comment that is gone. This test pins both halves of that decision
+    so the second one cannot become an accident -- and asserts the field that
+    replaces it: :attr:`~auto_ext.model.cells.CellEntry.note` is per-row prose
+    that *does* round-trip, because it is data.
+    """
+
+    from auto_ext.model.cells import dump_cells_yaml, load_cells_with_raw
+
+    src = (
+        "# The DUT table.\n"
+        "schema_version: 1\n"
+        "cells:\n"
+        "  - library: WB_PLL_DCO\n"
+        "    cell: amp2\n"
+        "    layout_view: layout\n"
+        "    source_view: schematic\n"
+        "    # parked until the layout settles\n"
+        "    enabled: false\n"
+        "    note: waiting on P&R\n"
+    )
+    p = _yaml_rt_write(tmp_path, "cells.yaml", src)
+    book, raw = load_cells_with_raw(p)
+
+    row = book.cells[0].model_copy(update={"enabled": True})
+    edited = book.model_copy(update={"cells": [row]})
+    dumped = dump_cells_yaml(edited, raw=raw)
+
+    assert "# The DUT table." in _yaml_rt_extract_comment_lines(dumped)
+    assert "# parked until the layout settles" not in dumped
+    assert "note: waiting on P&R" in dumped
+    assert "enabled: true" in dumped
+    assert dumped.endswith("\n") and not dumped.endswith("\n\n")
+
+
+def test_yaml_rt_workspace_comments_survive_an_edit(tmp_path: Path) -> None:
+    """The workspace patterns are cryptic enough that the comment beside them
+    is the documentation."""
+
+    from auto_ext.model.workspace import dump_workspace_yaml, load_workspace_with_raw
+
+    src = (
+        "# Where this project's Cadence work lands.\n"
+        "schema_version: 1\n"
+        "pdk_profile: hn001  # config/profiles/hn001.yaml\n"
+        "# one workspace per cell, reused between runs\n"
+        'output_dir_pattern: "${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"\n'
+        'intermediate_dir: "${WORK_ROOT2}"\n'
+        "# trailing comment\n"
+    )
+    p = _yaml_rt_write(tmp_path, "workspace.yaml", src)
+    workspace, raw = load_workspace_with_raw(p)
+
+    edited = workspace.model_copy(update={"keep_runs": 50})
+    dumped = dump_workspace_yaml(edited, raw=raw)
+
+    for comment in _yaml_rt_extract_comment_lines(src):
+        assert comment in _yaml_rt_extract_comment_lines(dumped), comment
+    assert "keep_runs: 50" in dumped
+    assert "${WORK_ROOT}/cds/verify/QCI_PATH_{cell}" in dumped
+    assert dumped.endswith("\n") and not dumped.endswith("\n\n")
 
 
 # ---- 4. anchors / merge keys -----------------------------------------------

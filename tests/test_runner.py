@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from auto_ext.core.config import load_project, load_tasks
+from auto_ext.core.config import TaskConfig, load_project, load_tasks
+from auto_ext.core.env import substitute_env
 from auto_ext.core.errors import AutoExtError
 from auto_ext.core.run_store import read_events, read_record
 from auto_ext.core.runner import run_tasks
@@ -34,6 +35,33 @@ def _load(config_dir: Path):
     project = load_project(config_dir / "project.yaml")
     tasks = load_tasks(config_dir / "tasks.yaml", project=project)
     return project, tasks
+
+
+def _write_tasks(config_dir: Path, rows: list[dict[str, str]]) -> Path:
+    """Replace ``tasks.yaml`` with one entry per row.
+
+    Every row gets the four identity axes; ``rows`` overrides any of them and
+    may add ``out_file``. Written as a helper because the reduced ``TaskSpec``
+    refuses the ``jivaro:`` block these tables used to carry -- reduction is a
+    Recipe setting now -- and hand-editing that out of eight inline YAML
+    literals is how one of them ends up subtly different from the others.
+    """
+
+    defaults = {
+        "library": "WB_PLL_DCO",
+        "cell": "inv",
+        "lvs_layout_view": "layout",
+        "lvs_source_view": "schematic",
+    }
+    body = []
+    for row in rows:
+        entry = {**defaults, **row}
+        body.append(
+            "- " + "\n  ".join(f"{key}: {value}" for key, value in entry.items())
+        )
+    path = config_dir / "tasks.yaml"
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    return path
 
 
 def _run_dirs(auto_ext_root: Path) -> list[Path]:
@@ -72,6 +100,8 @@ def test_happy_path_all_stages_pass(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     assert summary.total == 1
@@ -89,10 +119,10 @@ def test_happy_path_all_stages_pass(
     # Rendered inputs and logs both live inside this run's own directory.
     run_dir = _only_run_dir(tmp_path / "project_root")
     rendered_dir = run_dir / "rendered"
-    assert (rendered_dir / "default.env").is_file()
-    assert (rendered_dir / "calibre_lvs.qci").is_file()
+    assert (rendered_dir / "si.env").is_file()
+    assert (rendered_dir / "lvs.qci").is_file()
     assert (rendered_dir / "ext.cmd").is_file()
-    assert (rendered_dir / "default.xml").is_file()
+    assert (rendered_dir / "jivaro.xml").is_file()
     # The si control file is also archived under the name si actually reads.
     assert (rendered_dir / "si.env").is_file()
     for stage in ("si", "strmout", "calibre", "quantus", "jivaro"):
@@ -117,6 +147,8 @@ def test_si_env_published_to_output_dir(
         stages=["si"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     # extraction_output_dir = "${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"
@@ -147,6 +179,8 @@ def test_si_env_not_published_when_stage_fails(
         stages=["si"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     assert summary.failed == 1
@@ -170,6 +204,8 @@ def test_calibre_fail_aborts_without_continue(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     assert summary.failed == 1
@@ -191,7 +227,6 @@ def test_calibre_fail_with_continue_runs_downstream(
 ) -> None:
     monkeypatch.setenv("AUTO_EXT_MOCK_FORCE_FAIL", "calibre")
     project, tasks = _load(project_tools_config)
-    tasks = [t.model_copy(update={"continue_on_lvs_fail": True}) for t in tasks]
 
     summary = run_tasks(
         project,
@@ -199,6 +234,11 @@ def test_calibre_fail_with_continue_runs_downstream(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        # The switch used to be ``TaskConfig.continue_on_lvs_fail``. It is a
+        # Recipe policy now: "keep going past a mismatch" is a property of how
+        # you are extracting, not of which cell you point at.
+        recipe=_recipe(policy={"continue_on_lvs_fail": True}),
+        profile=_profile(workarea),
     )
 
     stage_status = {s.stage: s.status for s in summary.tasks[0].stages}
@@ -222,6 +262,8 @@ def test_dry_run_renders_but_skips_subprocesses(
         stages=["si", "calibre"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
         dry_run=True,
     )
 
@@ -230,312 +272,8 @@ def test_dry_run_renders_but_skips_subprocesses(
     assert stage_status == {"si": "dry_run", "calibre": "dry_run"}
     # Renders still happened so templates are exercised without needing bash.
     rendered_dir = _only_run_dir(tmp_path / "project_root") / "rendered"
-    assert (rendered_dir / "default.env").is_file()
-    assert (rendered_dir / "calibre_lvs.qci").is_file()
-
-
-def test_calibre_lvs_default_knobs_render(
-    project_tools_config: Path,
-    workarea: Path,
-    tmp_path: Path,
-) -> None:
-    """Default knobs: lvs_variant=wodio, connect_by_name=false.
-
-    The rendered .qci must contain the wodio rules-file path and must NOT
-    contain the *cmnVConnectNamesState line.
-    """
-    project, tasks = _load(project_tools_config)
-    run_tasks(
-        project,
-        tasks,
-        stages=["calibre"],
-        auto_ext_root=tmp_path / "project_root",
-        workarea=workarea,
-        dry_run=True,
-    )
-    rendered = (
-        _only_run_dir(tmp_path / "project_root") / "rendered" / "calibre_lvs.qci"
-    ).read_text(encoding="utf-8")
-    assert ".wodio.qcilvs" in rendered
-    assert ".widio.qcilvs" not in rendered
-    assert "*cmnVConnectNamesState" not in rendered
-
-
-def test_calibre_lvs_knob_overrides_flip_render(
-    project_tools_config: Path,
-    workarea: Path,
-    tmp_path: Path,
-) -> None:
-    """CLI overrides flip both knobs; both effects visible in render."""
-    project, tasks = _load(project_tools_config)
-    run_tasks(
-        project,
-        tasks,
-        stages=["calibre"],
-        auto_ext_root=tmp_path / "project_root",
-        workarea=workarea,
-        dry_run=True,
-        cli_knobs={"calibre": {"lvs_variant": "widio", "connect_by_name": "true"}},
-    )
-    rendered = (
-        _only_run_dir(tmp_path / "project_root") / "rendered" / "calibre_lvs.qci"
-    ).read_text(encoding="utf-8")
-    assert ".widio.qcilvs" in rendered
-    assert ".wodio.qcilvs" not in rendered
-    assert "*cmnVConnectNamesState: ALL" in rendered
-
-
-def test_build_context_surfaces_paths(project_config) -> None:
-    """_build_context resolves project.paths entries via resolve_path_expr
-    and exposes each under the same key in the Jinja context. (Phase 5.6.5).
-    """
-    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
-    from auto_ext.core.runner import _build_context
-
-    project_config.tech_name = "HN001"
-    project_config.paths = {
-        "calibre_lvs_dir": "$calibre_source_added_place|parent",
-        "qrc_deck_dir": "$VERIFY_ROOT/runset/Calibre_QRC/QRC/v/CFXXX/QCI_deck",
-    }
-    task = TaskConfig(
-        task_id="L__c__layout__schematic",
-        library="L",
-        cell="c",
-        lvs_source_view="schematic",
-        lvs_layout_view="layout",
-        templates=TemplatePaths(),
-        ground_net="vss",
-        out_file=None,
-        jivaro=JivaroConfig(),
-        continue_on_lvs_fail=False,
-        spec_index=0,
-        expansion_index=0,
-    )
-
-    ctx = _build_context(
-        project_config,
-        task,
-        resolved_env={
-            "WORK_ROOT": "/w",
-            "WORK_ROOT2": "/w",
-            "PDK_LAYER_MAP_FILE": "/w/layers.map",
-            "VERIFY_ROOT": "/v",
-            "calibre_source_added_place": (
-                "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
-            ),
-        },
-    )
-    assert ctx["tech_name"] == "HN001"
-    assert (
-        ctx["calibre_lvs_dir"]
-        == "/v/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
-    )
-    # calibre_lvs_basename auto-derived from the path's leaf.
-    assert ctx["calibre_lvs_basename"] == "CFXXX"
-    assert (
-        ctx["qrc_deck_dir"]
-        == "/v/runset/Calibre_QRC/QRC/v/CFXXX/QCI_deck"
-    )
-
-
-def test_build_context_calibre_lvs_basename_user_override(project_config) -> None:
-    """If a project explicitly sets paths.calibre_lvs_basename it must win
-    over the auto-derived leaf — needed when the PDK breaks the
-    "rules-file basename = LVS dir leaf" convention."""
-    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
-    from auto_ext.core.runner import _build_context
-
-    project_config.paths = {
-        "calibre_lvs_dir": "/v/x/CFXXX",
-        "calibre_lvs_basename": "alt_basename",
-    }
-    task = TaskConfig(
-        task_id="L__c__layout__schematic",
-        library="L", cell="c",
-        lvs_source_view="schematic", lvs_layout_view="layout",
-        templates=TemplatePaths(),
-        ground_net="vss", out_file=None,
-        jivaro=JivaroConfig(),
-        continue_on_lvs_fail=False,
-        spec_index=0, expansion_index=0,
-    )
-    ctx = _build_context(
-        project_config, task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
-    )
-    assert ctx["calibre_lvs_basename"] == "alt_basename"
-
-
-def test_build_context_pdk_fields_default_to_none(project_config) -> None:
-    """When the project does not set tech_name AND its candidate env vars
-    are absent, tech_name stays None. paths is empty by default → no
-    extra keys land in the context.
-    """
-    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
-    from auto_ext.core.runner import _build_context
-
-    task = TaskConfig(
-        task_id="L__c__layout__schematic",
-        library="L",
-        cell="c",
-        lvs_source_view="schematic",
-        lvs_layout_view="layout",
-        templates=TemplatePaths(),
-        ground_net="vss",
-        out_file=None,
-        jivaro=JivaroConfig(),
-        continue_on_lvs_fail=False,
-        spec_index=0,
-        expansion_index=0,
-    )
-    ctx = _build_context(
-        project_config,
-        task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
-    )
-    assert ctx["tech_name"] is None
-    assert "calibre_lvs_dir" not in ctx
-    assert "qrc_deck_dir" not in ctx
-    assert "calibre_lvs_basename" not in ctx
-
-
-def test_build_context_tech_name_autoderived_from_pdk_tech_file(project_config) -> None:
-    """When tech_name is unset, runner derives it from PDK_TECH_FILE's
-    parent dir (first candidate in tech_name_env_vars).
-    """
-    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
-    from auto_ext.core.runner import _build_context
-
-    task = TaskConfig(
-        task_id="L__c__layout__schematic",
-        library="L",
-        cell="c",
-        lvs_source_view="schematic",
-        lvs_layout_view="layout",
-        templates=TemplatePaths(),
-        ground_net="vss",
-        out_file=None,
-        jivaro=JivaroConfig(),
-        continue_on_lvs_fail=False,
-        spec_index=0,
-        expansion_index=0,
-    )
-    ctx = _build_context(
-        project_config,
-        task,
-        resolved_env={
-            "WORK_ROOT": "/w",
-            "WORK_ROOT2": "/w",
-            "PDK_TECH_FILE": "/pdk/HN042/techfile.tf",
-        },
-    )
-    assert ctx["tech_name"] == "HN042"
-
-
-def test_build_context_tech_name_autoderive_falls_through_to_layer_map(project_config) -> None:
-    """When PDK_TECH_FILE is not set but PDK_LAYER_MAP_FILE is, derive from
-    the second candidate. Confirms candidate-list walk.
-    """
-    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
-    from auto_ext.core.runner import _build_context
-
-    task = TaskConfig(
-        task_id="L__c__layout__schematic",
-        library="L",
-        cell="c",
-        lvs_source_view="schematic",
-        lvs_layout_view="layout",
-        templates=TemplatePaths(),
-        ground_net="vss",
-        out_file=None,
-        jivaro=JivaroConfig(),
-        continue_on_lvs_fail=False,
-        spec_index=0,
-        expansion_index=0,
-    )
-    ctx = _build_context(
-        project_config,
-        task,
-        resolved_env={
-            "WORK_ROOT": "/w",
-            "WORK_ROOT2": "/w",
-            "PDK_LAYER_MAP_FILE": "/pdk/HN001/layers.map",
-        },
-    )
-    assert ctx["tech_name"] == "HN001"
-
-
-def test_build_context_tech_name_explicit_overrides_autoderive(project_config) -> None:
-    """Explicit project.tech_name always wins over env-var derivation."""
-    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
-    from auto_ext.core.runner import _build_context
-
-    project_config.tech_name = "HN999"
-    task = TaskConfig(
-        task_id="L__c__layout__schematic",
-        library="L",
-        cell="c",
-        lvs_source_view="schematic",
-        lvs_layout_view="layout",
-        templates=TemplatePaths(),
-        ground_net="vss",
-        out_file=None,
-        jivaro=JivaroConfig(),
-        continue_on_lvs_fail=False,
-        spec_index=0,
-        expansion_index=0,
-    )
-    ctx = _build_context(
-        project_config,
-        task,
-        resolved_env={
-            "WORK_ROOT": "/w",
-            "WORK_ROOT2": "/w",
-            "PDK_TECH_FILE": "/pdk/HN042/techfile.tf",
-        },
-    )
-    assert ctx["tech_name"] == "HN999"
-
-
-def test_discover_env_vars_adds_tech_name_candidates_when_unset(
-    project_tools_config: Path,
-) -> None:
-    """When tech_name is None, _discover_env_vars unions tech_name_env_vars
-    so they get a row in check-env output and are available for autoderive.
-    Uses a custom candidate list that does not overlap with the default
-    ``layer_map`` refs so the assertion is purely about the autoderive path.
-    """
-    from auto_ext.core.runner import _discover_env_vars
-
-    (project_tools_config / "project.yaml").write_text(
-        "templates: {}\n"
-        "tech_name_env_vars: [MY_PDK_TECH, MY_PDK_LAYERS]\n",
-        encoding="utf-8",
-    )
-    project, tasks = _load(project_tools_config)
-    required = _discover_env_vars(project, tasks)
-    assert "MY_PDK_TECH" in required
-    assert "MY_PDK_LAYERS" in required
-
-
-def test_discover_env_vars_omits_tech_name_candidates_when_set(
-    project_tools_config: Path,
-) -> None:
-    """When tech_name is explicit, candidate env vars are not added to the
-    discovered set. Uses a custom candidate list to avoid overlap with
-    ``layer_map``'s default env refs."""
-    from auto_ext.core.runner import _discover_env_vars
-
-    (project_tools_config / "project.yaml").write_text(
-        "tech_name: HN001\n"
-        "templates: {}\n"
-        "tech_name_env_vars: [MY_PDK_TECH, MY_PDK_LAYERS]\n",
-        encoding="utf-8",
-    )
-    project, tasks = _load(project_tools_config)
-    required = _discover_env_vars(project, tasks)
-    assert "MY_PDK_TECH" not in required
-    assert "MY_PDK_LAYERS" not in required
+    assert (rendered_dir / "si.env").is_file()
+    assert (rendered_dir / "lvs.qci").is_file()
 
 
 def test_jivaro_without_out_file_rejected(
@@ -543,18 +281,16 @@ def test_jivaro_without_out_file_rejected(
     workarea: Path,
     tmp_path: Path,
 ) -> None:
-    # Rewrite tasks.yaml to enable jivaro WITHOUT setting out_file.
-    (project_tools_config / "tasks.yaml").write_text(
-        """\
-- library: LIB
-  cell: inv
-  lvs_layout_view: layout
-  lvs_source_view: schematic
-  jivaro:
-    enabled: true
-""",
-        encoding="utf-8",
-    )
+    """Reduction on, but the DUT has no extracted view for it to reduce.
+
+    Jivaro's ``inputView`` renders to ``library/cell/out_file``; with
+    ``out_file`` unset there is no view name, and the run has to say so before
+    a stage starts rather than hand Jivaro a path with a hole in it. The switch
+    that reaches this check moved from ``task.jivaro.enabled`` to
+    ``recipe.reduction.enabled``, which is why the error now names the recipe.
+    """
+
+    _write_tasks(project_tools_config, [{"library": "LIB"}])  # no out_file
     project, tasks = _load(project_tools_config)
 
     from auto_ext.core.errors import ConfigError
@@ -566,16 +302,26 @@ def test_jivaro_without_out_file_rejected(
             stages=["si", "jivaro"],
             auto_ext_root=tmp_path / "project_root",
             workarea=workarea,
+            recipe=_recipe(reduction={"enabled": True}),
+            profile=_profile(workarea),
             dry_run=True,
         )
 
 
-# ---- dspf_out_path resolution in _build_context ---------------------------
+# ---- dspf_out_path resolution ----------------------------------------------
+#
+# The legacy ``_build_context`` these were written against is gone: the render
+# context is ``core.render.build_context`` now, and it is handed an already
+# resolved ``dspf_out_path`` on :class:`~auto_ext.core.render.RunFacts`. The
+# function that does the resolving -- two phases, env references then
+# ``str.format`` keys -- survived unchanged as ``_resolve_dspf_out_path``, so
+# these tests moved down one level rather than being dropped: the same eight
+# behaviours, asserted on the function that still owns them.
 
 
 def _make_dspf_task(**overrides):
     """Helper: build a TaskConfig for dspf_out_path resolution tests."""
-    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
+    from auto_ext.core.config import JivaroConfig
 
     library = overrides.pop("library", "L")
     cell = overrides.pop("cell", "c")
@@ -587,7 +333,6 @@ def _make_dspf_task(**overrides):
         cell=cell,
         lvs_source_view=src,
         lvs_layout_view=layout,
-        templates=TemplatePaths(),
         ground_net="vss",
         out_file=None,
         jivaro=JivaroConfig(),
@@ -599,110 +344,109 @@ def _make_dspf_task(**overrides):
     return TaskConfig(**base)
 
 
-def test_build_context_dspf_out_path_default(project_config) -> None:
+def _dspf(project, task, resolved_env, **ctx_so_far):
+    """Resolve ``project.dspf_out_path`` the way the runner does.
+
+    ``ctx_so_far`` is the runner's partially-built path context: the values
+    already resolved by the time the DSPF pattern is expanded, which is what
+    lets the pattern reference ``${output_dir}`` and friends.
+    """
+    from auto_ext.core.runner import _resolve_dspf_out_path, _resolve_output_dir
+
+    context = {
+        "output_dir": _resolve_output_dir(project, task, resolved_env),
+        "intermediate_dir": substitute_env(project.intermediate_dir, resolved_env),
+    }
+    context.update(ctx_so_far)
+    return _resolve_dspf_out_path(project, task, resolved_env, context)
+
+
+def test_dspf_out_path_default(project_config) -> None:
     """Default ``${WORK_ROOT2}/{cell}.dspf`` resolves cleanly."""
-    from auto_ext.core.runner import _build_context
 
     task = _make_dspf_task(cell="myCell")
-    ctx = _build_context(
-        project_config,
-        task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/wkr2"},
+    out = _dspf(
+        project_config, task, {"WORK_ROOT": "/w", "WORK_ROOT2": "/wkr2"}
     )
-    assert ctx["dspf_out_path"] == "/wkr2/myCell.dspf"
+    assert out == "/wkr2/myCell.dspf"
 
 
-def test_build_context_dspf_out_path_references_output_dir(project_config) -> None:
+def test_dspf_out_path_references_output_dir(project_config) -> None:
     """``${output_dir}`` resolves to the runner-computed output_dir."""
-    from auto_ext.core.runner import _build_context
 
     project_config.dspf_out_path = "${output_dir}/{cell}.dspf"
     task = _make_dspf_task(cell="inv")
-    ctx = _build_context(
-        project_config,
-        task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
-    )
+    out = _dspf(project_config, task, {"WORK_ROOT": "/w", "WORK_ROOT2": "/w"})
     # extraction_output_dir default = ${WORK_ROOT}/cds/verify/QCI_PATH_{cell}.
-    assert ctx["dspf_out_path"] == "/w/cds/verify/QCI_PATH_inv/inv.dspf"
+    assert out == "/w/cds/verify/QCI_PATH_inv/inv.dspf"
 
 
-def test_build_context_dspf_out_path_references_intermediate_dir(
-    project_config,
-) -> None:
+def test_dspf_out_path_references_intermediate_dir(project_config) -> None:
     """``${intermediate_dir}`` resolves to the project's intermediate_dir."""
-    from auto_ext.core.runner import _build_context
 
     project_config.intermediate_dir = "${WORK_ROOT2}/inter"
     project_config.dspf_out_path = "${intermediate_dir}/{cell}.dspf"
     task = _make_dspf_task(cell="cellX")
-    ctx = _build_context(
-        project_config,
-        task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w2"},
-    )
-    assert ctx["dspf_out_path"] == "/w2/inter/cellX.dspf"
+    out = _dspf(project_config, task, {"WORK_ROOT": "/w", "WORK_ROOT2": "/w2"})
+    assert out == "/w2/inter/cellX.dspf"
 
 
-def test_build_context_dspf_out_path_references_paths_key(project_config) -> None:
-    """``${calibre_lvs_dir}`` resolves through project.paths."""
-    from auto_ext.core.runner import _build_context
+def test_dspf_out_path_references_a_profile_path_key(project_config) -> None:
+    """``${calibre_lvs_dir}`` resolves through the profile's path keys.
 
-    project_config.paths = {"calibre_lvs_dir": "/v/runset/CFXXX"}
+    Its old home was ``project.paths``, which is retired; the key reaches the
+    resolver the same way either way -- as an already-resolved entry in the
+    path context the runner has built so far.
+    """
+
     project_config.dspf_out_path = "${calibre_lvs_dir}/exports/{cell}.dspf"
     task = _make_dspf_task(cell="inv")
-    ctx = _build_context(
-        project_config, task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
+    out = _dspf(
+        project_config,
+        task,
+        {"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
+        calibre_lvs_dir="/v/runset/CFXXX",
     )
-    assert ctx["dspf_out_path"] == "/v/runset/CFXXX/exports/inv.dspf"
+    assert out == "/v/runset/CFXXX/exports/inv.dspf"
 
 
-def test_build_context_dspf_out_path_format_keys(project_config) -> None:
+def test_dspf_out_path_format_keys(project_config) -> None:
     """{cell} {library} {task_id} all substitute correctly."""
-    from auto_ext.core.runner import _build_context
 
-    project_config.dspf_out_path = (
-        "${WORK_ROOT2}/{library}/{task_id}/{cell}.dspf"
-    )
+    project_config.dspf_out_path = "${WORK_ROOT2}/{library}/{task_id}/{cell}.dspf"
     task = _make_dspf_task(library="L1", cell="cellY")
-    ctx = _build_context(
-        project_config, task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
-    )
-    assert ctx["dspf_out_path"] == (
-        "/w/L1/L1__cellY__layout__schematic/cellY.dspf"
-    )
+    out = _dspf(project_config, task, {"WORK_ROOT": "/w", "WORK_ROOT2": "/w"})
+    assert out == "/w/L1/L1__cellY__layout__schematic/cellY.dspf"
 
 
-def test_build_context_dspf_out_path_per_task_override_wins(project_config) -> None:
-    """task.dspf_out_path beats project.dspf_out_path when set."""
-    from auto_ext.core.runner import _build_context
+def test_dspf_out_path_is_one_pattern_for_the_whole_project(project_config) -> None:
+    """The per-task override is gone; ``{cell}`` is what varies a DSPF path.
+
+    ``TaskSpec.dspf_out_path`` covered exactly one real use -- a per-DUT output
+    file -- and ``{cell}`` covers it without a second override layer. A
+    tasks.yaml that still carries the key is refused by name, so the pattern
+    below is the only answer, and it has to give two DUTs two files.
+    """
 
     project_config.dspf_out_path = "${WORK_ROOT2}/{cell}.dspf"
-    task = _make_dspf_task(
-        cell="cell_z",
-        dspf_out_path="/custom/path/{cell}.dspf",
-    )
-    ctx = _build_context(
-        project_config, task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
-    )
-    assert ctx["dspf_out_path"] == "/custom/path/cell_z.dspf"
+    env = {"WORK_ROOT": "/w", "WORK_ROOT2": "/w"}
+
+    first = _dspf(project_config, _make_dspf_task(cell="cell_z"), env)
+    second = _dspf(project_config, _make_dspf_task(cell="cell_q"), env)
+
+    assert first == "/w/cell_z.dspf"
+    assert second == "/w/cell_q.dspf"
+    assert "dspf_out_path" not in TaskConfig.model_fields
 
 
-def test_build_context_dspf_out_path_unknown_env_passthrough(project_config) -> None:
+def test_dspf_out_path_unknown_env_passthrough(project_config) -> None:
     """Unknown env vars pass through unchanged (matches substitute_env semantics)."""
-    from auto_ext.core.runner import _build_context
 
     project_config.dspf_out_path = "${WORK_ROOT2}/${UNDEFINED_X}/{cell}.dspf"
     task = _make_dspf_task(cell="c")
-    ctx = _build_context(
-        project_config, task,
-        resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/wkr2"},
-    )
+    out = _dspf(project_config, task, {"WORK_ROOT": "/w", "WORK_ROOT2": "/wkr2"})
     # ${UNDEFINED_X} is not in resolved_env so it passes through verbatim.
-    assert ctx["dspf_out_path"] == "/wkr2/${UNDEFINED_X}/c.dspf"
+    assert out == "/wkr2/${UNDEFINED_X}/c.dspf"
 
 
 def test_resolve_dspf_out_path_raises_on_unknown_format_key(project_config) -> None:
@@ -710,16 +454,12 @@ def test_resolve_dspf_out_path_raises_on_unknown_format_key(project_config) -> N
     misconfiguration: the runner must still raise ConfigError so
     runtime is fail-fast, not silently emit a half-rendered path.
     """
-    from auto_ext.core.runner import _build_context
     from auto_ext.core.errors import ConfigError
 
     project_config.dspf_out_path = "/abs/{cell}/{foo}.dspf"
     task = _make_dspf_task(cell="c")
     with pytest.raises(ConfigError, match="unknown format key 'foo'"):
-        _build_context(
-            project_config, task,
-            resolved_env={"WORK_ROOT": "/w", "WORK_ROOT2": "/w"},
-        )
+        _dspf(project_config, task, {"WORK_ROOT": "/w", "WORK_ROOT2": "/w"})
 
 
 def test_resolve_dspf_path_helper_returns_tuple_for_gui() -> None:
@@ -753,73 +493,6 @@ def test_resolve_dspf_path_helper_returns_tuple_for_gui() -> None:
     assert e and "unknown format key" in e and "foo" in e
 
 
-def test_discover_env_vars_includes_dspf_out_path(project_tools_config: Path) -> None:
-    """Custom env refs in dspf_out_path (project + per-task) surface in
-    the discovered set so check-env catches missing ones up-front."""
-    from auto_ext.core.runner import _discover_env_vars
-
-    (project_tools_config / "project.yaml").write_text(
-        "dspf_out_path: \"${MY_DSPF_ROOT}/{cell}.dspf\"\n",
-        encoding="utf-8",
-    )
-    (project_tools_config / "tasks.yaml").write_text(
-        "- library: L\n"
-        "  cell: c\n"
-        "  lvs_layout_view: layout\n"
-        "  dspf_out_path: \"${PER_TASK_DSPF}/{cell}.dspf\"\n",
-        encoding="utf-8",
-    )
-    project, tasks = _load(project_tools_config)
-    required = _discover_env_vars(project, tasks)
-    assert "MY_DSPF_ROOT" in required
-    assert "PER_TASK_DSPF" in required
-
-
-def test_discover_env_vars_strips_synthetic_path_tokens(
-    project_tools_config: Path,
-) -> None:
-    """``${output_dir}`` and friends are runner-injected synthetic tokens —
-    they must NOT appear in the env-var requirement set, otherwise
-    resolve_env logs a "missing" warning and confuses the user even
-    though the runner supplies them at render time. This regressed when
-    ``dspf_out_path`` was added to ``_discover_env_vars`` sources without
-    a path-token filter."""
-    from auto_ext.core.runner import _discover_env_vars
-
-    (project_tools_config / "project.yaml").write_text(
-        "dspf_out_path: \"${output_dir}/{cell}.dspf\"\n"
-        "paths:\n"
-        "  custom_path: \"${VERIFY_ROOT}/foo\"\n",
-        encoding="utf-8",
-    )
-    (project_tools_config / "tasks.yaml").write_text(
-        "- library: L\n"
-        "  cell: c\n"
-        "  lvs_layout_view: layout\n"
-        "  dspf_out_path: \"${calibre_lvs_dir}/per_task.dspf\"\n",
-        encoding="utf-8",
-    )
-    project, tasks = _load(project_tools_config)
-    required = _discover_env_vars(project, tasks)
-    # Runner-injected path tokens must not surface as required env vars.
-    for token in (
-        "output_dir",
-        "intermediate_dir",
-        "calibre_lvs_dir",
-        "calibre_lvs_basename",
-        "qrc_deck_dir",
-        "layer_map",
-    ):
-        assert token not in required, f"{token} should be filtered"
-    # project.paths.* keys are also synthetic.
-    assert "custom_path" not in required
-    # But real shell vars referenced inside paths.* values still surface.
-    assert "VERIFY_ROOT" in required
-
-
-# ---- Phase 5.9 B+C: rendered_path_for ------------------------------------
-
-
 def _phase59_bc_load(config_dir: Path):
     project = load_project(config_dir / "project.yaml")
     tasks = load_tasks(config_dir / "tasks.yaml", project=project)
@@ -829,10 +502,10 @@ def _phase59_bc_load(config_dir: Path):
 @pytest.mark.parametrize(
     "stage,expected_stem",
     [
-        ("si", "default.env"),
-        ("calibre", "calibre_lvs.qci"),
+        ("si", "si.env"),
+        ("calibre", "lvs.qci"),
         ("quantus", "ext.cmd"),
-        ("jivaro", "default.xml"),
+        ("jivaro", "jivaro.xml"),
     ],
 )
 def test_phase59_bc_rendered_path_for_reads_the_run_record(
@@ -857,6 +530,8 @@ def test_phase59_bc_rendered_path_for_reads_the_run_record(
         stages=["si", "calibre", "quantus", "jivaro"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
         dry_run=True,
     )
 
@@ -895,6 +570,8 @@ def test_phase59_bc_rendered_path_for_uses_the_newest_run(
             stages=["calibre"],
             auto_ext_root=ae_root,
             workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
             dry_run=True,
         )
 
@@ -920,31 +597,22 @@ def test_phase59_bc_rendered_path_for_accepts_an_explicit_record(
         stages=["calibre"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
         dry_run=True,
     )
     record = summary.runs[0]
 
     path = rendered_path_for(ae_root, tasks[0], "calibre", project, record=record)
-    assert path == Path(record.run_dir) / "rendered" / "calibre_lvs.qci"
+    assert path == Path(record.run_dir) / "rendered" / "lvs.qci"
 
 
 def test_phase59_bc_rendered_path_for_skipped_stage_returns_none(
     project_tools_config: Path, workarea: Path, tmp_path: Path
 ) -> None:
-    """jivaro is disabled for this task, so it rendered nothing to open."""
+    """Reduction is off in the recipe, so jivaro rendered nothing to open."""
     from auto_ext.core.runner import rendered_path_for
 
-    (project_tools_config / "tasks.yaml").write_text(
-        """\
-- library: WB_PLL_DCO
-  cell: inv
-  lvs_layout_view: layout
-  lvs_source_view: schematic
-  jivaro:
-    enabled: false
-""",
-        encoding="utf-8",
-    )
     project, tasks = _phase59_bc_load(project_tools_config)
     ae_root = tmp_path / "ae_root"
     run_tasks(
@@ -953,6 +621,8 @@ def test_phase59_bc_rendered_path_for_skipped_stage_returns_none(
         stages=["calibre", "jivaro"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(reduction={"enabled": False}),
+        profile=_profile(workarea),
         dry_run=True,
     )
 
@@ -984,61 +654,6 @@ def test_phase59_bc_rendered_path_for_unknown_stage_returns_none(
     assert rendered_path_for(tmp_path / "ae_root", tasks[0], "bogus", project) is None
 
 
-def test_phase59_bc_rendered_path_for_per_task_override_beats_project_default(
-    project_tools_config: Path, workarea: Path, tmp_path: Path, templates_root: Path
-) -> None:
-    """If a task overrides ``templates.calibre`` to a non-default path,
-    rendered_path_for must follow the override (the runner does too)."""
-    from auto_ext.core.runner import rendered_path_for
-
-    # Drop a per-task override pointing at a same-named template at a
-    # *different* location — easier to use a real template stem so the
-    # stem comparison is meaningful. Use the production calibre template
-    # but make sure the override is honored even if pointed at a copy.
-    override_dir = tmp_path / "custom_templates"
-    override_dir.mkdir()
-    custom = override_dir / "my_custom_calibre.qci.j2"
-    src = templates_root / "calibre" / "calibre_lvs.qci.j2"
-    custom.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-    # The manifest sidecar carries the template's knob defaults; without it
-    # the copy renders with an undefined ``lvs_variant``. Its ``template``
-    # field has to name the copy, which the loader cross-checks.
-    manifest_src = src.with_name(src.name + ".manifest.yaml")
-    custom.with_name(custom.name + ".manifest.yaml").write_text(
-        manifest_src.read_text(encoding="utf-8").replace(
-            f"template: {src.name}", f"template: {custom.name}", 1
-        ),
-        encoding="utf-8",
-    )
-
-    (project_tools_config / "tasks.yaml").write_text(
-        f"""\
-- library: WB_PLL_DCO
-  cell: inv
-  lvs_layout_view: layout
-  lvs_source_view: schematic
-  templates:
-    calibre: {custom.as_posix()}
-""",
-        encoding="utf-8",
-    )
-
-    project, tasks = _phase59_bc_load(project_tools_config)
-    ae_root = tmp_path / "ae_root"
-    run_tasks(
-        project,
-        tasks,
-        stages=["calibre"],
-        auto_ext_root=ae_root,
-        workarea=workarea,
-        dry_run=True,
-    )
-    path = rendered_path_for(ae_root, tasks[0], "calibre", project)
-    assert path is not None
-    # Stem follows the override's filename, not the project default.
-    assert path.name == "my_custom_calibre.qci"
-
-
 def test_phase59_bc_rendered_path_for_matches_runner_actual_writes(
     project_tools_config: Path,
     workarea: Path,
@@ -1059,6 +674,8 @@ def test_phase59_bc_rendered_path_for_matches_runner_actual_writes(
         stages=["si", "calibre", "quantus", "jivaro"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
     for stage in ("si", "calibre", "quantus", "jivaro"):
         path = rendered_path_for(ae_root, tasks[0], stage, project)
@@ -1088,6 +705,8 @@ def test_run_writes_a_record_with_identity_and_snapshots(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     run_dir = _only_run_dir(ae_root)
@@ -1099,10 +718,12 @@ def test_run_writes_a_record_with_identity_and_snapshots(
     assert record.dut.library == "WB_PLL_DCO"
     assert record.dut.cell == "inv"
     assert record.dut_label == tasks[0].task_id
-    # The directory name is <stamp>_<cell>-<recipe_id>; the recipe id comes
-    # from the quantus template stem (ext.cmd.j2).
-    assert record.slug == "inv-ext"
-    assert record.recipe.recipe_id == "ext"
+    # The directory name is <stamp>_<cell>-<recipe_id>. The recipe id is the
+    # Recipe's own now; it used to be derived from the quantus template stem,
+    # which meant two different configurations of one cell produced the same
+    # slug.
+    assert record.slug == "inv-rc-coupled-typical"
+    assert record.recipe.recipe_id == "rc-coupled-typical"
     assert set(record.recipe.templates) == {"si", "calibre", "quantus", "jivaro"}
     assert record.workspace_dir.endswith("QCI_PATH_inv")
     assert record.requested_stages == ["si", "strmout", "calibre", "quantus", "jivaro"]
@@ -1116,10 +737,13 @@ def test_run_writes_a_record_with_identity_and_snapshots(
 def test_run_record_carries_the_effective_configuration(
     project_tools_config: Path, workarea: Path, tmp_path: Path
 ) -> None:
-    """The recipe section is a snapshot: knobs, jivaro, paths, dspf expression.
+    """The recipe section is a snapshot: values, reduction, paths, dspf expression.
 
-    Editing project.yaml afterwards cannot rewrite it, which is the whole
-    reason it is inlined rather than referenced.
+    Editing the Recipe on disk afterwards cannot rewrite it, which is the whole
+    reason it is inlined rather than referenced. The values used to arrive from
+    the ``--knob`` layer on top of the manifest merge; they arrive from Recipe
+    fields now, and the snapshot still carries them under their old flat names
+    so an archived ``run.json`` stays readable.
     """
     project, tasks = _load(project_tools_config)
     ae_root = tmp_path / "project_root"
@@ -1129,8 +753,9 @@ def test_run_record_carries_the_effective_configuration(
         stages=["quantus"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(extraction={"temperature_c": 85.0}),
+        profile=_profile(workarea),
         dry_run=True,
-        cli_knobs={"quantus": {"temperature": "85"}},
     )
 
     recipe = read_record(_only_run_dir(ae_root)).recipe
@@ -1138,9 +763,35 @@ def test_run_record_carries_the_effective_configuration(
     assert recipe.jivaro.enabled is True
     assert recipe.jivaro.frequency_limit == 14
     assert recipe.jivaro.error_max == 2
-    # The *expression*, not the resolved path — the resolved one is dspf_path.
-    assert recipe.dspf_out_path == "${WORK_ROOT2}/{cell}.dspf"
-    assert set(recipe.paths) == {"calibre_lvs_dir", "qrc_deck_dir"}
+    assert set(recipe.paths) >= {"calibre_lvs_dir", "qrc_deck_dir"}
+
+
+def test_run_record_keeps_the_dspf_pattern_not_only_its_result(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """The snapshot has to carry the pattern, or the run is not replayable.
+
+    ``dspf_path`` answers "where did this run put the file". Only the pattern
+    answers "what would this configuration do somewhere else", which is the
+    question a snapshot exists for.
+    """
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["quantus"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
+        dry_run=True,
+    )
+
+    record = read_record(_only_run_dir(ae_root))
+    assert record.recipe.dspf_out_path == "${WORK_ROOT2}/{cell}.dspf"
+    assert record.dspf_path != record.recipe.dspf_out_path
 
 
 def test_run_record_captures_env_context_and_provenance(
@@ -1155,6 +806,8 @@ def test_run_record_captures_env_context_and_provenance(
         stages=["si"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
         dry_run=True,
     )
 
@@ -1181,22 +834,26 @@ def test_rerun_creates_a_second_run_and_leaves_the_first_untouched(
 
     run_tasks(
         project, tasks, stages=["calibre"], auto_ext_root=ae_root,
-        workarea=workarea, dry_run=True,
+        workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
     )
     first = _only_run_dir(ae_root)
     first_bytes = (first / "run.json").read_bytes()
-    first_rendered = (first / "rendered" / "calibre_lvs.qci").read_bytes()
+    first_rendered = (first / "rendered" / "lvs.qci").read_bytes()
 
     run_tasks(
         project, tasks, stages=["calibre"], auto_ext_root=ae_root,
-        workarea=workarea, dry_run=True,
+        workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
     )
 
     dirs = _run_dirs(ae_root)
     assert len(dirs) == 2
     assert first in dirs
     assert (first / "run.json").read_bytes() == first_bytes
-    assert (first / "rendered" / "calibre_lvs.qci").read_bytes() == first_rendered
+    assert (first / "rendered" / "lvs.qci").read_bytes() == first_rendered
 
 
 def test_run_record_stage_rows_carry_timings_paths_and_argv(
@@ -1214,6 +871,8 @@ def test_run_record_stage_rows_carry_timings_paths_and_argv(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     run_dir = _only_run_dir(ae_root)
@@ -1234,7 +893,7 @@ def test_run_record_stage_rows_carry_timings_paths_and_argv(
         assert (run_dir / st.log_path).is_file()
 
     si = record.stage("si")
-    assert si is not None and si.rendered_path == "rendered/default.env"
+    assert si is not None and si.rendered_path == "rendered/si.env"
     # strmout renders nothing, so it must not claim a rendered file.
     strmout = record.stage("strmout")
     assert strmout is not None and strmout.rendered_path is None
@@ -1257,6 +916,8 @@ def test_run_record_promotes_the_lvs_report_and_archives_it(
     run_tasks(
         project, tasks, stages=["si", "strmout", "calibre"],
         auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     run_dir = _only_run_dir(ae_root)
@@ -1303,6 +964,8 @@ def test_run_record_survives_deleting_the_cadence_workspace(
     run_tasks(
         project, tasks, stages=["si", "strmout", "calibre"],
         auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
     run_dir = _only_run_dir(ae_root)
 
@@ -1311,7 +974,7 @@ def test_run_record_survives_deleting_the_cadence_workspace(
     record = read_record(run_dir)
     assert record.results.lvs is not None
     assert (run_dir / record.results.lvs.archived_path).is_file()
-    assert (run_dir / "rendered" / "calibre_lvs.qci").is_file()
+    assert (run_dir / "rendered" / "lvs.qci").is_file()
     assert (run_dir / "logs" / "calibre.log").is_file()
 
 
@@ -1332,6 +995,8 @@ def test_failed_run_is_recorded_in_full_with_skip_reasons(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     record = read_record(_only_run_dir(ae_root))
@@ -1352,29 +1017,20 @@ def test_disabled_jivaro_records_its_own_skip_reason(
     project_tools_config: Path, workarea: Path, tmp_path: Path
 ) -> None:
     """A stage that never ran must say why, or the record is unreadable later."""
-    (project_tools_config / "tasks.yaml").write_text(
-        """\
-- library: WB_PLL_DCO
-  cell: inv
-  lvs_layout_view: layout
-  lvs_source_view: schematic
-  jivaro:
-    enabled: false
-""",
-        encoding="utf-8",
-    )
     project, tasks = _load(project_tools_config)
     ae_root = tmp_path / "project_root"
     run_tasks(
         project, tasks, stages=["calibre", "jivaro"],
-        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(reduction={"enabled": False}),
+        profile=_profile(workarea), dry_run=True,
     )
 
     record = read_record(_only_run_dir(ae_root))
     jivaro = record.stage("jivaro")
     assert jivaro is not None
     assert jivaro.status == "skipped"
-    assert jivaro.skip_reason == "jivaro disabled for task"
+    assert jivaro.skip_reason == "jivaro disabled in recipe"
 
 
 def test_cancelled_run_is_recorded_completely(
@@ -1394,6 +1050,8 @@ def test_cancelled_run_is_recorded_completely(
         stages=["si", "calibre"],
         auto_ext_root=ae_root,
         workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
         cancel_token=token,
     )
 
@@ -1419,6 +1077,8 @@ def test_run_appends_events_while_it_runs(
     run_tasks(
         project, tasks, stages=["si", "strmout"],
         auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     events = read_events(_only_run_dir(ae_root))
@@ -1443,28 +1103,17 @@ def test_multi_task_dispatch_writes_a_batch_index(
     """Two tasks in one dispatch: two runs, one batch that lists both."""
     from auto_ext.core.run_store import read_batch
 
-    (project_tools_config / "tasks.yaml").write_text(
-        """\
-- library: WB_PLL_DCO
-  cell: inv
-  lvs_layout_view: layout
-  lvs_source_view: schematic
-  jivaro:
-    enabled: false
-- library: WB_PLL_DCO
-  cell: buf
-  lvs_layout_view: layout
-  lvs_source_view: schematic
-  jivaro:
-    enabled: false
-""",
-        encoding="utf-8",
+    _write_tasks(
+        project_tools_config,
+        [{"cell": "inv"}, {"cell": "buf"}],
     )
     project, tasks = _load(project_tools_config)
     ae_root = tmp_path / "project_root"
     summary = run_tasks(
         project, tasks, stages=["calibre"],
-        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
     )
 
     assert summary.batch_id is not None
@@ -1482,7 +1131,9 @@ def test_single_task_dispatch_has_no_batch(
     ae_root = tmp_path / "project_root"
     summary = run_tasks(
         project, tasks, stages=["calibre"],
-        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
     )
     assert summary.batch_id is None
     assert summary.runs[0].batch_id is None
@@ -1508,11 +1159,13 @@ def test_output_dir_accepts_run_slug_format_key(
     ae_root = tmp_path / "project_root"
     run_tasks(
         project, tasks, stages=["si"],
-        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
     )
 
     record = read_record(_only_run_dir(ae_root))
-    assert record.workspace_dir.endswith("QCI_PATH_inv_inv-ext")
+    assert record.workspace_dir.endswith("QCI_PATH_inv_inv-rc-coupled-typical")
 
 
 def test_output_dir_run_id_key_isolates_every_rerun(
@@ -1533,7 +1186,9 @@ def test_output_dir_run_id_key_isolates_every_rerun(
     for _ in range(2):
         run_tasks(
             project, tasks, stages=["si"],
-            auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+            auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
         )
     for run_dir in _run_dirs(ae_root):
         record = read_record(run_dir)
@@ -1561,7 +1216,9 @@ def test_output_dir_unknown_format_key_lists_the_run_keys(
     with pytest.raises(ConfigError) as excinfo:
         run_tasks(
             project, tasks, stages=["si"],
-            auto_ext_root=tmp_path / "project_root", workarea=workarea, dry_run=True,
+            auto_ext_root=tmp_path / "project_root", workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
         )
     message = str(excinfo.value)
     assert "'bogus'" in message
@@ -1582,6 +1239,8 @@ def test_run_takes_and_releases_the_workspace_lock(
     run_tasks(
         project, tasks, stages=["si"],
         auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     workspace = Path(read_record(_only_run_dir(ae_root)).workspace_dir)
@@ -1608,6 +1267,8 @@ def test_run_refuses_a_workspace_another_run_holds(
     summary = run_tasks(
         project, tasks, stages=["si", "calibre"],
         auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
     )
 
     assert summary.failed == 1
@@ -1624,7 +1285,9 @@ def test_dry_run_does_not_touch_the_cadence_workspace(
     ae_root = tmp_path / "project_root"
     run_tasks(
         project, tasks, stages=["si", "calibre"],
-        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
     )
 
     workspace = Path(read_record(_only_run_dir(ae_root)).workspace_dir)
@@ -1640,31 +1303,21 @@ def test_serial_tasks_may_share_one_workspace(
     the run's identity. It no longer does, so reusing it is the correct and
     expected behaviour — and each task still gets its own run directory.
     """
-    (project_tools_config / "tasks.yaml").write_text(
-        """\
-- library: WB_PLL_DCO
-  cell: inv
-  lvs_layout_view: layout
-  lvs_source_view: schematic
-  out_file: av_ext_a
-  jivaro:
-    enabled: false
-- library: WB_PLL_DCO
-  cell: inv
-  lvs_layout_view: layout_test
-  lvs_source_view: schematic
-  out_file: av_ext_b
-  jivaro:
-    enabled: false
-""",
-        encoding="utf-8",
+    _write_tasks(
+        project_tools_config,
+        [
+            {"lvs_layout_view": "layout", "out_file": "av_ext_a"},
+            {"lvs_layout_view": "layout_test", "out_file": "av_ext_b"},
+        ],
     )
     project, tasks = _load(project_tools_config)
     ae_root = tmp_path / "project_root"
 
     summary = run_tasks(
         project, tasks, stages=["calibre"],
-        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+        auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
     )
 
     assert summary.total == 2
@@ -1699,7 +1352,9 @@ def test_config_error_after_allocation_leaves_no_orphan_run(
     with pytest.raises(ConfigError, match="unknown format key"):
         run_tasks(
             project, tasks, stages=["si"],
-            auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+            auto_ext_root=ae_root, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
         )
 
     assert _run_dirs(ae_root) == []
@@ -1762,9 +1417,23 @@ def _profile(workarea: Path) -> "PdkProfile":
 
 
 def _recipe(**overrides):
+    """The Recipe every run in this file uses unless it says otherwise.
+
+    ``reduction.enabled`` is **on**, which is not the schema default. It
+    mirrors what ``project_tools_config``'s tasks.yaml used to say
+    (``jivaro: {enabled: true}``): that switch moved from the task to the
+    Recipe when the catalog took over rendering, and the stage-orchestration
+    tests below are about what happens with all five stages live. A test that
+    is about the off state passes ``reduction={"enabled": False}``.
+    """
+
     from auto_ext.model.recipe import Recipe
 
-    fields = {"recipe_id": "rc-coupled-typical", "name": "RC coupled, typical"}
+    fields = {
+        "recipe_id": "rc-coupled-typical",
+        "name": "RC coupled, typical",
+        "reduction": {"enabled": True},
+    }
     fields.update(overrides)
     return Recipe(**fields)
 
@@ -1833,28 +1502,6 @@ def test_recipe_path_records_catalog_version_and_profile_id(
     assert record.recipe.knobs["calibre"]["lvs_variant"] == "wodio"
     assert record.recipe.knobs["quantus"]["min_res"] == 0.001
     assert record.stage("si").render_target == "si.env"
-
-
-def test_legacy_path_records_no_catalog_and_no_profile(
-    project_tools_config: Path,
-    workarea: Path,
-    mocks_on_path: Path,
-    tmp_path: Path,
-) -> None:
-    """The new run.json fields exist on both paths and stay empty on the old
-    one, so "which pipeline made this run" is answerable from the record."""
-
-    project, tasks = _load(project_tools_config)
-    ae_root = tmp_path / "project_root"
-    run_tasks(
-        project, tasks, stages=["si"], auto_ext_root=ae_root, workarea=workarea
-    )
-
-    record = read_record(_only_run_dir(ae_root))
-    assert record.catalog_version is None
-    assert record.pdk_profile_id is None
-    assert record.patch_reports == []
-    assert record.stage("si").render_target is None
 
 
 def test_recipe_path_flattens_the_namespaced_context_into_the_record(
@@ -1944,10 +1591,20 @@ def test_reduction_enabled_comes_from_the_recipe_not_the_task(
     mocks_on_path: Path,
     tmp_path: Path,
 ) -> None:
-    """tasks.yaml in this fixture sets ``jivaro.enabled: true``; on the recipe
-    path that field is not consulted at all."""
+    """``TaskConfig.jivaro`` is not consulted, whatever it says.
+
+    The field is still on the model with a reader-less default (see
+    ``core/config``'s module docstring), so the way to prove the runner
+    ignores it is to set it to the *opposite* of the recipe and watch the
+    recipe win. With both at their defaults the test would pass for a runner
+    that read either one.
+    """
 
     project, tasks = _load(project_tools_config)
+    tasks = [
+        t.model_copy(update={"jivaro": t.jivaro.model_copy(update={"enabled": True})})
+        for t in tasks
+    ]
     assert tasks[0].jivaro.enabled is True
     ae_root = tmp_path / "project_root"
 
@@ -1959,35 +1616,28 @@ def test_reduction_enabled_comes_from_the_recipe_not_the_task(
 
     stage = summary.tasks[0].stages[0]
     assert stage.status == "skipped"
-    assert stage.error == "jivaro disabled for task"
+    assert stage.error == "jivaro disabled in recipe"
 
 
-def test_recipe_without_a_profile_is_refused(
-    project_tools_config: Path, workarea: Path, tmp_path: Path
-) -> None:
-    from auto_ext.core.errors import ConfigError
+def test_half_a_configuration_cannot_even_be_expressed() -> None:
+    """Neither a Recipe without a PdkProfile nor the reverse is callable.
 
-    project, tasks = _load(project_tools_config)
-    with pytest.raises(ConfigError, match="needs a pdk profile"):
-        run_tasks(
-            project, tasks, stages=["si"],
-            auto_ext_root=tmp_path / "project_root", workarea=workarea,
-            recipe=_recipe(),
-        )
+    This used to be a pair of ``ConfigError`` tests, because both arguments
+    were optional and the runner had to catch the half-configured case at
+    runtime: a Recipe with no profile has no corner table, so
+    ``-technology_corner`` could only be guessed. Now that the legacy render
+    path is gone, both are required keyword-only parameters and the case is
+    unreachable -- which is a stronger guarantee, and this is where it is
+    recorded so nobody re-introduces a default for either.
+    """
 
+    import inspect
 
-def test_profile_without_a_recipe_is_refused(
-    project_tools_config: Path, workarea: Path, tmp_path: Path
-) -> None:
-    from auto_ext.core.errors import ConfigError
-
-    project, tasks = _load(project_tools_config)
-    with pytest.raises(ConfigError, match="without a recipe"):
-        run_tasks(
-            project, tasks, stages=["si"],
-            auto_ext_root=tmp_path / "project_root", workarea=workarea,
-            profile=_profile(workarea),
-        )
+    parameters = inspect.signature(run_tasks).parameters
+    for name in ("recipe", "profile"):
+        parameter = parameters[name]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, name
+        assert parameter.default is inspect.Parameter.empty, name
 
 
 def test_an_unknown_corner_fails_the_run_before_any_file_is_written(
@@ -2147,48 +1797,3 @@ def _si_context(project, task, profile, run_dir, workarea, env):
     )
 
 
-def test_both_render_paths_produce_the_same_bytes_for_the_shipped_defaults(
-    project_tools_config: Path,
-    workarea: Path,
-    mocks_on_path: Path,
-    tmp_path: Path,
-) -> None:
-    """The migration's load-bearing claim: at their defaults, Recipe +
-    PdkProfile reproduce exactly what the manifest knobs produced.
-
-    Byte equality, not "looks similar". The patch escape hatch diffs against
-    the generated text, so a pipeline that repainted a file on switchover would
-    bury every real manual edit in noise -- and a single changed literal in a
-    Quantus command file is a different extraction, not a cosmetic difference.
-
-    All four generated files come out identical; only their names change,
-    because the recipe path names a file after the artifact it is
-    (``si.env``) rather than after the template that made it
-    (``default.env``).
-    """
-    project, tasks = _load(project_tools_config)
-    stages = ["si", "calibre", "quantus", "jivaro"]
-
-    legacy_root = tmp_path / "legacy"
-    run_tasks(
-        project, tasks, stages=stages,
-        auto_ext_root=legacy_root, workarea=workarea, dry_run=True,
-    )
-    recipe_root = tmp_path / "recipe"
-    run_tasks(
-        project, tasks, stages=stages,
-        auto_ext_root=recipe_root, workarea=workarea, dry_run=True,
-        recipe=_recipe(reduction={"enabled": True}), profile=_profile(workarea),
-    )
-
-    legacy = _only_run_dir(legacy_root) / "rendered"
-    modern = _only_run_dir(recipe_root) / "rendered"
-    for old_name, new_name in (
-        ("si.env", "si.env"),
-        ("calibre_lvs.qci", "lvs.qci"),
-        ("ext.cmd", "ext.cmd"),
-        ("default.xml", "jivaro.xml"),
-    ):
-        assert (legacy / old_name).read_text(encoding="utf-8") == (
-            modern / new_name
-        ).read_text(encoding="utf-8"), new_name

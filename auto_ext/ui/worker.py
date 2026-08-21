@@ -10,6 +10,13 @@ Each task the worker runs produces a Run directory under
 ``<auto_ext_root>/runs/``; :attr:`RunWorker.records` exposes the finalized
 :class:`~auto_ext.model.run.RunRecord` list once the thread has finished,
 and the attached reporter emits each one as it is written.
+
+``recipe`` and ``profile`` are required by ``run_tasks`` -- the recipe says
+what to extract, the profile supplies the process literals -- so they are
+required here too. They are keyword arguments with no default rather than
+optional-with-a-fallback: a run started against the wrong recipe produces
+plausible-looking parasitics, which is the failure this whole rewrite exists
+to make impossible.
 """
 
 from __future__ import annotations
@@ -40,6 +47,11 @@ class RunWorker(QThread):
         workarea: Path,
         reporter: Any,
         cancel_token: CancelToken,
+        recipe: Any,
+        profile: Any,
+        resources: Any = None,
+        catalog: Any = None,
+        templates_root: Path | None = None,
         max_workers: int | None = None,
         dry_run: bool = False,
     ) -> None:
@@ -51,6 +63,11 @@ class RunWorker(QThread):
         self._workarea = workarea
         self._reporter = reporter
         self._cancel_token = cancel_token
+        self._recipe = recipe
+        self._profile = profile
+        self._resources = resources
+        self._catalog = catalog
+        self._templates_root = templates_root
         self._max_workers = max_workers
         self._dry_run = dry_run
         self._summary: RunSummary | None = None
@@ -86,6 +103,11 @@ class RunWorker(QThread):
                 stages=self._stages,
                 auto_ext_root=self._auto_ext_root,
                 workarea=self._workarea,
+                recipe=self._recipe,
+                profile=self._profile,
+                resources=self._resources,
+                catalog=self._catalog,
+                templates_root=self._templates_root,
                 max_workers=self._max_workers,
                 dry_run=self._dry_run,
                 reporter=self._reporter,

@@ -181,7 +181,8 @@ class DutSnapshot(Frozen):
     source_view: str = "schematic"
     ground_net: str = "vss"
     out_file: str | None = None
-    #: Display sugar carried over from ``TaskSpec.label``.
+    #: Display sugar, carried over from ``CellEntry.display_name`` (which is
+    #: what is left of ``TaskSpec.label``).
     display_name: str | None = None
 
     @property
@@ -201,7 +202,7 @@ class DutSnapshot(Frozen):
             source_view=task.lvs_source_view,
             ground_net=task.ground_net,
             out_file=task.out_file,
-            display_name=task.label,
+            display_name=task.display_name,
         )
 
 
@@ -314,7 +315,7 @@ class StageRecord(Frozen):
     details: dict[str, JsonValue] = Field(default_factory=dict)
     error: str | None = None
     #: Why a SKIPPED stage was skipped, verbatim from the runner's synthetic
-    #: stage emitter ("jivaro disabled for task", "aborted after earlier stage
+    #: stage emitter ("jivaro disabled in recipe", "aborted after earlier stage
     #: failure", ...).
     skip_reason: str | None = None
 

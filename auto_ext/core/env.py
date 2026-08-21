@@ -120,10 +120,11 @@ def derive_parent_dir_from_env_candidates(
     """Return ``Path(value).parent.name`` for the first candidate env var
     that resolves to a non-empty path with a non-empty parent.
 
-    Used by ``tech_name`` auto-derivation: when ``project.tech_name`` is
-    unset, walk the project's ``tech_name_env_vars`` candidates and take
-    the parent dir of the first one set. Returns ``None`` if no candidate
-    resolves to something usable.
+    Used by ``tech_name`` auto-derivation: when
+    :attr:`~auto_ext.model.pdk.PdkProfile.tech_name` is unset, walk that
+    profile's ``tech_name_env_vars`` candidates and take the parent dir of the
+    first one set. Returns ``None`` if no candidate resolves to something
+    usable.
     """
     for var in candidate_var_names:
         value = resolved_env.get(var, "")
@@ -136,7 +137,8 @@ def derive_parent_dir_from_env_candidates(
 
 
 def resolve_path_expr(expr: str, env: dict[str, str]) -> str:
-    """Resolve a ``project.paths.<key>`` value to a final path string.
+    """Resolve a path expression (a profile deck dir, an ``extra_paths`` entry)
+    to a final path string.
 
     Syntax: ``<head>[|filter]*``. ``<head>`` is env-substituted via
     :func:`substitute_env`; each trailing filter is then applied to the

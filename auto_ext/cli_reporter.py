@@ -373,19 +373,21 @@ def classify_stage_failure(
             failure_class="render-failed",
             detail=err,
             next_action=(
-                "fix the template or the knob value — no subprocess was spawned, "
-                "so the workarea is untouched"
+                "fix the recipe field, the profile entry or the stored patch "
+                "the message names — no subprocess was spawned, so the "
+                "workarea is untouched"
             ),
         )
 
-    if "no template configured" in err:
+    if "carries no render target" in err or "no template configured" in err:
         return FailureDiagnosis(
             stage=stage,
             failure_class="no-template",
             detail=err,
             next_action=(
-                f"set project.templates.{stage} in project.yaml, or the per-task "
-                f"templates.{stage} override"
+                f"the recipe lists {stage} as a stage but the catalog has no "
+                f"render target for it — check `auto-ext catalog list` and the "
+                f"recipe's stages"
             ),
         )
 

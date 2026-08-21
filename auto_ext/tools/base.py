@@ -7,10 +7,11 @@ subclasses.
 
 Lifecycle per task stage (orchestrated by :mod:`auto_ext.core.runner`):
 
-1. ``render_template(...)`` materialises the tool-specific config file
-   (e.g. ``.qci``, ``.cmd``, ``.xml``, ``si.env``) from the Jinja template
-   under ``templates/``. Skipped by the runner when ``has_template``
-   is ``False`` (``strmout``).
+1. The catalog pipeline (:mod:`auto_ext.core.render`) materialises the
+   tool-specific config file (e.g. ``.qci``, ``.cmd``, ``.xml``, ``si.env``)
+   from the Jinja template under ``templates/``, applying the recipe's stored
+   patches on the way out. Skipped by the runner when ``has_template`` is
+   ``False`` (``strmout``).
 2. ``build_argv(input_path, context)`` returns the argv list. This is the
    one place each tool declares its command-line shape.
 3. ``run(argv, cwd, env, log_path, *, cancel_token=None)`` spawns the
@@ -341,9 +342,9 @@ class Tool(ABC):
     #: Default command-line executable, resolvable via ``PATH`` on the server.
     executable: str = ""
 
-    #: Whether :meth:`render_template` should be called by the runner.
-    #: ``strmout`` has no ``.j2`` and sets this to ``False``; the runner
-    #: skips the render step entirely.
+    #: Whether this stage consumes a rendered input file at all. ``strmout``
+    #: has no template and sets this to ``False``; the runner skips the render
+    #: step entirely and passes it the ``rendered/`` directory instead.
     has_template: bool = True
 
     def render_template(
@@ -352,27 +353,19 @@ class Tool(ABC):
         context: dict[str, Any],
         env: dict[str, str],
         out_path: Path,
-        *,
-        knobs: dict[str, Any] | None = None,
     ) -> Path:
         """Render ``template_path`` with ``context`` + ``env`` to ``out_path``.
 
-        When ``knobs`` is ``None``, load the sidecar manifest and fall
-        back to its declared defaults — convenient for callers that
-        don't plumb per-task knob overrides (e.g. template unit tests).
-        Pass an explicit ``{}`` to opt out of default-filling; callers
-        that have already resolved knobs (the runner) pass the resolved
-        dict directly.
+        ``context`` is the whole Jinja namespace. The runner does not call
+        this any more -- :mod:`auto_ext.core.render` renders the catalog's
+        templates from source strings, because a stored patch has to be
+        applied between the render and the write. This stays as the
+        render-a-file-from-disk entry point for tool-level tests and one-off
+        scripts, and because it is where ``has_template`` stops mattering.
         """
         from auto_ext.core.template import render_template as _render
 
-        if knobs is None:
-            from auto_ext.core.manifest import load_manifest, resolve_knob_values
-
-            manifest = load_manifest(template_path)
-            knobs = resolve_knob_values(manifest, {}, {}, {})
-
-        rendered = _render(template_path, context=context, env=env, knobs=knobs)
+        rendered = _render(template_path, context=context, env=env)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(rendered, encoding="utf-8")
         return out_path

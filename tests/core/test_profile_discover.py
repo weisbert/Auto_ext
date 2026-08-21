@@ -369,3 +369,140 @@ def test_a_hand_written_profile_still_validates(tmp_path):
     profile = read_profile_yaml(path)
     assert isinstance(profile, PdkProfile)
     assert profile.corner("typical").technology_corner == "TYPICAL"
+
+
+# ---- the scan's contract with the PDK it is scanning ------------------------
+#
+# Section 3.D of the tests disposition. The office machine's PDK tree is
+# read-only and shared, the profile is cached on the user's side, and a scan
+# that is not repeatable is a scan whose output nobody can review.
+
+
+def test_scanning_the_same_tree_twice_yields_the_same_profile(pdk_env, pdk_tree):
+    """Idempotence, field order included.
+
+    ``profile_to_yaml`` is what a user reviews and what git diffs. If two
+    scans of an unchanged tree produced the same *values* in a different
+    order -- a set iterated somewhere, a dict built from a directory listing
+    -- every re-scan would show as a change and the review would stop
+    happening.
+    """
+
+    first = _scan(pdk_env)
+    second = _scan(pdk_env)
+
+    # ``scanned_at`` is the one field that is *meant* to move: it records when
+    # the scan ran, not what it found. Everything else -- and the fingerprint,
+    # which is what the health cache keys on -- has to be identical.
+    def content(profile):
+        return {k: v for k, v in profile.model_dump().items() if k != "scanned_at"}
+
+    assert content(first.profile) == content(second.profile)
+    assert first.profile.fingerprint() == second.profile.fingerprint()
+    assert [(note.field, note.rule) for note in first.notes] == [
+        (note.field, note.rule) for note in second.notes
+    ]
+
+    # Field order too: the YAML is what a user reviews and what git diffs.
+    def keys(profile):
+        return [
+            line.split(":", 1)[0]
+            for line in profile_to_yaml(profile).splitlines()
+            if line and not line.startswith((" ", "-", "#"))
+        ]
+
+    assert keys(first.profile) == keys(second.profile)
+
+
+def test_the_scan_writes_nothing_into_the_pdk_tree(pdk_env, pdk_tree):
+    """The PDK mount is shared and read-only; a scan that wrote would fail there.
+
+    Compares the whole tree -- every path, its size and its content -- before
+    and after. A cache file, a lock file or a touched mtime would all show up.
+    """
+
+    root = pdk_tree["root"]
+
+    def snapshot() -> dict[str, bytes | None]:
+        return {
+            str(path.relative_to(root)): (path.read_bytes() if path.is_file() else None)
+            for path in sorted(root.rglob("*"))
+        }
+
+    before = snapshot()
+    _scan(pdk_env)
+    assert snapshot() == before
+
+
+def test_the_scan_never_opens_anything_for_writing(pdk_env, monkeypatch):
+    """Belt and braces for the read-only mount: no write mode, anywhere.
+
+    The tree comparison above would miss a write that happened to reproduce
+    the same bytes, and would miss a write *outside* the tree that a
+    read-only-home user would still be refused. This one fails on the attempt
+    rather than on the result.
+    """
+
+    import builtins
+
+    real_open = builtins.open
+
+    def guarded(file, mode="r", *args, **kwargs):
+        if any(flag in str(mode) for flag in ("w", "a", "x", "+")):
+            raise AssertionError(f"the scan opened {file!r} for writing (mode {mode!r})")
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded)
+    result = _scan(pdk_env)
+    assert result.profile.profile_id == "hn001"
+
+
+def test_two_technologies_produce_two_profiles_that_do_not_collide(
+    pdk_env, pdk_tree, tmp_path
+):
+    """Two PDKs on one machine is the normal case, not an edge case.
+
+    Each scan is asked for its own ``profile_id``; the two files sit side by
+    side and each reads back as itself. The id is the only thing that keeps
+    them apart, so it has to reach both the object and the file name.
+    """
+
+    first = _scan(pdk_env, profile_id="hn001", display_name="HN001")
+    second = _scan(pdk_env, profile_id="cf028", display_name="CF028")
+
+    profiles_dir = tmp_path / "profiles"
+    written = [
+        write_profile_yaml(profiles_dir / "hn001.yaml", first.profile),
+        write_profile_yaml(profiles_dir / "cf028.yaml", second.profile),
+    ]
+    assert len({p.name for p in written}) == 2
+
+    back_first = read_profile_yaml(profiles_dir / "hn001.yaml")
+    back_second = read_profile_yaml(profiles_dir / "cf028.yaml")
+    assert back_first.profile_id == "hn001"
+    assert back_second.profile_id == "cf028"
+    assert back_first.display_name == "HN001"
+    assert back_second.display_name == "CF028"
+    # The two files describe the same tree, so everything except identity
+    # matches -- which is what makes the id the load-bearing part.
+    assert back_first.lvs_decks.model_dump() == back_second.lvs_decks.model_dump()
+
+
+def test_a_profile_is_not_referenced_by_any_recipe_or_cell_field():
+    """"Invisible in normal use" is a schema property, not a UI decision.
+
+    The user picks a PDK once, in ``workspace.yaml``. If ``profile_id`` could
+    also appear on a Recipe or a Cells row, a recipe would stop being portable
+    and a cell would carry a process fact -- and both would do so silently,
+    because either would still validate.
+    """
+
+    from auto_ext.model.cells import CellEntry
+    from auto_ext.model.recipe import Recipe, recipe_field_paths
+    from auto_ext.model.workspace import WorkspaceConfig
+
+    assert "pdk_profile" in WorkspaceConfig.model_fields
+    assert "pdk_profile" not in Recipe.model_fields
+    assert "pdk_profile" not in CellEntry.model_fields
+    assert not [f for f in recipe_field_paths() if "profile" in f or "pdk" in f]
+    assert not [f for f in CellEntry.model_fields if "profile" in f or "pdk" in f]

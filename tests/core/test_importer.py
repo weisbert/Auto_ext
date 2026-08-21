@@ -1,5 +1,11 @@
 """Tests for :mod:`auto_ext.core.importer` — per-tool importers, candidate
-detection, PdkToken detection, and smart re-import merge.
+detection, and PdkToken detection.
+
+The importer survives this round as the one-shot tool that builds the
+catalog from a real PDK's raw tool files: the identity extraction, the
+cross-validation and :func:`aggregate_pdk_tokens` are exactly what a
+PdkProfile scan reads. The knob-seeding half went out with the manifest
+four-layer mechanism.
 """
 
 from __future__ import annotations
@@ -494,112 +500,6 @@ def test_pdk_tokens_include_line_numbers(quantus_raw: str) -> None:
         assert t.line >= 1
 
 
-# ---- smart re-import merge -------------------------------------------------
-
-
-def _build_manifest(**kwargs_for_knobs):
-    from auto_ext.core.manifest import KnobSpec, SourceRef, TemplateManifest
-
-    knobs = {}
-    for name, cfg in kwargs_for_knobs.items():
-        src = cfg.pop("source", None)
-        if src is not None and not isinstance(src, SourceRef):
-            src = SourceRef(**src)
-        knobs[name] = KnobSpec(source=src, **cfg)
-    return TemplateManifest(template="calibre_sample.qci", knobs=knobs)
-
-
-def test_merge_substitutes_user_promoted_knob(calibre_raw: str) -> None:
-    from auto_ext.core.importer import merge_reimport
-
-    existing = _build_manifest(
-        num_turbo={
-            "type": "int",
-            "default": 2,
-            "source": {"tool": "calibre", "key": "cmnNumTurbo"},
-            "description": "kept through merge",
-        },
-    )
-    new_result = import_template("calibre", calibre_raw)
-    outcome = merge_reimport(new_result, existing)
-
-    # Body now references [[num_turbo]] at the cmnNumTurbo line.
-    assert "*cmnNumTurbo: [[num_turbo]]" in outcome.body
-    # Default unchanged (raw literal 2 == existing default 2).
-    assert outcome.manifest.knobs["num_turbo"].default == 2
-    # Manifest edit preserved.
-    assert outcome.manifest.knobs["num_turbo"].description == "kept through merge"
-
-
-def test_merge_refreshes_default_when_raw_changed() -> None:
-    from auto_ext.core.importer import merge_reimport
-
-    existing = _build_manifest(
-        num_turbo={
-            "type": "int",
-            "default": 2,
-            "source": {"tool": "calibre", "key": "cmnNumTurbo"},
-        },
-    )
-    # Raw with a bumped cmnNumTurbo.
-    raw = (
-        "*lvsLayoutPrimary: INV1\n"
-        "*lvsLayoutLibrary: LIB\n"
-        "*lvsLayoutView: layout\n"
-        "*lvsSourceView: schematic\n"
-        "*cmnNumTurbo: 8\n"
-    )
-    new_result = import_template("calibre", raw)
-    outcome = merge_reimport(new_result, existing)
-
-    assert outcome.manifest.knobs["num_turbo"].default == 8
-    assert "*cmnNumTurbo: [[num_turbo]]" in outcome.body
-    assert any("default updated" in m for m in outcome.messages)
-
-
-def test_merge_preserves_user_defined_knob_without_source(calibre_raw: str) -> None:
-    from auto_ext.core.importer import merge_reimport
-
-    existing = _build_manifest(
-        manual_x={"type": "int", "default": 99},  # no source
-    )
-    new_result = import_template("calibre", calibre_raw)
-    outcome = merge_reimport(new_result, existing)
-
-    # Body unchanged for manual_x — importer has no idea where to substitute.
-    assert "[[manual_x]]" not in outcome.body
-    assert "manual_x" in outcome.manifest.knobs
-    assert outcome.manifest.knobs["manual_x"].default == 99
-    assert any(
-        "user-defined" in m and "manual_x" in m for m in outcome.messages
-    )
-
-
-def test_merge_warns_when_source_key_missing_in_new_raw() -> None:
-    from auto_ext.core.importer import merge_reimport
-
-    existing = _build_manifest(
-        vanished={
-            "type": "int",
-            "default": 42,
-            "source": {"tool": "calibre", "key": "cmnThatWasRemoved"},
-        },
-    )
-    # Raw that does NOT contain cmnThatWasRemoved.
-    raw = "*lvsLayoutPrimary: INV1\n*lvsLayoutLibrary: LIB\n*lvsLayoutView: layout\n*lvsSourceView: schematic\n"
-    new_result = import_template("calibre", raw)
-    outcome = merge_reimport(new_result, existing)
-
-    # Knob kept but surfaced as stale.
-    assert "vanished" in outcome.manifest.knobs
-    assert any(
-        "not found" in m and "vanished" in m for m in outcome.messages
-    )
-
-
-# ---- Phase 4b2: aggregate_pdk_tokens ---------------------------------------
-
-
 def _all_four_results(raw_dir: Path):
     """Import all 4 fixture raws and return the per-tool ImportResult dict."""
     from auto_ext.core.importer import import_template
@@ -618,6 +518,9 @@ def _all_four_results(raw_dir: Path):
             "jivaro", (raw_dir / "jivaro_sample.xml").read_text(encoding="utf-8")
         ),
     }
+
+
+# ---- aggregate_pdk_tokens (cross-file PDK constant discovery) --------------
 
 
 def test_aggregate_tech_name_from_quantus(raw_dir: Path) -> None:
@@ -829,114 +732,3 @@ def test_apply_constants_si_body_untouched_by_paths() -> None:
     assert out == body
 
 
-# ---- auto-knobs (calibre connect_by_name + lvs_variant) -------------------
-
-
-def test_calibre_connect_by_name_off_variant_injects_block() -> None:
-    """Raw without ``*cmnVConnectNamesState`` but with ``*cmnShowOptions:``
-    gets the wrapped block injected after the ShowOptions anchor and a
-    knob defaulting to False (matches the ON-less raw byte-for-byte
-    when rendered with default=False)."""
-    raw = (
-        "*cmnShowOptions: 1\n"
-        "*cmnSpecifyLicenseWaitTime: 1\n"
-    )
-    result = import_template("calibre", raw)
-    body = result.template_body
-    assert "[% if connect_by_name %]*cmnVConnectNamesState: ALL\n[% endif %]" in body
-    assert "connect_by_name" in result.auto_knobs
-    assert result.auto_knobs["connect_by_name"].type == "bool"
-    assert result.auto_knobs["connect_by_name"].default is False
-
-
-def test_calibre_connect_by_name_on_variant_wraps_existing_line() -> None:
-    """Raw with the ON line gets that line wrapped in place; the knob
-    defaults to True so the rendered body matches the ON raw exactly."""
-    raw = (
-        "*cmnShowOptions: 1\n"
-        "*cmnVConnectNamesState: ALL\n"
-        "*cmnSpecifyLicenseWaitTime: 1\n"
-    )
-    result = import_template("calibre", raw)
-    body = result.template_body
-    assert "[% if connect_by_name %]*cmnVConnectNamesState: ALL\n[% endif %]" in body
-    # Original unwrapped line shouldn't survive.
-    assert "\n*cmnVConnectNamesState: ALL\n" not in body
-    assert result.auto_knobs["connect_by_name"].default is True
-
-
-def test_calibre_lvs_variant_wodio_substituted() -> None:
-    raw = "*lvsRulesFile: /pdk/runset/foo/CFXXX.wodio.qcilvs\n"
-    result = import_template("calibre", raw)
-    assert "[[lvs_variant]]" in result.template_body
-    assert ".wodio.qcilvs" not in result.template_body
-    spec = result.auto_knobs["lvs_variant"]
-    assert spec.type == "str"
-    assert spec.default == "wodio"
-    assert spec.choices == ["wodio", "widio"]
-
-
-def test_calibre_lvs_variant_widio_substituted() -> None:
-    raw = "*lvsRulesFile: /pdk/runset/foo/CFXXX.widio.qcilvs\n"
-    result = import_template("calibre", raw)
-    assert "[[lvs_variant]]" in result.template_body
-    assert result.auto_knobs["lvs_variant"].default == "widio"
-
-
-def test_calibre_lvs_variant_unrecognized_skipped() -> None:
-    """A custom suffix (neither wodio nor widio) gets no knob and the
-    body is left untouched — we never invent an enum value."""
-    raw = "*lvsRulesFile: /pdk/runset/foo/CFXXX.custom.qcilvs\n"
-    result = import_template("calibre", raw)
-    assert "[[lvs_variant]]" not in result.template_body
-    assert "lvs_variant" not in result.auto_knobs
-
-
-def test_calibre_no_anchor_no_connect_by_name_knob() -> None:
-    """A raw with no ``*cmnShowOptions:`` and no
-    ``*cmnVConnectNamesState:`` gets neither an injected block nor a
-    knob — there's nothing to parameterize."""
-    raw = "*lvsLayoutPrimary: SOMECELL\n"
-    result = import_template("calibre", raw)
-    assert "connect_by_name" not in result.auto_knobs
-
-
-def test_non_calibre_tools_have_empty_auto_knobs() -> None:
-    """Only the calibre importer auto-parameterizes knobs at present."""
-    cases = [
-        ("si", 'simLibName = "L"\nsimCellName = "C"\n'),
-        ("quantus", '              -ground_net "vss"\n'),
-        ("jivaro", '<inputView value="L/C/av"/>\n'),
-    ]
-    for tool, raw in cases:
-        result = import_template(tool, raw)
-        assert result.auto_knobs == {}, f"{tool} produced auto_knobs"
-
-
-def test_calibre_fixture_seeds_both_auto_knobs(calibre_raw: str) -> None:
-    """The bundled fixture has both anchors (`*cmnShowOptions:` for the
-    OFF variant and `*lvsRulesFile: ....wodio.qcilvs`), so a fresh
-    import of the fixture seeds both auto-knobs."""
-    result = import_template("calibre", calibre_raw)
-    assert set(result.auto_knobs) == {"connect_by_name", "lvs_variant"}
-    assert result.auto_knobs["connect_by_name"].default is False
-    assert result.auto_knobs["lvs_variant"].default == "wodio"
-
-
-def test_merge_cross_tool_source_is_skipped() -> None:
-    from auto_ext.core.importer import merge_reimport
-
-    # Knob promoted from quantus tool, but we're re-importing calibre.
-    existing = _build_manifest(
-        wrong_tool={
-            "type": "int",
-            "default": 1,
-            "source": {"tool": "quantus", "key": "whatever"},
-        },
-    )
-    raw = "*lvsLayoutPrimary: INV1\n*lvsLayoutLibrary: LIB\n*lvsLayoutView: layout\n*lvsSourceView: schematic\n"
-    new_result = import_template("calibre", raw)
-    outcome = merge_reimport(new_result, existing)
-
-    assert "[[wrong_tool]]" not in outcome.body
-    assert any("does not match" in m for m in outcome.messages)

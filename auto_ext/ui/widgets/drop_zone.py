@@ -1,5 +1,5 @@
 """Reusable bordered drop area emitting ``path_dropped(Path)`` on a
-single local-file drop. Shared by diff_editor.py and template_diff_viewer.py.
+single local-file drop. Used by the init wizard's raw-export rows.
 """
 
 from __future__ import annotations

@@ -1,23 +1,17 @@
-"""Concurrency invariants between :class:`ConfigController`, the Run
-worker, and the GUI tabs.
+"""Concurrency invariants between the controller, the run worker and Qt.
 
-These invariants are not covered by single-handler unit tests:
+These are the ones no single-handler unit test reaches:
 
-1. ``ConfigController.has_external_change`` mtime detection (positive
-   and negative cases) — the autosave skip condition turns on it.
-2. :class:`QtProgressReporter` does not drop signals under an emit
-   storm — the runner may emit hundreds of ``stage_finished`` events
-   for parallel runs and the live status tree must see all of them.
-3. Window close while a worker is in flight should propagate
-   cancellation into the worker (``request_cancel`` → CancelToken).
-   Auto_ext does not currently install a ``closeEvent`` handler on
-   :class:`MainWindow`; this test exercises the smaller invariant —
-   the public ``request_cancel`` slot flips the shared token, which
-   is the hook a future ``closeEvent`` would call.
-4. Two tabs staging edits in close succession must merge into
-   ``controller.pending_edits`` without one stomping the other —
-   ``stage_edits`` (project keys) and ``stage_tasks_edits`` (tasks
-   replacement list) live in independent buckets.
+1. :meth:`ConfigController.has_external_change` mtime detection, both
+   directions -- a save must not look like somebody else's edit.
+2. :class:`QtProgressReporter` drops no signals under an emit storm. The
+   runner emits one ``stage_finished`` per (task, stage) pair, so a parallel
+   run over a few dozen cells pushes hundreds through in a burst.
+3. Cancellation reaches an in-flight worker and the thread winds down. This
+   is the hook a window-close handler would call.
+4. Two screens staging edits in quick succession merge instead of stomping.
+   The queue is keyed per document, and a recipe edit and a cell edit are two
+   documents.
 """
 
 from __future__ import annotations
@@ -32,237 +26,200 @@ pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
 from auto_ext.core.progress import CancelToken  # noqa: E402
-from auto_ext.ui.config_controller import ConfigController  # noqa: E402
+from auto_ext.model.cells import CELLS_FILENAME, CellEntry  # noqa: E402
 from auto_ext.ui.qt_reporter import QtProgressReporter  # noqa: E402
 from auto_ext.ui.worker import RunWorker  # noqa: E402
 
 
-# ---- Invariant 1: has_external_change mtime detection -----------------
+# ---- Invariant 1: has_external_change mtime detection -----------------------
 
 
-def test_gui_concurrency_has_external_change_detects_mtime_bump(
-    qtbot, project_tools_config: Path
-) -> None:
-    """External rewrite of project.yaml after load() must flip the flag.
+def _bump_mtime(path: Path) -> None:
+    """Push ``path``'s mtime a second forward.
 
-    Inverse: a fresh load with no further filesystem activity reports
-    no change.
+    Nanosecond arithmetic rather than a rewrite: two writes inside one
+    filesystem tick can land in the same mtime bucket on NTFS, which would
+    make the positive case flaky rather than failing.
     """
-    controller = ConfigController()
-    controller.load(project_tools_config)
+
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+
+@pytest.mark.parametrize("filename", [CELLS_FILENAME, "workspace.yaml"])
+def test_an_external_rewrite_of_any_loaded_file_flips_the_flag(
+    loaded_controller, v2_config_dir: Path, filename: str
+) -> None:
+    controller = loaded_controller
     assert controller.has_external_change() is False
 
-    project_path = project_tools_config / "project.yaml"
-    # Force mtime forward — using ns precision because two writes inside
-    # the same FS tick can land in the same mtime bucket on Windows NTFS.
-    st = project_path.stat()
-    os.utime(
-        project_path,
-        ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
-    )
+    target = v2_config_dir / "config" / filename
+    _bump_mtime(target)
 
+    assert controller.has_external_change() is True
+    assert controller.externally_changed_paths() == [target]
+
+
+def test_an_external_rewrite_of_a_recipe_file_flips_the_flag(
+    loaded_controller, v2_config_dir: Path
+) -> None:
+    """The flag spans the recipe files too, which live outside ``config/``."""
+
+    controller = loaded_controller
+    _bump_mtime(v2_config_dir / "recipes" / "rc-coupled-typical.yaml")
     assert controller.has_external_change() is True
 
 
-def test_gui_concurrency_has_external_change_detects_tasks_yaml_bump(
-    qtbot, project_tools_config: Path
+def test_the_controllers_own_save_does_not_look_external(
+    loaded_controller,
 ) -> None:
-    """Bumping tasks.yaml mtime alone is also detected — the flag spans
-    both files. Without this the autosave skip would miss tasks-only
-    external edits."""
-    controller = ConfigController()
-    controller.load(project_tools_config)
-    assert controller.has_external_change() is False
+    """``save`` rewrites files and then reloads, which re-reads the mtimes."""
 
-    tasks_path = project_tools_config / "tasks.yaml"
-    st = tasks_path.stat()
-    os.utime(
-        tasks_path,
-        ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000),
-    )
-    assert controller.has_external_change() is True
-
-
-def test_gui_concurrency_has_external_change_ignores_internal_save(
-    qtbot, project_tools_config: Path
-) -> None:
-    """``save()`` rewrites project.yaml but tracks the new mtime, so
-    has_external_change must return False after a successful save."""
-    controller = ConfigController()
-    controller.load(project_tools_config)
-    controller.stage_edits({"tech_name": "HN_INTERNAL"})
-
+    controller = loaded_controller
+    controller.stage_workspace(controller.workspace.model_copy(update={"keep_runs": 2}))
     assert controller.save() is True
-    # The save() path calls load() at the end, which refreshes the
-    # tracked mtime; the file we just wrote is what's on disk now.
     assert controller.has_external_change() is False
 
 
-# ---- Invariant 2: emit storm does not lose signals --------------------
+# ---- Invariant 2: emit storm does not lose signals --------------------------
 
 
-def test_gui_concurrency_worker_emit_storm_does_not_lose_signals(
-    qtbot,
-) -> None:
-    """Fire 100 stage_finished events synchronously and assert all 100
-    arrive at the slot. The runner emits one per (task, stage) pair so
-    a parallel run on dozens of cells can easily push past 100."""
+def test_emit_storm_does_not_lose_signals(qtbot) -> None:
     reporter = QtProgressReporter()
-    received: list[tuple[str, str, str]] = []
-
-    def slot(task_id: str, stage: str, status: str, _err: object) -> None:
-        received.append((task_id, stage, status))
-
-    reporter.stage_finished.connect(slot)
-
-    for i in range(100):
-        reporter.stage_finished.emit(f"t{i}", "si", "passed", None)
-
-    # Signals emitted from the GUI thread to a slot connected on the
-    # same thread use DirectConnection by default → delivery is
-    # synchronous, so the count must match immediately.
-    assert len(received) == 100
-    assert received[0] == ("t0", "si", "passed")
-    assert received[99] == ("t99", "si", "passed")
-
-
-def test_gui_concurrency_worker_emit_storm_cross_thread_delivers_all(
-    qtbot,
-) -> None:
-    """Same emit storm but from a worker thread → AutoConnection
-    upgrades to QueuedConnection; pytest-qt's event loop drains all
-    100 before waitUntil exits."""
-    reporter = QtProgressReporter()
-    received: list[str] = []
+    seen: list[tuple[str, str, str]] = []
     reporter.stage_finished.connect(
-        lambda tid, _stg, _st, _e: received.append(tid)
+        lambda task, stage, status, error: seen.append((task, stage, status))
     )
 
-    def fire_storm() -> None:
-        for i in range(100):
-            reporter.stage_finished.emit(f"t{i}", "si", "passed", None)
+    for index in range(100):
+        reporter.on_stage_end(f"task{index}", "calibre", "passed")
 
-    thread = threading.Thread(target=fire_storm, daemon=True)
-    thread.start()
-    thread.join(timeout=5.0)
-    qtbot.waitUntil(lambda: len(received) == 100, timeout=5_000)
-    assert sorted(received) == sorted(f"t{i}" for i in range(100))
+    assert len(seen) == 100
+    assert seen[0][0] == "task0" and seen[-1][0] == "task99"
 
 
-# ---- Invariant 3: close-during-run aborts the worker ------------------
+def test_emit_storm_from_another_thread_delivers_all(qtbot) -> None:
+    """Qt upgrades to a queued connection across threads; nothing is dropped."""
 
-
-def test_gui_concurrency_close_window_aborts_worker(
-    qtbot, project_tools_config: Path, workarea: Path, tmp_path: Path
-) -> None:
-    """Closing the window during a run should propagate cancellation
-    into the worker. Auto_ext does not currently install a
-    ``closeEvent`` on :class:`MainWindow`, so this test exercises the
-    smallest possible slice: ``request_cancel`` flips the shared
-    CancelToken, the worker's run() loop observes it, and the thread
-    exits cleanly within a bounded timeout.
-
-    Limitation: the actual ``closeEvent`` wiring is out of scope (it
-    would need a production change in main_window.py which agent δ is
-    forbidden from touching). When that wiring is added, change this
-    test to call ``main_window.close()`` instead of
-    ``worker.request_cancel()`` directly.
-    """
-    from auto_ext.core.config import load_project, load_tasks
-
-    project = load_project(project_tools_config / "project.yaml")
-    tasks = load_tasks(project_tools_config / "tasks.yaml", project=project)
     reporter = QtProgressReporter()
+    seen: list[str] = []
+    reporter.stage_started.connect(lambda task, stage: seen.append(task))
+
+    def storm() -> None:
+        for index in range(100):
+            reporter.on_stage_start(f"task{index}", "si")
+
+    thread = threading.Thread(target=storm)
+    thread.start()
+    thread.join(timeout=10)
+
+    qtbot.waitUntil(lambda: len(seen) == 100, timeout=10_000)
+    assert len(seen) == 100
+
+
+# ---- Invariant 3: cancellation reaches the worker ---------------------------
+
+
+def test_cancel_flips_the_token_and_the_thread_winds_down(
+    qtbot, loaded_controller, workarea: Path, tmp_path: Path, recipe, pdk_profile
+) -> None:
+    """The slice a window-close handler would use.
+
+    ``MainWindow`` still installs no ``closeEvent``; when it does, this test
+    should call ``window.close()`` instead of ``request_cancel()`` directly.
+    """
+
+    controller = loaded_controller
     token = CancelToken()
     worker = RunWorker(
-        project=project,
-        tasks=tasks,
+        project=controller.project,
+        tasks=controller.tasks,
         stages=["si", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "pr",
         workarea=workarea,
-        reporter=reporter,
+        reporter=QtProgressReporter(),
         cancel_token=token,
+        recipe=recipe,
+        profile=pdk_profile,
         dry_run=True,
     )
 
     worker.start()
-    # Pretend the user just closed the window: the close handler should
-    # call worker.request_cancel(). Confirm the token flipped.
     worker.request_cancel()
     assert token.is_cancelled() is True
 
-    # Worker thread must wind down within a bounded time (no orphan
-    # QThread). 15s is generous — dry_run cancellation in real runs
-    # finishes in tens of milliseconds.
-    qtbot.waitUntil(lambda: worker.isFinished(), timeout=15_000)
+    qtbot.waitUntil(worker.isFinished, timeout=15_000)
     assert worker.isFinished() is True
 
 
-# ---- Invariant 4: cross-tab pending edits merge without stomping ------
-
-
-def test_gui_concurrency_cross_tab_pending_edits_merge(
-    qtbot, project_tools_config: Path
+def test_the_worker_forwards_the_recipe_and_profile_to_the_runner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recipe, pdk_profile
 ) -> None:
-    """The Project tab stages flat-key edits and the Tasks tab stages
-    a tasks-replacement list; they live in independent buckets. After
-    both stage in quick succession both are observable via
-    ``pending_edits`` / ``pending_task_specs`` with no clobbering."""
-    controller = ConfigController()
-    controller.load(project_tools_config)
+    """``run_tasks`` requires both; a worker that dropped them would start a
+    run against the wrong settings and produce plausible parasitics."""
 
-    # User types in Project tab field then immediately tabs over to
-    # Tasks and stages a tasks-row edit before the project autosave
-    # would have flushed (autosave skipped here — controller direct).
-    controller.stage_edits({"tech_name": "HN_PROJ_EDIT"})
-    controller.stage_tasks_edits(
-        [
-            {
-                "library": "L_TASK_EDIT",
-                "cell": "c_task",
-                "lvs_layout_view": "lay",
-            }
-        ]
+    captured: dict[str, object] = {}
+
+    def fake_run_tasks(project, tasks, **kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr("auto_ext.ui.worker.run_tasks", fake_run_tasks)
+    worker = RunWorker(
+        project=object(),
+        tasks=[],
+        stages=["si"],
+        auto_ext_root=tmp_path,
+        workarea=tmp_path,
+        reporter=QtProgressReporter(),
+        cancel_token=CancelToken(),
+        recipe=recipe,
+        profile=pdk_profile,
     )
+    worker.run()
 
-    assert controller.is_dirty is True
-    assert controller.pending_edits == {"tech_name": "HN_PROJ_EDIT"}
-    specs = controller.pending_task_specs
-    assert specs is not None
-    assert specs[0]["library"] == "L_TASK_EDIT"
-    assert specs[0]["cell"] == "c_task"
+    assert captured["recipe"] is recipe
+    assert captured["profile"] is pdk_profile
 
-    # Reverse interleave should also merge — Tasks first, Project second.
+
+# ---- Invariant 4: staged edits merge without stomping -----------------------
+
+
+def test_two_screens_staging_different_documents_merge(
+    loaded_controller, recipe
+) -> None:
+    controller = loaded_controller
+
+    controller.stage_cells(
+        controller.cells.model_copy(
+            update={
+                "cells": [
+                    *controller.cells.cells,
+                    CellEntry(library="LIB", cell="amp", layout_view="layout"),
+                ]
+            }
+        )
+    )
+    controller.stage_recipe(recipe.model_copy(update={"description": "from Recipes"}))
+
+    assert controller.pending_keys() == ["cells", f"recipe:{recipe.recipe_id}"]
+    assert len(controller.cells) == 2
+    assert controller.recipe(recipe.recipe_id).description == "from Recipes"
+
+    # Reverse interleave: same outcome, neither document wins.
     controller.revert()
-    controller.stage_tasks_edits(
-        [
-            {
-                "library": "L_FIRST",
-                "cell": "c_first",
-                "lvs_layout_view": "lay",
-            }
-        ]
-    )
-    controller.stage_edits({"tech_name": "HN_SECOND"})
-    assert controller.pending_edits == {"tech_name": "HN_SECOND"}
-    specs2 = controller.pending_task_specs
-    assert specs2 is not None
-    assert specs2[0]["library"] == "L_FIRST"
+    controller.stage_recipe(recipe.model_copy(update={"description": "first"}))
+    controller.stage_cells(controller.cells.model_copy(update={"cells": []}))
+    assert controller.recipe(recipe.recipe_id).description == "first"
+    assert len(controller.cells) == 0
 
 
-def test_gui_concurrency_repeated_project_edits_merge_keys(
-    qtbot, project_tools_config: Path
+def test_restaging_one_document_replaces_rather_than_appends(
+    loaded_controller,
 ) -> None:
-    """Two consecutive ``stage_edits`` calls touching different keys
-    must merge — neither call should overwrite keys it didn't touch.
-    This is the per-tab analog of the cross-tab merge invariant."""
-    controller = ConfigController()
-    controller.load(project_tools_config)
+    controller = loaded_controller
+    controller.stage_workspace(controller.workspace.model_copy(update={"keep_runs": 1}))
+    controller.stage_workspace(controller.workspace.model_copy(update={"keep_runs": 2}))
 
-    controller.stage_edits({"tech_name": "HN_X"})
-    controller.stage_edits({"employee_id": "bob"})
-
-    assert controller.pending_edits == {
-        "tech_name": "HN_X",
-        "employee_id": "bob",
-    }
+    assert controller.pending_keys() == ["workspace"]
+    assert controller.workspace.keep_runs == 2

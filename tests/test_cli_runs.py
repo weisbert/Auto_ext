@@ -416,20 +416,27 @@ class TestClassifyStageFailure:
         assert "no subprocess was spawned" in diag.next_action
 
     def test_no_template(self) -> None:
+        """The recipe lists a stage the catalog has no render target for.
+
+        The wording changed with the template slots: there is no
+        ``project.templates.jivaro`` to set any more, so the advice points at
+        the catalog and the recipe's stage list instead.
+        """
+
         from auto_ext.cli_reporter import classify_stage_failure
 
         diag = classify_stage_failure(
             stage="jivaro",
             status=StageStatus.FAILED,
             error=(
-                "no template configured for jivaro: neither project.templates.jivaro "
-                "nor task.templates.jivaro is set"
+                "stage jivaro needs a rendered input but the recipe plan "
+                "carries no render target for step 'jivaro'"
             ),
         )
 
         assert diag is not None
         assert diag.failure_class == "no-template"
-        assert "project.templates.jivaro" in diag.next_action
+        assert "auto-ext catalog list" in diag.next_action
 
     def test_exit_127_is_a_missing_binary_and_names_it(self) -> None:
         from auto_ext.cli_reporter import classify_stage_failure

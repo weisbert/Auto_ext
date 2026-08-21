@@ -61,20 +61,12 @@ _TWO_TASKS_YAML = """\
   lvs_source_view: schematic
   ground_net: vss
   out_file: av_ext
-  jivaro:
-    enabled: true
-    frequency_limit: 14
-    error_max: 2
 - library: WB_PLL_DCO
   cell: buf
   lvs_layout_view: layout
   lvs_source_view: schematic
   ground_net: vss
   out_file: av_ext
-  jivaro:
-    enabled: true
-    frequency_limit: 14
-    error_max: 2
 """
 
 
@@ -82,6 +74,52 @@ def _load(config_dir: Path):
     project = load_project(config_dir / "project.yaml")
     tasks = load_tasks(config_dir / "tasks.yaml", project=project)
     return project, tasks
+
+
+def _profile(workarea: Path):
+    """The PdkProfile ``project_tools_config`` describes.
+
+    Same shape as ``tests/test_runner.py``'s: same deck expressions, same
+    corner literal, so a parallel run and a serial run of one task render the
+    same bytes.
+    """
+
+    from tests.support.v2 import make_profile
+    from auto_ext.model.pdk import LvsDeckSet, LvsDeckVariant, QrcDeck
+
+    wa = workarea.as_posix()
+    return make_profile(
+        layer_map=f"{wa}/fake/layers.map",
+        lvs_decks=LvsDeckSet(
+            dir_expr="$calibre_source_added_place|parent",
+            variants=[LvsDeckVariant(name="wodio", rules_suffix="wodio")],
+            default_variant="wodio",
+        ),
+        qrc=QrcDeck(
+            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
+        ),
+        env_overrides={
+            "WORK_ROOT": wa,
+            "WORK_ROOT2": wa,
+            "VERIFY_ROOT": f"{wa}/fake/verify",
+            "SETUP_ROOT": f"{wa}/fake/setup",
+            "PDK_LAYER_MAP_FILE": f"{wa}/fake/layers.map",
+            "calibre_source_added_place": (
+                f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
+            ),
+        },
+    )
+
+
+def _recipe(**overrides):
+    """Reduction on, mirroring what these tables' ``jivaro:`` blocks said
+    before that switch moved from the task to the Recipe."""
+
+    from tests.support.v2 import make_recipe
+
+    fields = {"reduction": {"enabled": True}}
+    fields.update(overrides)
+    return make_recipe(**fields)
 
 
 @symlink_required
@@ -103,6 +141,8 @@ def test_parallel_two_jobs_both_pass(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
         max_workers=2,
     )
 
@@ -156,6 +196,8 @@ def test_parallel_preserves_task_order_in_summary(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
         max_workers=2,
     )
 
@@ -184,6 +226,8 @@ def test_parallel_one_failure_other_continues(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
         max_workers=2,
     )
 
@@ -223,14 +267,10 @@ def test_preflight_accepts_same_cell_when_pattern_discriminates(
   cell: inv
   lvs_layout_view: layout
   lvs_source_view: schematic
-  jivaro:
-    enabled: false
 - library: WB_PLL_DCO
   cell: inv
   lvs_layout_view: layout_test
   lvs_source_view: schematic
-  jivaro:
-    enabled: false
 """,
         encoding="utf-8",
     )
@@ -243,6 +283,8 @@ def test_preflight_accepts_same_cell_when_pattern_discriminates(
         stages=["si"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
         dry_run=True,
     )
     assert len(summary.tasks) == 2
@@ -272,6 +314,8 @@ def test_preflight_rejects_unknown_format_key(
             stages=["si"],
             auto_ext_root=tmp_path / "project_root",
             workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
             dry_run=True,
         )
 
@@ -299,16 +343,12 @@ def test_preflight_rejects_concurrent_workspace_sharing(
   lvs_source_view: schematic
   ground_net: vss
   out_file: av_ext_a
-  jivaro:
-    enabled: false
 - library: WB_PLL_DCO
   cell: inv
   lvs_layout_view: layout_test
   lvs_source_view: schematic
   ground_net: vss
   out_file: av_ext_b
-  jivaro:
-    enabled: false
 """,
         encoding="utf-8",
     )
@@ -321,6 +361,8 @@ def test_preflight_rejects_concurrent_workspace_sharing(
             stages=["si"],
             auto_ext_root=tmp_path / "project_root",
             workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
             max_workers=2,
             dry_run=True,
         )
@@ -357,14 +399,10 @@ def test_parallel_same_cell_allowed_when_run_slug_isolates(
   cell: inv
   lvs_layout_view: layout
   lvs_source_view: schematic
-  jivaro:
-    enabled: false
 - library: WB_PLL_DCO
   cell: inv
   lvs_layout_view: layout_test
   lvs_source_view: schematic
-  jivaro:
-    enabled: false
 """,
         encoding="utf-8",
     )
@@ -376,6 +414,8 @@ def test_parallel_same_cell_allowed_when_run_slug_isolates(
         stages=["si"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
         max_workers=2,
         dry_run=True,
     )
@@ -403,6 +443,8 @@ def test_jobs_one_takes_serial_path(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
         max_workers=1,
     )
 
@@ -450,6 +492,8 @@ def test_work_dir_setup_failure_is_recorded_not_raised(
         stages=["si", "calibre"],
         auto_ext_root=ae_root,
         workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
         max_workers=2,
         dry_run=True,
     )

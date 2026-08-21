@@ -303,7 +303,7 @@ options:
     choices_confidence: certain
     currently: jinja_var
     observed: true
-    source_ref: config/tasks.yaml:26
+    source_ref: examples/legacy/config/tasks.yaml:26
     lands_in:
       - {target: quantus.ext.cmd, section: output_db, option: -view_name, line: 54}
       - {target: jivaro.xml, section: general, option: inputView, line: 2}
@@ -846,7 +846,7 @@ options:
     default: $calibre_source_added_place|parent
     currently: jinja_var
     observed: true
-    source_ref: config/project.yaml:31
+    source_ref: examples/legacy/config/project.yaml:31
     lands_in:
       - {target: lvs.qci, section: lvs_rules, option: "*lvsRulesFile", line: 1}
     notes: >-
@@ -888,7 +888,7 @@ options:
     default: wodio
     currently: manifest_knob
     observed: true
-    source_ref: templates/calibre/calibre_lvs.qci.j2.manifest.yaml:5
+    source_ref: examples/legacy/templates/calibre/calibre_lvs.qci.j2.manifest.yaml:5
     question: Does the LVS deck directory hold suffixes other than wodio and widio?
     notes: >-
       One of the 7 knobs that exist today. Only "wodio" has ever been seen in
@@ -1809,7 +1809,7 @@ options:
     default: null
     currently: jinja_var
     observed: true
-    source_ref: config/project.yaml:35
+    source_ref: examples/legacy/config/project.yaml:35
     lands_in:
       - {target: lvs.qci, section: lvs_triggers, option: "*lvsPostTriggers", line: 26, quoting: tcl_brace}
       - {target: quantus.ext.cmd, section: extraction_setup, option: -parasitic_blocking_device_cells_file, line: 18}
@@ -1899,7 +1899,7 @@ options:
     default: 5000
     currently: manifest_knob
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:5
+    source_ref: examples/legacy/templates/quantus/ext.cmd.j2.manifest.yaml:5
     notes: >-
       The live specimen of the four-layer knob problem: manifest says 5000,
       project.yaml says 100, tasks.yaml says 200, and --knob can say a fourth
@@ -1919,7 +1919,7 @@ options:
     default: 0.01
     currently: manifest_knob
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:10
+    source_ref: examples/legacy/templates/quantus/ext.cmd.j2.manifest.yaml:10
     question: What value and unit do you normally use here?
     notes: >-
       DEFAULT AND UNIT DISAGREE WITH PHYSICS: 0.01 F is a 10 mF coupling
@@ -1942,7 +1942,7 @@ options:
     default: 0.001
     currently: manifest_knob
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:14
+    source_ref: examples/legacy/templates/quantus/ext.cmd.j2.manifest.yaml:14
     lands_in:
       - {target: quantus.ext.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_relative, line: 26, quoting: bare}
       - {target: quantus.dspf.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_relative, line: 26, quoting: bare}
@@ -1973,7 +1973,7 @@ options:
     default: 0.001
     currently: manifest_knob
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:18
+    source_ref: examples/legacy/templates/quantus/ext.cmd.j2.manifest.yaml:18
     notes: Catalog key carries the unit; the template variable is the bare "min_res".
     lands_in:
       - {target: quantus.ext.cmd, section: filter_res, option: -min_res, line: 29, quoting: bare}
@@ -2713,7 +2713,7 @@ options:
     default: 55.0
     currently: manifest_knob
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2.manifest.yaml:22
+    source_ref: examples/legacy/templates/quantus/ext.cmd.j2.manifest.yaml:22
     notes: >-
       The named example of parameterisation going crooked: -temperature and
       -technology_corner sit in the same process_technology statement, but
@@ -2946,7 +2946,7 @@ options:
     default: 14.0
     currently: jinja_var
     observed: true
-    source_ref: config/tasks.yaml:29
+    source_ref: examples/legacy/config/tasks.yaml:29
     notes: >-
       The draft called this an existing knob. It is not: the jivaro manifest
       declares no knobs at all, and the value comes from TaskSpec.jivaro, a
@@ -2969,7 +2969,7 @@ options:
     default: 2.0
     currently: jinja_var
     observed: true
-    source_ref: config/tasks.yaml:30
+    source_ref: examples/legacy/config/tasks.yaml:30
     notes: As reduction_frequency_limit_ghz -- a TaskSpec field, not a knob, and the "| default(2)" fallback goes away.
     lands_in:
       - {target: jivaro.xml, section: reduction, option: errorMax, line: 17}

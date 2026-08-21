@@ -1,29 +1,74 @@
-"""Load and validate ``project.yaml`` + ``tasks.yaml``.
+"""The workspace + DUT inputs the runner needs, and the door the v1 pair hits.
 
-Uses ``ruamel.yaml`` in roundtrip mode so comments survive for the GUI
-write-back path (Phase 5). Schemas are declared with pydantic v2 and
-``extra="forbid"`` so unknown fields fail loudly rather than being
-silently ignored.
+Two shapes reach :func:`auto_ext.core.runner.run_tasks`: a
+:class:`ProjectConfig` (where the Cadence work lands) and a list of
+:class:`TaskConfig` (which DUTs to run). Since the catalog took over
+rendering, that is *all* they carry -- the template slots, the four-layer
+``*.manifest.yaml`` knob merge, the ``paths`` vocabulary and the per-task
+override stack are gone, and with them every "which of my five override
+layers won?" question.
+
+Where the pair comes from
+-------------------------
+:func:`load_v2_config` is the live path: ``config/workspace.yaml`` +
+``config/cells.yaml`` (:mod:`auto_ext.model.workspace`,
+:mod:`auto_ext.model.cells`), adapted here into the two runner types. The
+adapters are deliberately thin and one-directional; they exist so the runner
+did not have to be rewritten around two new model classes in the same round
+that removed the old render path.
+
+:func:`load_project` / :func:`load_tasks` still read a ``project.yaml`` +
+``tasks.yaml`` pair, but only the reduced form. Any file still carrying a
+retired key (``templates``, ``knobs``, ``paths``, ``tech_name_env_vars``,
+``exclude``, ``jivaro_overrides``, ``label``, per-task ``dspf_out_path``) is
+refused by name with the migration command attached -- see
+:data:`RETIRED_PROJECT_KEYS` / :data:`RETIRED_TASK_KEYS` and
+:func:`_reject_retired_keys`. The v1 schema itself lives in
+:mod:`auto_ext.legacy_v1`, which only :mod:`auto_ext.migrate` reads.
+
+Fields with no runtime reader
+-----------------------------
+Three groups survive this round without one, listed here rather than
+scattered through the class bodies:
+
+* ``work_root`` / ``verify_root`` / ``setup_root`` never had one. They were
+  display shadows of ``$WORK_ROOT`` and friends.
+* ``tech_name`` / ``layer_map`` had one until the legacy render path was
+  deleted. Both now come from :class:`~auto_ext.model.pdk.PdkProfile` via
+  :func:`auto_ext.core.render.build_context`, so a value set here changes
+  nothing. They are still accepted so a project.yaml that has been reduced by
+  hand does not fail on them.
+* ``TaskConfig.jivaro`` / ``TaskConfig.continue_on_lvs_fail`` were the legacy
+  answers to "is reduction on" and "keep going past an LVS mismatch". Both
+  answers now come from the Recipe (``reduction.enabled`` /
+  ``policy.continue_on_lvs_fail``), which is why :func:`tasks_from_cells`
+  leaves them at their defaults.
+
+All five are on the list for the round that replaces ``ProjectConfig`` with
+:class:`~auto_ext.model.workspace.WorkspaceConfig` outright.
 
 List-valued task fields (``library``, ``cell``, ``lvs_layout_view``,
-``lvs_source_view``) are auto-expanded via nested loops in that fixed
+``lvs_source_view``) are still auto-expanded via nested loops in that fixed
 order so ``task_id`` assignment is reproducible.
 """
 
 from __future__ import annotations
 
-import copy
 import logging
 from collections import Counter
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from auto_ext.core.errors import ConfigError
+
+if TYPE_CHECKING:
+    from auto_ext.model.cells import CellBook
+    from auto_ext.model.workspace import WorkspaceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -39,109 +84,14 @@ class JivaroConfig(BaseModel):
     error_max: float | None = None
 
 
-class JivaroOverride(BaseModel):
-    """Per-cell partial override merged on top of ``TaskSpec.jivaro``.
-
-    Every field is optional; only the set fields displace the spec-level
-    default. Used by :attr:`TaskSpec.jivaro_overrides`.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool | None = None
-    frequency_limit: float | None = None
-    error_max: float | None = None
-
-
-class ExcludeMatch(BaseModel):
-    """Selector dropped from a :class:`TaskSpec` expansion.
-
-    At least one axis field must be set; an empty selector would match every
-    combination and is almost certainly a mistake. Match semantics: every
-    set field must equal the expanded task's corresponding axis value (AND).
-    Unset fields are treated as wildcards.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    library: str | None = None
-    cell: str | None = None
-    lvs_source_view: str | None = None
-    lvs_layout_view: str | None = None
-
-    @model_validator(mode="after")
-    def _must_set_at_least_one(self) -> "ExcludeMatch":
-        if not any(
-            v is not None
-            for v in (self.library, self.cell, self.lvs_source_view, self.lvs_layout_view)
-        ):
-            raise ValueError(
-                "exclude entry must set at least one of "
-                "library / cell / lvs_layout_view / lvs_source_view"
-            )
-        return self
-
-
-class TemplatePaths(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    calibre: Path | None = None
-    quantus: Path | None = None
-    jivaro: Path | None = None
-    si: Path | None = None
-
-    @field_validator("calibre", "quantus", "jivaro", "si", mode="before")
-    @classmethod
-    def _normalize_separators(cls, v: Any) -> Any:
-        # Project-internal template paths conventionally use POSIX
-        # separators. Accept Windows-style backslashes (a YAML edited on
-        # the dev box, deployed to Linux) by normalizing here, so the
-        # path string parses into a multi-component Path on Linux instead
-        # of one literal-backslash filename.
-        if isinstance(v, str):
-            return v.replace("\\", "/")
-        return v
-
-    @field_validator("calibre", "quantus", "jivaro", "si", mode="after")
-    @classmethod
-    def _reject_relative_traversal(cls, v: Path | None) -> Path | None:
-        # Reject ``..`` segments in *relative* template paths. A relative
-        # path with ``..`` would silently resolve through
-        # :func:`resolve_template_path`'s auto_ext-root or workarea
-        # fallback to a file outside the project tree (e.g. a copy-paste
-        # of ``../../etc/passwd`` from another tool's output). Absolute
-        # paths are still accepted — explicit absolute is the user's
-        # responsibility on a shared filesystem.
-        #
-        # Use the POSIX absolute-check (leading ``/``) for cross-platform
-        # consistency: production deploys to Linux, where YAMLs always
-        # use POSIX paths, but unit tests also run on Windows where
-        # ``Path("/abs").is_absolute()`` returns ``False`` (no drive).
-        if v is None:
-            return v
-        s = str(v).replace("\\", "/")
-        if s.startswith("/"):
-            return v
-        if ".." in v.parts:
-            raise ValueError(
-                f"template path {str(v)!r} contains '..'; "
-                "relative template paths must stay inside the project tree "
-                "(use an absolute path if you really need to escape it)"
-            )
-        return v
-
-
 class ProjectConfig(BaseModel):
-    """Schema for ``project.yaml``. ``source_path`` and ``raw`` are filled
-    in by :func:`load_project` after validation and are excluded from
-    serialization so they do not round-trip back into YAML.
+    """Where this project's Cadence work lands.
 
-    All path-root fields are optional: after sourcing your Cadence/PDK
-    setup, the values live in shell env vars (``$WORK_ROOT`` etc.) and
-    Auto_ext reads them directly via ``extraction_output_dir`` /
-    ``intermediate_dir`` / ``layer_map``. Setting the fields explicitly
-    is only useful for the GUI env panel (Phase 5) and for ``migrate``
-    to round-trip (Phase 4).
+    ``source_path`` and ``raw`` are filled in by :func:`load_project` after
+    validation and are excluded from serialization so they do not round-trip
+    back into YAML.
+
+    See the module docstring for which fields no longer have a runtime reader.
     """
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
@@ -157,82 +107,41 @@ class ProjectConfig(BaseModel):
     #: If None, resolved at render time via ``$USER`` / ``$USERNAME`` / fallback.
     employee_id: str | None = None
 
-    #: Cadence tech library name (e.g. ``HN001``) surfaced in Quantus
-    #: ``-technology_name``. Populated by ``init-project`` from
-    #: ``aggregate_pdk_tokens``; leave ``None`` for projects that do not
-    #: reference a tech name in any template. When ``None``, runner falls
-    #: back to auto-derivation from ``tech_name_env_vars``.
+    #: Cadence tech library name (e.g. ``HN001``). Superseded by
+    #: :attr:`auto_ext.model.pdk.PdkProfile.tech_name`; see the module docstring.
     tech_name: str | None = None
 
-    #: Env vars consulted, in order, when ``tech_name`` is ``None``. First
-    #: var whose value is non-empty wins; tech name = ``Path(value).parent.name``.
-    #: Override per-project if the local PDK uses different env var names.
-    tech_name_env_vars: list[str] = Field(
-        default_factory=lambda: [
-            "PDK_TECH_FILE",
-            "PDK_LAYER_MAP_FILE",
-            "PDK_DISPLAY_FILE",
-        ]
-    )
-
-    #: Path expressions referenced by templates as ``[[<key>]]``. Each value
-    #: is a string that may mix env-var references (``$X`` / ``${X}`` /
-    #: ``$env(X)``) with literal segments, optionally followed by ``|parent``
-    #: to take ``Path.parent`` after env substitution. The whole expression
-    #: is resolved at render time via :func:`resolve_path_expr` and the
-    #: result is exposed in the Jinja context under the same key.
-    #:
-    #: Canonical entries used by the bundled templates:
-    #:   - ``calibre_lvs_dir``: directory holding ``<basename>.<variant>.qcilvs``
-    #:     rules files. Typical value: ``$calibre_source_added_place|parent``.
-    #:   - ``qrc_deck_dir``: directory holding ``query_cmd`` /
-    #:     ``preserveCellList.txt`` for QRC. Usually project-supplied;
-    #:     no widely-shared env-var convention.
-    #:
-    #: Projects can add custom keys (e.g. ``paths.foo: $X/bar``) and any
-    #: template ``[[foo]]`` reference picks the value up automatically.
-    paths: dict[str, str] = Field(default_factory=dict)
-
-    #: Default refers to the env var set by the PDK setup; override only if
-    #: you need a specific file different from ``$PDK_LAYER_MAP_FILE``.
+    #: Superseded by :attr:`auto_ext.model.pdk.PdkProfile.layer_map`; see the
+    #: module docstring.
     layer_map: Path = Path("${PDK_LAYER_MAP_FILE}")
 
+    #: Env values layered under the profile's own overrides at resolve time.
     env_overrides: dict[str, str] = Field(default_factory=dict)
+
     #: Per-task extraction output directory. Env vars (``$X`` / ``${X}`` /
     #: ``$env(X)``) are substituted via :func:`resolve_env`, then Python
-    #: ``str.format`` substitutes axis-derived keys. Supported keys:
-    #: ``{cell}``, ``{library}``, ``{task_id}``, ``{lvs_layout_view}``,
-    #: ``{lvs_source_view}``. Add a discriminator key when you want same-
-    #: cell tasks (e.g. two specs with different ``knobs`` for the same
-    #: cell) to land in separate dirs.
+    #: ``str.format`` substitutes axis-derived keys. Supported keys are
+    #: :data:`auto_ext.core.runner._OUTPUT_DIR_FORMAT_KEYS`.
     extraction_output_dir: str = "${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"
     intermediate_dir: str = "${WORK_ROOT2}"
-    #: Per-task DSPF output file path. Templated string supporting
-    #: env vars (``$X`` / ``${X}`` / ``$env(X)``), path tokens that
-    #: reference other resolved fields (``${output_dir}``,
-    #: ``${intermediate_dir}``, ``${calibre_lvs_dir}`` and any
-    #: ``project.paths.*`` key), and Python ``str.format`` keys
-    #: (``{cell}``, ``{library}``, ``{task_id}``). The runner resolves
-    #: env + path tokens first, then applies ``.format(...)`` so the
-    #: final value lands in the Jinja context as ``[[dspf_out_path]]``.
-    #: Per-task overrides via :attr:`TaskSpec.dspf_out_path` win when set.
-    #: Default reproduces the legacy ``intermediate_dir/<cell>.dspf`` output.
+    #: Per-task DSPF output file path. Templated string supporting env vars
+    #: (``$X`` / ``${X}`` / ``$env(X)``), path tokens that reference other
+    #: resolved fields (``${output_dir}``, ``${intermediate_dir}``,
+    #: ``${calibre_lvs_dir}`` and the profile's extra path keys), and Python
+    #: ``str.format`` keys (``{cell}``, ``{library}``, ``{task_id}``). The
+    #: runner resolves env + path tokens first, then applies ``.format(...)``
+    #: so the final value lands in the Jinja context as ``[[dspf_out_path]]``.
     dspf_out_path: str = "${WORK_ROOT2}/{cell}.dspf"
-    templates: TemplatePaths = Field(default_factory=TemplatePaths)
-
-    #: Project-wide knob overrides keyed by stage name, e.g.
-    #: ``{"quantus": {"exclude_floating_nets_limit": 100}}``. Values are
-    #: validated against the template manifest at render time, not here.
-    knobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     source_path: Path | None = Field(default=None, exclude=True)
     raw: Any = Field(default=None, exclude=True)
 
 
 class TaskSpec(BaseModel):
-    """Raw ``tasks.yaml`` entry before expansion. List-valued fields are
-    allowed on the expandable axes; scalar values are accepted and treated
-    as single-element lists during expansion.
+    """Raw ``tasks.yaml`` entry before expansion.
+
+    List-valued fields are allowed on the four identity axes; scalar values
+    are accepted and treated as single-element lists during expansion.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -241,41 +150,14 @@ class TaskSpec(BaseModel):
     cell: str | list[str]
     lvs_source_view: str | list[str] = "schematic"
     lvs_layout_view: str | list[str]
-    templates: TemplatePaths = Field(default_factory=TemplatePaths)
     ground_net: str = "vss"
     out_file: str | None = None
-    #: Optional human-readable display name for this spec. Pure UX sugar:
-    #: when set, the GUI's Run-tab status tree row, log header, and task
-    #: picker render this value instead of the auto-derived ``task_id``
-    #: (``library__cell__layout__source``). The canonical ``task_id`` is
-    #: always preserved for the on-disk paths (``runs/task_<id>/``,
-    #: ``logs/task_<id>/``) and internal lookups — renaming ``task_id``
-    #: would diverge from prior runs. Defaults to ``None`` (render the
-    #: ``task_id`` verbatim). Empty strings should round-trip to ``None``
-    #: so the YAML stays clean.
-    label: str | None = None
     jivaro: JivaroConfig = Field(default_factory=JivaroConfig)
     continue_on_lvs_fail: bool = False
-    #: Per-task override for :attr:`ProjectConfig.dspf_out_path`. ``None``
-    #: (default) inherits the project value. Same templating grammar as
-    #: the project field.
-    dspf_out_path: str | None = None
-    #: Per-task knob overrides. Same shape as :attr:`ProjectConfig.knobs`.
-    #: Precedence is applied at render time (task > project > manifest).
-    knobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    #: Cartesian-product combinations to drop after expansion. Each entry is
-    #: a selector dict (``{cell: AMP2, lvs_layout_view: layout_test}``);
-    #: every set field must equal the expanded task's axis value.
-    exclude: list[ExcludeMatch] = Field(default_factory=list)
-    #: Per-cell overrides layered on top of :attr:`jivaro`. Key is the cell
-    #: name from :attr:`cell`; values whose field is ``None`` fall through
-    #: to the spec-level default. Cells absent from :attr:`cell` are silently
-    #: ignored at expansion time (stale overrides do not break the load).
-    jivaro_overrides: dict[str, JivaroOverride] = Field(default_factory=dict)
 
 
 class TaskConfig(BaseModel):
-    """A fully scalarized, project-defaults-merged task. Immutable once built."""
+    """A fully scalarized task. Immutable once built."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -284,20 +166,75 @@ class TaskConfig(BaseModel):
     cell: str
     lvs_source_view: str
     lvs_layout_view: str
-    templates: TemplatePaths
     ground_net: str
     out_file: str | None
-    #: Per-spec display label propagated unchanged from
-    #: :attr:`TaskSpec.label`. The same value lands on every expanded
-    #: child of a spec — ``label`` is display sugar, not an expansion
-    #: axis. ``None`` means "render the auto-derived ``task_id``".
-    label: str | None = None
+    #: What a UI prints instead of :attr:`task_id`. Filled from
+    #: :attr:`~auto_ext.model.cells.CellEntry.display_name`; ``tasks.yaml``
+    #: cannot set it (``TaskSpec.label`` is retired), so it is ``None`` on that
+    #: path and the record falls back to the key.
+    display_name: str | None = None
     jivaro: JivaroConfig
     continue_on_lvs_fail: bool
-    dspf_out_path: str | None = None
-    knobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     spec_index: int
     expansion_index: int
+
+
+# ---- v1 rejection ----------------------------------------------------------
+
+#: Keys a v1 ``project.yaml`` carried that this schema no longer accepts,
+#: mapped to where the setting lives now. Read by :func:`load_project` to turn
+#: a raw pydantic ``extra_forbidden`` error into a sentence naming the fix.
+RETIRED_PROJECT_KEYS: dict[str, str] = {
+    "templates": (
+        "the catalog picks the template per render target "
+        "(`auto-ext catalog list`)"
+    ),
+    "knobs": "recipe fields (`auto-ext recipe show <id>`)",
+    "paths": "the PdkProfile's deck paths and extra_paths",
+    "tech_name_env_vars": "the PdkProfile's tech_name_env_vars",
+}
+
+#: Same, for one entry of a v1 ``tasks.yaml``.
+RETIRED_TASK_KEYS: dict[str, str] = {
+    "templates": "the catalog's render targets",
+    "knobs": "recipe fields",
+    "label": "cells.yaml `display_name`",
+    "exclude": "cells.yaml rows are explicit; use `enabled: false` to skip one",
+    "jivaro_overrides": "a second recipe, run separately",
+    "dspf_out_path": "workspace.yaml `dspf_out_pattern`",
+}
+
+_MIGRATE_HINT = (
+    "Run `auto-ext migrate --config-dir {directory} --write` to convert this "
+    "project. It writes config/workspace.yaml, config/cells.yaml, "
+    "config/profiles/<id>.yaml, config/resources.yaml and recipes/*.yaml, "
+    "reports where every field went, and leaves both source files untouched."
+)
+
+
+def _reject_retired_keys(
+    data: Any, path: Path, retired: dict[str, str], *, where: str
+) -> None:
+    """Refuse a v1 file by name before pydantic gets a chance to be cryptic.
+
+    ``extra="forbid"`` would already stop the load, but with a nested
+    ``ValidationError`` that says "extra_forbidden" four times and never says
+    *migrate*. The user's next action is one command; this makes that the
+    thing they read.
+    """
+
+    if not isinstance(data, dict):
+        return
+    found = [key for key in retired if key in data]
+    if not found:
+        return
+    moved = "; ".join(f"`{key}` -> {retired[key]}" for key in found)
+    raise ConfigError(
+        f"{path}{where} is in the v1 format: it still carries "
+        f"{sorted(found)}. Those settings moved out of this file "
+        f"({moved}). "
+        + _MIGRATE_HINT.format(directory=path.parent)
+    )
 
 
 # ---- loaders ---------------------------------------------------------------
@@ -306,14 +243,17 @@ class TaskConfig(BaseModel):
 def load_project(path: Path) -> ProjectConfig:
     """Load ``project.yaml`` via ruamel.yaml and validate with pydantic.
 
-    Raises :class:`ConfigError` on any parse or schema failure. The returned
-    model has ``source_path`` set to ``path.resolve()`` and ``raw`` set to
-    the original CommentedMap (for Phase 5 GUI write-back).
+    Raises :class:`ConfigError` on any parse or schema failure, and on any
+    surviving v1 key with the migration command attached. The returned model
+    has ``source_path`` set to ``path.resolve()`` and ``raw`` set to the
+    original CommentedMap.
     """
 
     data = _load_yaml(path)
     if not isinstance(data, dict):
         raise ConfigError(f"{path}: expected a mapping at top level, got {type(data).__name__}")
+
+    _reject_retired_keys(data, path, RETIRED_PROJECT_KEYS, where="")
 
     try:
         project = ProjectConfig.model_validate(_plain(data))
@@ -347,9 +287,9 @@ def load_tasks_with_raw(
     """Same as :func:`load_tasks` but also returns the raw ruamel tree.
 
     The second element is the outer YAML structure (``CommentedSeq`` for a
-    bare-list file, ``CommentedMap`` for the ``tasks:`` wrapped form). Used
-    by the Phase 5 GUI to write back spec edits via
-    :func:`apply_tasks_edits` while preserving top-level comments.
+    bare-list file, ``CommentedMap`` for the ``tasks:`` wrapped form), used by
+    :func:`apply_tasks_edits` to write spec edits back while preserving
+    top-level comments.
     """
 
     data = _load_yaml(path)
@@ -364,12 +304,15 @@ def load_tasks_with_raw(
 
     tasks: list[TaskConfig] = []
     for spec_index, entry in enumerate(entries):
+        _reject_retired_keys(
+            entry, path, RETIRED_TASK_KEYS, where=f" [entry #{spec_index}]"
+        )
         try:
             spec = TaskSpec.model_validate(_plain(entry))
         except ValidationError as exc:
             raise ConfigError(f"{path} [entry #{spec_index}]: {exc}") from exc
 
-        tasks.extend(_expand_spec(spec, spec_index, project, path))
+        tasks.extend(_expand_spec(spec, spec_index, path))
 
     _warn_on_duplicate_task_ids(tasks)
 
@@ -391,6 +334,89 @@ def _tasks_sequence(data: Any, path: Path) -> Any:
     if not isinstance(entries, list):
         raise ConfigError(f"{path}: 'tasks' must be a list")
     return entries
+
+
+# ---- workspace.yaml + cells.yaml -> the runner's two inputs -----------------
+
+
+def load_v2_config(config_dir: Path) -> tuple[ProjectConfig, "CellBook"]:
+    """Load ``config/workspace.yaml`` + ``config/cells.yaml`` from ``config_dir``.
+
+    The :class:`~auto_ext.model.workspace.WorkspaceConfig` is adapted straight
+    into a :class:`ProjectConfig`; the :class:`~auto_ext.model.cells.CellBook`
+    is returned whole, because callers need its ``pdk_profile`` sibling and the
+    per-row ``enabled`` flag, and :func:`tasks_from_cells` is a separate step
+    so a caller can filter rows first.
+
+    Raises :class:`ConfigError` when either file is missing, so the caller can
+    fall back to the v1 pair and produce the migration hint.
+    """
+
+    from auto_ext.model.cells import CELLS_FILENAME, load_cells
+    from auto_ext.model.workspace import WORKSPACE_FILENAME, load_workspace
+
+    workspace_path = config_dir / WORKSPACE_FILENAME
+    cells_path = config_dir / CELLS_FILENAME
+    for candidate in (workspace_path, cells_path):
+        if not candidate.is_file():
+            raise ConfigError(f"config file not found: {candidate}")
+
+    workspace = load_workspace(workspace_path)
+    book = load_cells(cells_path)
+    project = project_from_workspace(workspace)
+    project.source_path = workspace_path.resolve()
+    return project, book
+
+
+def project_from_workspace(workspace: "WorkspaceConfig") -> ProjectConfig:
+    """Adapt a :class:`~auto_ext.model.workspace.WorkspaceConfig` for the runner.
+
+    Only the three path patterns cross over. ``layer_map`` / ``tech_name`` /
+    ``env_overrides`` deliberately do not: on the catalog render path those
+    come from the :class:`~auto_ext.model.pdk.PdkProfile`, and filling them in
+    here from a second source is how two sources of truth start.
+    """
+
+    return ProjectConfig(
+        extraction_output_dir=workspace.output_dir_pattern,
+        intermediate_dir=workspace.intermediate_dir,
+        dspf_out_path=workspace.dspf_out_pattern,
+    )
+
+
+def tasks_from_cells(book: "CellBook", *, include_disabled: bool = False) -> list[TaskConfig]:
+    """Turn a :class:`~auto_ext.model.cells.CellBook` into the runner's task list.
+
+    ``enabled: false`` rows are dropped unless ``include_disabled`` -- that
+    flag is the "temporarily not this one" half of the old ``exclude``, so
+    honouring it here is what makes the checkbox mean anything.
+
+    ``task_id`` is :attr:`~auto_ext.model.cells.CellEntry.key`, which is
+    spelled exactly like the legacy ``task_id``, so a migrated run history
+    still matches up by DUT.
+
+    ``jivaro`` and ``continue_on_lvs_fail`` are left at their defaults: the
+    Recipe owns both answers now (see the module docstring).
+    """
+
+    rows = [row for row in book.cells if include_disabled or row.enabled]
+    return [
+        TaskConfig(
+            task_id=row.key,
+            library=row.library,
+            cell=row.cell,
+            lvs_source_view=row.source_view,
+            lvs_layout_view=row.layout_view,
+            ground_net=row.ground_net,
+            out_file=row.out_file,
+            display_name=row.display_name,
+            jivaro=JivaroConfig(),
+            continue_on_lvs_fail=False,
+            spec_index=index,
+            expansion_index=0,
+        )
+        for index, row in enumerate(rows)
+    ]
 
 
 # ---- internals -------------------------------------------------------------
@@ -432,22 +458,9 @@ def _scalarize(value: str | list[str], field: str, spec_index: int, source: Path
     return [value]
 
 
-def _merge_templates(spec_tp: TemplatePaths, project: ProjectConfig | None) -> TemplatePaths:
-    if project is None:
-        return spec_tp
-    proj_tp = project.templates
-    return TemplatePaths(
-        calibre=spec_tp.calibre or proj_tp.calibre,
-        quantus=spec_tp.quantus or proj_tp.quantus,
-        jivaro=spec_tp.jivaro or proj_tp.jivaro,
-        si=spec_tp.si or proj_tp.si,
-    )
-
-
 def _expand_spec(
     spec: TaskSpec,
     spec_index: int,
-    project: ProjectConfig | None,
     source: Path,
 ) -> list[TaskConfig]:
     libs = _scalarize(spec.library, "library", spec_index, source)
@@ -455,19 +468,12 @@ def _expand_spec(
     layouts = _scalarize(spec.lvs_layout_view, "lvs_layout_view", spec_index, source)
     sources = _scalarize(spec.lvs_source_view, "lvs_source_view", spec_index, source)
 
-    merged_templates = _merge_templates(spec.templates, project)
-
     result: list[TaskConfig] = []
     expansion_index = 0
     for library in libs:
         for cell in cells:
             for layout in layouts:
                 for src in sources:
-                    if _is_excluded(spec.exclude, library, cell, layout, src):
-                        continue
-                    jivaro = _merge_jivaro_override(
-                        spec.jivaro, spec.jivaro_overrides.get(cell)
-                    )
                     result.append(
                         TaskConfig(
                             task_id=f"{library}__{cell}__{layout}__{src}",
@@ -475,62 +481,16 @@ def _expand_spec(
                             cell=cell,
                             lvs_source_view=src,
                             lvs_layout_view=layout,
-                            templates=merged_templates,
                             ground_net=spec.ground_net,
                             out_file=spec.out_file,
-                            label=spec.label,
-                            jivaro=jivaro,
+                            jivaro=spec.jivaro,
                             continue_on_lvs_fail=spec.continue_on_lvs_fail,
-                            dspf_out_path=spec.dspf_out_path,
-                            knobs=copy.deepcopy(spec.knobs),
                             spec_index=spec_index,
                             expansion_index=expansion_index,
                         )
                     )
                     expansion_index += 1
-    if not result and (libs and cells and layouts and sources):
-        raise ConfigError(
-            f"{source} [entry #{spec_index}]: exclude list dropped every "
-            f"combination; spec produces zero tasks"
-        )
     return result
-
-
-def _is_excluded(
-    excludes: list[ExcludeMatch],
-    library: str,
-    cell: str,
-    layout: str,
-    source: str,
-) -> bool:
-    for match in excludes:
-        if match.library is not None and match.library != library:
-            continue
-        if match.cell is not None and match.cell != cell:
-            continue
-        if match.lvs_layout_view is not None and match.lvs_layout_view != layout:
-            continue
-        if match.lvs_source_view is not None and match.lvs_source_view != source:
-            continue
-        return True
-    return False
-
-
-def _merge_jivaro_override(
-    base: JivaroConfig, override: JivaroOverride | None
-) -> JivaroConfig:
-    if override is None:
-        return base
-    update: dict[str, Any] = {}
-    if override.enabled is not None:
-        update["enabled"] = override.enabled
-    if override.frequency_limit is not None:
-        update["frequency_limit"] = override.frequency_limit
-    if override.error_max is not None:
-        update["error_max"] = override.error_max
-    if not update:
-        return base
-    return base.model_copy(update=update)
 
 
 def _warn_on_duplicate_task_ids(tasks: list[TaskConfig]) -> None:
@@ -544,8 +504,6 @@ def dump_project_yaml(project: ProjectConfig) -> str:
     """Serialize a :class:`ProjectConfig`'s original comment tree back to YAML.
 
     Available only when ``project.raw`` is present (set by :func:`load_project`).
-    Used by the Phase 5 GUI write-back path. Not used by Phase 2 tests; here
-    so the ``raw`` field has a concrete consumer documented.
     """
 
     if project.raw is None:
@@ -576,49 +534,29 @@ _EDIT_SCALAR_KEYS = frozenset(
 # parent → allowed children, or None for "arbitrary child keys"
 _EDIT_NESTED_KEYS: dict[str, frozenset[str] | None] = {
     "env_overrides": None,  # env var names are arbitrary
-    "paths": None,  # path keys are user-extensible
-    "templates": frozenset({"calibre", "quantus", "jivaro", "si"}),
 }
-
-# Stages allowed as the middle segment of a ``knobs.<stage>.<name>`` edit.
-# Hard-coded here to keep ``core/config`` runner-free; must mirror
-# ``runner.STAGE_ORDER``. If a new stage is added there, mirror it here.
-_KNOB_STAGES: frozenset[str] = frozenset({"si", "calibre", "quantus", "jivaro"})
 
 
 def apply_project_edits(raw: Any, edits: dict[str, Any]) -> None:
     """Mutate a ruamel ``CommentedMap`` in place per ``edits``.
 
-    Keys are flat (``tech_name``), dotted for the known nested mappings
-    (``runset_versions.lvs``, ``env_overrides.FOO``, ``templates.calibre``),
-    or three-segment for project-level knob overrides
-    (``knobs.<stage>.<name>``). A value of ``None`` removes the key; any
+    Keys are flat (``tech_name``) or dotted for the one remaining nested
+    mapping (``env_overrides.FOO``). A value of ``None`` removes the key; any
     other value overwrites. Comments attached to existing keys survive;
-    newly-introduced keys appear without leading comments (expected — the
-    dump is user-driven).
+    newly-introduced keys appear without leading comments (expected — the dump
+    is user-driven).
 
-    Deleting the last child of a nested mapping also prunes the parent,
-    so ``env_overrides: {}`` does not linger after every override is
-    cleared. The same cascading prune applies through both levels of a
-    ``knobs.<stage>.<name>`` delete.
+    Deleting the last child of a nested mapping also prunes the parent, so
+    ``env_overrides: {}`` does not linger after every override is cleared.
 
-    Raises :class:`ConfigError` on unknown keys to catch typos before
-    they disappear silently into the YAML.
+    Raises :class:`ConfigError` on unknown keys to catch typos before they
+    disappear silently into the YAML.
     """
 
     if raw is None:
         raise ConfigError("apply_project_edits: raw CommentedMap is None")
 
     for key, value in edits.items():
-        # Normalize Windows backslashes in template path strings so the
-        # YAML on disk stays POSIX-style regardless of the OS the GUI
-        # was saved on. Mirrors the load-side TemplatePaths validator.
-        if (
-            key.startswith("templates.")
-            and isinstance(value, str)
-            and "\\" in value
-        ):
-            value = value.replace("\\", "/")
         parts = key.split(".")
         if len(parts) == 1:
             if key not in _EDIT_SCALAR_KEYS:
@@ -638,23 +576,10 @@ def apply_project_edits(raw: Any, edits: dict[str, Any]) -> None:
                     f"(allowed under {parent!r}: {sorted(allowed)})"
                 )
             _apply_nested_edit(raw, parent, child, value)
-        elif len(parts) == 3:
-            parent, stage, name = parts
-            if parent != "knobs":
-                raise ConfigError(
-                    f"apply_project_edits: unknown key {key!r} "
-                    "(only knobs.<stage>.<name> is supported as a 3-level key)"
-                )
-            if stage not in _KNOB_STAGES:
-                raise ConfigError(
-                    f"apply_project_edits: unknown knob stage in {key!r} "
-                    f"(allowed: {sorted(_KNOB_STAGES)})"
-                )
-            _apply_doubly_nested_edit(raw, parent, stage, name, value)
         else:
             raise ConfigError(
                 f"apply_project_edits: too many dotted segments in {key!r} "
-                "(max 3: knobs.<stage>.<name>)"
+                "(max 2: env_overrides.<VAR>)"
             )
 
 
@@ -670,42 +595,12 @@ def _apply_nested_edit(raw: Any, parent: str, child: str, value: Any) -> None:
     raw[parent][child] = value
 
 
-def _apply_doubly_nested_edit(
-    raw: Any, parent: str, child: str, grandchild: str, value: Any
-) -> None:
-    """Two-level set/delete with cascading prune.
-
-    On delete (``value is None``), removes ``raw[parent][child][grandchild]``
-    and prunes ``child`` if it becomes empty, then ``parent`` if that
-    leaves it empty. On set, creates intermediate mappings as needed.
-    """
-    if value is None:
-        if (
-            parent in raw
-            and isinstance(raw[parent], dict)
-            and child in raw[parent]
-            and isinstance(raw[parent][child], dict)
-            and grandchild in raw[parent][child]
-        ):
-            del raw[parent][child][grandchild]
-            if not raw[parent][child]:
-                del raw[parent][child]
-            if not raw[parent]:
-                del raw[parent]
-        return
-    if parent not in raw or not isinstance(raw[parent], dict):
-        raw[parent] = {}
-    if child not in raw[parent] or not isinstance(raw[parent][child], dict):
-        raw[parent][child] = {}
-    raw[parent][child][grandchild] = value
-
-
 def dump_tasks_yaml(raw: Any) -> str:
     """Serialize a tasks.yaml raw tree back to YAML text.
 
     ``raw`` is the tree returned by :func:`load_tasks_with_raw` (either a
     ruamel ``CommentedSeq`` or a ``CommentedMap`` wrapping a ``tasks:`` key).
-    Symmetric with :func:`dump_project_yaml` for the Phase 5 GUI write-back.
+    Symmetric with :func:`dump_project_yaml`.
     """
 
     if raw is None:

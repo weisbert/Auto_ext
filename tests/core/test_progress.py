@@ -33,6 +33,8 @@ from auto_ext.core.progress import (
     TaskStatus,
 )
 from auto_ext.core.runner import run_tasks
+from auto_ext.model.pdk import PdkProfile
+from auto_ext.model.recipe import Recipe
 
 
 # ---- SpyReporter + helpers -------------------------------------------------
@@ -95,7 +97,11 @@ def test_spy_reporter_is_a_progress_reporter() -> None:
 
 
 def test_single_task_dry_run_emits_full_event_sequence(
-    project_tools_config: Path, workarea: Path, tmp_path: Path
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
     """Happy-path sequence: run_start → task_start → stage_start/end × N → task_end → run_end."""
     project, tasks = _load(project_tools_config)
@@ -107,6 +113,8 @@ def test_single_task_dry_run_emits_full_event_sequence(
         stages=["si", "calibre"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=recipe,
+        profile=pdk_profile,
         dry_run=True,
         reporter=reporter,
     )
@@ -131,6 +139,8 @@ def test_stage_failure_emits_synthetic_skipped_for_remaining(
     mocks_on_path: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
     """When calibre fails, quantus + jivaro emit start+end(SKIPPED) pairs.
 
@@ -147,6 +157,8 @@ def test_stage_failure_emits_synthetic_skipped_for_remaining(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=recipe,
+        profile=pdk_profile,
         reporter=reporter,
     )
 
@@ -171,9 +183,22 @@ def test_jivaro_disabled_emits_synthetic_skipped_pair(
     project_tools_config: Path,
     workarea: Path,
     tmp_path: Path,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
+    """``reduction.enabled: false`` skips the stage; it does not delete it.
+
+    A GUI stage tree keys on the pair: an ``on_stage_start`` with no matching
+    ``on_stage_end`` leaves a row stuck at "running", and a stage that never
+    starts at all leaves the user wondering whether they asked for it. The
+    switch moved from ``TaskConfig.jivaro.enabled`` to the Recipe when the
+    catalog took over rendering; the event contract did not move with it.
+    """
+
     project, tasks = _load(project_tools_config)
-    tasks = [t.model_copy(update={"jivaro": t.jivaro.model_copy(update={"enabled": False})}) for t in tasks]
+    off = recipe.model_copy(
+        update={"reduction": recipe.reduction.model_copy(update={"enabled": False})}
+    )
     reporter = SpyReporter()
 
     run_tasks(
@@ -182,16 +207,53 @@ def test_jivaro_disabled_emits_synthetic_skipped_pair(
         stages=["si", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=off,
+        profile=pdk_profile,
         dry_run=True,
         reporter=reporter,
     )
 
     # Both a start and an end for jivaro even though no work ran.
-    task_id = tasks[0].task_id
     jivaro_events = [e for e in reporter.events if len(e) >= 3 and e[2] == "jivaro"]
     kinds = [e[0] for e in jivaro_events]
     assert kinds == ["stage_start", "stage_end"]
     assert jivaro_events[1][3] == StageStatus.SKIPPED
+
+
+def test_jivaro_enabled_in_the_recipe_actually_runs_the_stage(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
+) -> None:
+    """The other half of the switch: with reduction on, jivaro is not skipped.
+
+    Without this, the test above passes for a recipe whose stage list simply
+    never contained jivaro, which is a different bug wearing the same result.
+    """
+
+    project, tasks = _load(project_tools_config)
+    on = recipe.model_copy(
+        update={"reduction": recipe.reduction.model_copy(update={"enabled": True})}
+    )
+    reporter = SpyReporter()
+
+    run_tasks(
+        project,
+        tasks,
+        stages=["si", "jivaro"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        recipe=on,
+        profile=pdk_profile,
+        dry_run=True,
+        reporter=reporter,
+    )
+
+    jivaro_events = [e for e in reporter.events if len(e) >= 3 and e[2] == "jivaro"]
+    assert [e[0] for e in jivaro_events] == ["stage_start", "stage_end"]
+    assert jivaro_events[1][3] is not StageStatus.SKIPPED
 
 
 # ---- Parallel ordering ----------------------------------------------------
@@ -203,6 +265,8 @@ def test_parallel_per_task_event_sequence_is_ordered(
     mocks_on_path: Path,
     tmp_path: Path,
     can_symlink: bool,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
     """In parallel mode, events for each task_id must be in per-task order.
 
@@ -230,6 +294,8 @@ def test_parallel_per_task_event_sequence_is_ordered(
         stages=["si", "strmout"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=recipe,
+        profile=pdk_profile,
         max_workers=2,
         reporter=reporter,
     )
@@ -253,7 +319,11 @@ def test_parallel_per_task_event_sequence_is_ordered(
 
 
 def test_cancel_between_stages_marks_remaining_cancelled(
-    project_tools_config: Path, workarea: Path, tmp_path: Path
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
     """Cancel fires after stage 1 ends; stage 2 emits CANCELLED, stage 3 SKIPPED."""
     project, tasks = _load(project_tools_config)
@@ -276,6 +346,8 @@ def test_cancel_between_stages_marks_remaining_cancelled(
         stages=["si", "strmout", "calibre"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=recipe,
+        profile=pdk_profile,
         dry_run=True,
         reporter=reporter,
         cancel_token=token,
@@ -293,7 +365,11 @@ def test_cancel_between_stages_marks_remaining_cancelled(
 
 
 def test_cancel_before_any_stage_marks_first_as_cancelled(
-    project_tools_config: Path, workarea: Path, tmp_path: Path
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
     """Cancel set before run_tasks starts dispatching: first stage = CANCELLED."""
     project, tasks = _load(project_tools_config)
@@ -307,6 +383,8 @@ def test_cancel_before_any_stage_marks_first_as_cancelled(
         stages=["si", "calibre"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=recipe,
+        profile=pdk_profile,
         dry_run=True,
         reporter=reporter,
         cancel_token=token,
@@ -318,7 +396,11 @@ def test_cancel_before_any_stage_marks_first_as_cancelled(
 
 
 def test_reporter_exception_does_not_abort_run(
-    project_tools_config: Path, workarea: Path, tmp_path: Path
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
     """A reporter that raises must not propagate out of run_tasks.
 
@@ -340,6 +422,8 @@ def test_reporter_exception_does_not_abort_run(
         stages=["si", "calibre"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=recipe,
+        profile=pdk_profile,
         dry_run=True,
         reporter=reporter,
     )
@@ -435,7 +519,11 @@ def test_protocols_are_independent() -> None:
 
 
 def test_run_dir_event_arrives_before_the_first_stage(
-    project_tools_config: Path, workarea: Path, tmp_path: Path
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
     """The run directory has to be known while the run is still going.
 
@@ -452,6 +540,8 @@ def test_run_dir_event_arrives_before_the_first_stage(
         stages=["si", "calibre"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=recipe,
+        profile=pdk_profile,
         dry_run=True,
         reporter=reporter,
     )
@@ -478,6 +568,8 @@ def test_reporter_without_the_run_events_still_runs(
     workarea: Path,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
     """A reporter written before the run layer must not log an error per stage."""
     import logging
@@ -492,6 +584,8 @@ def test_reporter_without_the_run_events_still_runs(
         stages=["si", "calibre"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=recipe,
+        profile=pdk_profile,
         dry_run=True,
         reporter=reporter,
     )
@@ -502,7 +596,11 @@ def test_reporter_without_the_run_events_still_runs(
 
 
 def test_run_events_are_isolated_from_a_raising_reporter(
-    project_tools_config: Path, workarea: Path, tmp_path: Path
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    recipe: Recipe,
+    pdk_profile: PdkProfile,
 ) -> None:
     """A reporter that raises in the new callbacks must not abort the run
     either — same contract the original events already had."""
@@ -521,6 +619,8 @@ def test_run_events_are_isolated_from_a_raising_reporter(
         stages=["si"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
+        recipe=recipe,
+        profile=pdk_profile,
         dry_run=True,
         reporter=Exploding(),
     )

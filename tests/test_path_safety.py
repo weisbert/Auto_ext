@@ -15,13 +15,21 @@ Audit summary (verified by the tests below):
 - :func:`auto_ext.core.env.substitute_env` is pure ``str.replace`` /
   regex sub; values from ``env_overrides`` are interpolated as literals,
   never evaluated.
-- :class:`auto_ext.core.config.TemplatePaths` rejects ``..`` segments in
-  *relative* paths (added by this audit). Absolute paths are still
-  accepted as the user's explicit responsibility.
-- ``dspf_out_path`` / ``extraction_output_dir`` / ``intermediate_dir``
-  intentionally accept ``..`` (legitimate uses like
-  ``${WORK_ROOT}/../shared``); foot-gun left to the user. Documented
-  via :func:`pytest.xfail`.
+- **No user-supplied string reaches a template path any more.** The four
+  ``project.yaml`` template slots that this audit used to guard are gone;
+  which file backs a render target is catalog state, derived from the
+  package's own ``__file__``. What a user still writes is a
+  :attr:`~auto_ext.core.patch_models.TemplatePatch.template_id`, and that
+  is a *lookup key* compared against catalog target ids -- never joined
+  onto a directory.
+- The new attack surface is the **run slug**: it comes from a cell name or
+  a user's note and is spelled into a directory name.
+  :func:`~auto_ext.model.run.allocate_run_dir` refuses a slug that could
+  leave ``runs/``.
+- ``dspf_out_pattern`` / ``output_dir_pattern`` / ``intermediate_dir`` on
+  :class:`~auto_ext.model.workspace.WorkspaceConfig` intentionally accept
+  ``..`` (legitimate uses like ``${WORK_ROOT}/../shared``); foot-gun left
+  to the user. Documented via :func:`pytest.xfail`.
 """
 
 from __future__ import annotations
@@ -34,7 +42,8 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from auto_ext.core.config import ProjectConfig, TaskConfig, TemplatePaths
+from auto_ext.core import render as render_module
+from auto_ext.core.config import JivaroConfig, ProjectConfig, TaskConfig
 from auto_ext.core.env import substitute_env
 from auto_ext.tools import base as tools_base
 from auto_ext.tools.calibre import CalibreTool
@@ -45,6 +54,25 @@ from auto_ext.tools.strmout import StrmoutTool
 
 
 # ---- helpers ---------------------------------------------------------------
+
+
+def _fingerprint() -> Any:
+    """A minimal valid :class:`~auto_ext.core.patch_models.BaseFingerprint`.
+
+    The digests are not checked against anything here; the patch model only
+    requires that they are real 64-hex strings, and this audit is about the
+    ``template_id`` beside them.
+    """
+
+    from datetime import datetime, timezone
+
+    from auto_ext.core.patch_models import BaseFingerprint
+
+    return BaseFingerprint(
+        template_sha256="a" * 64,
+        masked_sha256="b" * 64,
+        captured_at=datetime(2026, 8, 21, 14, 32, 5, tzinfo=timezone.utc),
+    )
 
 
 def _path_safety_make_task(**overrides: Any) -> TaskConfig:
@@ -58,12 +86,9 @@ def _path_safety_make_task(**overrides: Any) -> TaskConfig:
         "cell": "cell",
         "lvs_source_view": "schematic",
         "lvs_layout_view": "layout",
-        "templates": TemplatePaths(),
         "ground_net": "vss",
         "out_file": None,
-        "jivaro": __import__(
-            "auto_ext.core.config", fromlist=["JivaroConfig"]
-        ).JivaroConfig(),
+        "jivaro": JivaroConfig(),
         "continue_on_lvs_fail": False,
         "spec_index": 0,
         "expansion_index": 0,
@@ -228,52 +253,37 @@ def test_path_safety_substitute_env_handles_metacharacters() -> None:
     assert result == "echo `whoami`; rm -rf /; \"x\""
 
 
-# ---- TemplatePaths rejects ``..`` in relative paths -----------------------
+# ---- the template path is no longer user-supplied at all ------------------
 
 
-@pytest.mark.parametrize(
-    "field_name",
-    ["calibre", "quantus", "jivaro", "si"],
-)
-@pytest.mark.parametrize(
-    "bad_path",
-    [
-        "../../etc/passwd",
-        "templates/../../../etc/passwd",
-        "../foo.j2",
-        "a/../../b.j2",
-    ],
-)
-def test_path_safety_template_paths_reject_relative_traversal(
-    field_name: str, bad_path: str
-) -> None:
-    """Relative template paths with ``..`` segments must fail validation."""
-    with pytest.raises(ValidationError) as excinfo:
-        TemplatePaths(**{field_name: bad_path})
-    assert ".." in str(excinfo.value)
+def test_path_safety_project_config_names_no_template_path() -> None:
+    """The four ``templates.*`` slots this audit used to guard are gone.
+
+    They were the only place a user string became a path that Auto_ext then
+    opened and executed as a Jinja template. Deleting the field deletes the
+    whole class of finding -- so the audit asserts the field's *absence*
+    rather than keeping validators for a shape nobody can write any more.
+    A project.yaml that still carries the key is refused by name.
+    """
+
+    assert "templates" not in ProjectConfig.model_fields
+    assert not [
+        name
+        for name in ProjectConfig.model_fields
+        if "template" in name
+    ]
 
 
-@pytest.mark.parametrize(
-    "good_path",
-    [
-        "templates/calibre/x.qci.j2",
-        "templates/si/default.env.j2",
-        "imported.qci.j2",
-        "/abs/path/with/../but/absolute.j2",  # absolute paths exempt
-        "/abs/normal/path.j2",
-    ],
-)
-def test_path_safety_template_paths_accept_safe_or_absolute(good_path: str) -> None:
-    """Relative paths without ``..`` and any absolute path must validate."""
-    tp = TemplatePaths(calibre=good_path)
-    assert tp.calibre is not None
-
-
-def test_path_safety_template_paths_reject_traversal_via_load_project(
+def test_path_safety_a_v1_template_binding_is_refused_by_load_project(
     tmp_path: Path,
 ) -> None:
-    """End-to-end: a YAML carrying ``templates.calibre: ../../etc/passwd``
-    must raise :class:`ConfigError` at load time."""
+    """End-to-end: ``templates.calibre: ../../etc/passwd`` still cannot load.
+
+    The reason changed -- the key is retired rather than the value being
+    validated -- but the traversal string must not reach a file open either
+    way, and the error has to name the migration.
+    """
+
     from auto_ext.core.config import load_project
     from auto_ext.core.errors import ConfigError
 
@@ -284,8 +294,124 @@ def test_path_safety_template_paths_reject_traversal_via_load_project(
         "  calibre: ../../etc/passwd\n",
         encoding="utf-8",
     )
-    with pytest.raises(ConfigError, match=r"\.\."):
+    with pytest.raises(ConfigError, match="templates") as excinfo:
         load_project(p)
+    assert "migrate" in str(excinfo.value)
+
+
+def test_path_safety_catalog_template_paths_come_from_the_package() -> None:
+    """Every render target's template resolves under the package's own root.
+
+    ``spec.template_path`` is derived from ``__file__``, so no configuration
+    -- v1 or v2 -- can point a render target outside the checkout.
+    """
+
+    from auto_ext.catalog import builtin_catalog
+
+    import auto_ext
+
+    package_root = Path(auto_ext.__file__).resolve().parent.parent
+    targets = builtin_catalog().targets
+    assert targets, "the catalog must declare at least one render target"
+    for spec in targets:
+        resolved = spec.template_path.resolve()
+        assert resolved.is_relative_to(package_root), spec.template_id
+        assert ".." not in spec.template.split("/")
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "../../etc/passwd",
+        "quantus/../../etc/passwd",
+        "../quantus/ext.cmd",
+        "/etc/passwd",
+        "quantus/./x",
+        "quantus\\..\\x",
+    ],
+)
+def test_path_safety_patch_template_id_refuses_a_path(bad_id: str) -> None:
+    """A patch's ``template_id`` is the one template reference a user writes.
+
+    Its pattern allows exactly ``<stage>/<file>``: one separator, no
+    backslash, no ``.`` or ``..`` segment.
+    """
+
+    from auto_ext.core.patch_models import TemplatePatch
+
+    with pytest.raises(ValidationError):
+        TemplatePatch(stage="quantus", template_id=bad_id, base=_fingerprint())
+
+
+def test_path_safety_patch_template_id_is_a_key_not_a_path() -> None:
+    """``quantus/..`` satisfies the pattern -- and is inert, because the id is
+    only ever *compared* against catalog target ids.
+
+    Nothing joins it onto a directory (:mod:`auto_ext.core.render` looks the
+    patch up with ``recipe.patch_for(stage, spec.template_id)``), so the worst
+    a crafted id achieves is a patch that matches no target and is never
+    applied. This test is what makes that reasoning falsifiable: if a future
+    change starts resolving the id as a path, the second assertion is where
+    the audit notices.
+    """
+
+    from auto_ext.catalog import builtin_catalog
+    from auto_ext.core.patch_models import TemplatePatch
+
+    odd = TemplatePatch(stage="quantus", template_id="quantus/..", base=_fingerprint())
+    known = {spec.template_id for spec in builtin_catalog().targets}
+    assert odd.template_id not in known
+
+    source = inspect.getsource(render_module)
+    assert "templates_root / patch" not in source
+    assert "/ patch.template_id" not in source
+
+
+# ---- the new surface: a run slug becomes a directory name ------------------
+
+
+@pytest.mark.parametrize(
+    "hostile_slug",
+    [
+        "../../etc",
+        "..",
+        "a/../../b",
+        "/abs",
+        "C:\\windows",
+        "a\\b",
+        "$(whoami)",
+        "`id`",
+        "foo;bar",
+        "with:colon",
+    ],
+)
+def test_path_safety_run_slug_never_leaves_the_runs_root(
+    runs_root: Path, frozen_clock: Any, hostile_slug: str
+) -> None:
+    """A slug comes from a cell name or a user note and is spelled into a path.
+
+    Either the allocator refuses it outright or it sanitises it, but the
+    directory it returns is always a direct child of ``runs/`` whose name
+    carries no separator, no ``..`` and no colon (NTFS refuses the last one,
+    and the development machine is Windows).
+    """
+
+    from auto_ext.core.errors import AutoExtError
+    from auto_ext.model.run import allocate_run_dir, slugify
+
+    try:
+        created = allocate_run_dir(runs_root, hostile_slug)
+    except (AutoExtError, ValueError):
+        # Refusing is a valid answer; what matters is that nothing was made.
+        assert list(runs_root.iterdir()) == []
+        return
+
+    assert created.parent == runs_root
+    assert created.resolve().is_relative_to(runs_root.resolve())
+    for forbidden in ("..", "/", "\\", ":"):
+        assert forbidden not in created.name
+    # ...and the sanitiser, not luck, is what did it.
+    assert slugify(hostile_slug) in created.name
 
 
 # ---- shell-metachar cell name flows into render context as literal --------
@@ -364,7 +490,7 @@ def test_path_safety_cell_metachars_passed_to_subprocess_as_single_token(
 
 @pytest.mark.xfail(
     reason=(
-        "dspf_out_path / extraction_output_dir / intermediate_dir "
+        "dspf_out_pattern / output_dir_pattern / intermediate_dir "
         "intentionally accept '..' to support legitimate cross-tree "
         "outputs (e.g. ${WORK_ROOT}/../shared/dspf). Path traversal in "
         "these fields is the user's responsibility on a shared FS, "
@@ -374,21 +500,24 @@ def test_path_safety_cell_metachars_passed_to_subprocess_as_single_token(
     ),
     strict=True,
 )
-def test_path_safety_dspf_out_path_rejects_traversal() -> None:
-    """Documented as out-of-scope for now."""
-    from auto_ext.core.config import load_project
-    from auto_ext.core.errors import ConfigError
+def test_path_safety_workspace_patterns_reject_traversal(tmp_path: Path) -> None:
+    """Documented as out-of-scope, on the field's new home.
 
-    # If this ever starts passing, we've added a sandbox; flip strict=True
-    # to convert the xfail into a regular pass.
-    p = Path("/tmp/_path_safety_probe.yaml")
+    ``WorkspaceConfig`` does validate these three patterns -- it refuses an
+    unknown or retired ``{format_key}`` -- so the absence of a ``..`` check is
+    a decision, not an oversight, and this is where it is recorded.
+    """
+    from auto_ext.core.errors import ConfigError
+    from auto_ext.model.workspace import load_workspace
+
+    p = tmp_path / "workspace.yaml"
     p.write_text(
-        "work_root: /tmp\n"
-        "dspf_out_path: ../../etc/passwd\n",
+        "pdk_profile: hn001\n"
+        "dspf_out_pattern: ../../etc/passwd\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigError, match=r"\.\."):
-        load_project(p)
+        load_workspace(p)
 
 
 # ---- env_overrides values flow into rendered files literally -------------

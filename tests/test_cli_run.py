@@ -18,25 +18,31 @@ def test_version_command() -> None:
     assert result.stdout.strip() == "0.1.0"
 
 
-def test_check_env_all_resolved(project_tools_config: Path) -> None:
-    # project_tools_config sets every required var via env_overrides, so
-    # check-env should exit 0.
-    result = runner.invoke(app, ["check-env", "--config-dir", str(project_tools_config)])
+def test_check_env_all_resolved(v2_config_dir: Path, mocks_on_path: Path) -> None:
+    """A green profile plus the tools on PATH is the "yes, go" answer.
+
+    The env values come from the profile's ``env_overrides`` -- the field that
+    absorbed ``project.yaml``'s ``env_overrides`` -- so nothing here depends on
+    the developer's shell.
+    """
+
+    result = runner.invoke(app, ["check-env", "--auto-ext-root", str(v2_config_dir)])
     assert result.exit_code == 0, result.stdout
+    assert "this shell can start a run" in result.stdout
 
 
 def test_run_happy_path(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
     mocks_on_path: Path,
-    tmp_path: Path,
 ) -> None:
     result = runner.invoke(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
-            "--auto-ext-root", str(tmp_path / "pr"),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
+            "--auto-ext-root", str(v2_config_dir),
             "--workarea", str(workarea),
         ],
     )
@@ -45,19 +51,20 @@ def test_run_happy_path(
 
 
 def test_run_no_progress_flag_suppresses_live_table(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
-    tmp_path: Path,
 ) -> None:
     """--no-progress: no RichCLIReporter live table, final summary still there."""
     result = runner.invoke(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
+            "--no-health-check",
             "--no-progress",
             "--dry-run",
-            "--auto-ext-root", str(tmp_path / "pr"),
+            "--auto-ext-root", str(v2_config_dir),
             "--workarea", str(workarea),
         ],
     )
@@ -71,9 +78,8 @@ def test_run_no_progress_flag_suppresses_live_table(
 
 
 def test_run_with_progress_default_renders_live_table(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
-    tmp_path: Path,
 ) -> None:
     """Without --no-progress: RichCLIReporter's Run progress table renders.
 
@@ -84,9 +90,11 @@ def test_run_with_progress_default_renders_live_table(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
+            "--no-health-check",
             "--dry-run",
-            "--auto-ext-root", str(tmp_path / "pr"),
+            "--auto-ext-root", str(v2_config_dir),
             "--workarea", str(workarea),
         ],
     )
@@ -95,18 +103,19 @@ def test_run_with_progress_default_renders_live_table(
 
 
 def test_run_filters_by_task_id_miss_exits_2(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
-    tmp_path: Path,
 ) -> None:
     result = runner.invoke(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
+            "--no-health-check",
             "--task", "does-not-exist",
             "--dry-run",
-            "--auto-ext-root", str(tmp_path / "pr"),
+            "--auto-ext-root", str(v2_config_dir),
             "--workarea", str(workarea),
         ],
     )
@@ -116,18 +125,19 @@ def test_run_filters_by_task_id_miss_exits_2(
 
 
 def test_run_stage_filter_restricts_stages(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
-    tmp_path: Path,
 ) -> None:
     result = runner.invoke(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
+            "--no-health-check",
             "--stage", "si,calibre",
             "--dry-run",
-            "--auto-ext-root", str(tmp_path / "pr"),
+            "--auto-ext-root", str(v2_config_dir),
             "--workarea", str(workarea),
         ],
     )
@@ -148,18 +158,19 @@ def wide_console(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_run_summary_names_the_run_and_where_the_records_went(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
-    tmp_path: Path,
     wide_console: None,
 ) -> None:
     """The closing block identifies the run and points at runs/."""
-    root = tmp_path / "pr"
+    root = v2_config_dir
     result = runner.invoke(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
+            "--no-health-check",
             "--dry-run",
             "--auto-ext-root", str(root),
             "--workarea", str(workarea),
@@ -179,10 +190,9 @@ def test_run_summary_names_the_run_and_where_the_records_went(
 
 
 def test_run_summary_reports_lvs_discrepancies_and_a_failure_class(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
     mocks_on_path: Path,
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     wide_console: None,
 ) -> None:
@@ -193,13 +203,14 @@ def test_run_summary_reports_lvs_discrepancies_and_a_failure_class(
     and then read by nobody.
     """
     monkeypatch.setenv("AUTO_EXT_MOCK_FORCE_FAIL", "calibre")
-    root = tmp_path / "pr"
+    root = v2_config_dir
 
     result = runner.invoke(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
             "--auto-ext-root", str(root),
             "--workarea", str(workarea),
         ],
@@ -215,9 +226,8 @@ def test_run_summary_reports_lvs_discrepancies_and_a_failure_class(
 
 
 def test_run_summary_reports_a_missing_binary_as_such(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
-    tmp_path: Path,
     wide_console: None,
 ) -> None:
     """Without the mocks on PATH every tool exits 127; say why."""
@@ -225,9 +235,11 @@ def test_run_summary_reports_a_missing_binary_as_such(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
+            "--no-health-check",
             "--stage", "si",
-            "--auto-ext-root", str(tmp_path / "pr"),
+            "--auto-ext-root", str(v2_config_dir),
             "--workarea", str(workarea),
         ],
     )
@@ -237,19 +249,19 @@ def test_run_summary_reports_a_missing_binary_as_such(
 
 
 def test_run_then_runs_show_reads_back_the_same_run(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
     mocks_on_path: Path,
-    tmp_path: Path,
     wide_console: None,
 ) -> None:
     """``run`` writes the record; ``runs show`` renders it. One wiring test."""
-    root = tmp_path / "pr"
+    root = v2_config_dir
     run_result = runner.invoke(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
             "--auto-ext-root", str(root),
             "--workarea", str(workarea),
         ],
@@ -280,143 +292,23 @@ def test_migrate_needs_a_config_dir() -> None:
 
 
 def test_run_unknown_stage_exits_2(
-    project_tools_config: Path,
+    v2_config_dir: Path,
     workarea: Path,
-    tmp_path: Path,
 ) -> None:
     result = runner.invoke(
         app,
         [
             "run",
-            "--config-dir", str(project_tools_config),
+            "--config-dir", str(v2_config_dir / "config"),
+            "--recipe", "rc-coupled-typical",
+            "--no-health-check",
             "--stage", "si,not_a_real_stage",
             "--dry-run",
-            "--auto-ext-root", str(tmp_path / "pr"),
+            "--auto-ext-root", str(v2_config_dir),
             "--workarea", str(workarea),
         ],
     )
     assert result.exit_code == 2
-
-
-# ---- --knob parsing ------------------------------------------------------
-
-
-def test_parse_cli_knobs_basic() -> None:
-    from auto_ext.cli import _parse_cli_knobs
-
-    out = _parse_cli_knobs(
-        ["quantus.temperature=60", "quantus.limit=200", "calibre.flag=true"],
-        ("si", "strmout", "calibre", "quantus", "jivaro"),
-    )
-    assert out == {
-        "quantus": {"temperature": "60", "limit": "200"},
-        "calibre": {"flag": "true"},
-    }
-
-
-def test_parse_cli_knobs_value_with_equals_kept() -> None:
-    from auto_ext.cli import _parse_cli_knobs
-
-    out = _parse_cli_knobs(
-        ["quantus.foo=a=b=c"],
-        ("si", "strmout", "calibre", "quantus", "jivaro"),
-    )
-    assert out == {"quantus": {"foo": "a=b=c"}}
-
-
-def test_parse_cli_knobs_missing_equals_rejected() -> None:
-    from auto_ext.cli import _parse_cli_knobs
-    from auto_ext.core.errors import ConfigError
-
-    with pytest.raises(ConfigError, match="missing '='"):
-        _parse_cli_knobs(
-            ["quantus.temperature"], ("quantus",)
-        )
-
-
-def test_parse_cli_knobs_missing_dot_rejected() -> None:
-    from auto_ext.cli import _parse_cli_knobs
-    from auto_ext.core.errors import ConfigError
-
-    with pytest.raises(ConfigError, match="missing '\\.'"):
-        _parse_cli_knobs(["temperature=60"], ("quantus",))
-
-
-def test_parse_cli_knobs_unknown_stage_rejected() -> None:
-    from auto_ext.cli import _parse_cli_knobs
-    from auto_ext.core.errors import ConfigError
-
-    with pytest.raises(ConfigError, match="unknown stage"):
-        _parse_cli_knobs(["bogus.x=1"], ("quantus",))
-
-
-def test_run_malformed_knob_exits_2(
-    project_tools_config: Path,
-    workarea: Path,
-    tmp_path: Path,
-) -> None:
-    result = runner.invoke(
-        app,
-        [
-            "run",
-            "--config-dir", str(project_tools_config),
-            "--knob", "not-well-formed",
-            "--dry-run",
-            "--auto-ext-root", str(tmp_path / "pr"),
-            "--workarea", str(workarea),
-        ],
-    )
-    assert result.exit_code == 2
-
-
-def test_run_knob_beats_manifest_default(
-    project_tools_config: Path,
-    workarea: Path,
-    tmp_path: Path,
-) -> None:
-    # Ship a sidecar manifest declaring one knob and a templated .j2 that
-    # references it. After --knob overrides the manifest default, the
-    # rendered output should contain the CLI value, proving end-to-end
-    # precedence (manifest -> CLI).
-    tpl = tmp_path / "knobby.j2"
-    tpl.write_text("value=[[temperature]]\n", encoding="utf-8")
-    (tmp_path / "knobby.j2.manifest.yaml").write_text(
-        "template: knobby.j2\n"
-        "knobs:\n  temperature:\n    type: float\n    default: 55.0\n",
-        encoding="utf-8",
-    )
-    # Re-point project.yaml's quantus template at the knobby template.
-    proj = (project_tools_config / "project.yaml").read_text(encoding="utf-8")
-    proj = proj.replace(
-        f"quantus: {(Path(__file__).resolve().parent.parent / 'templates' / 'quantus' / 'ext.cmd.j2').as_posix()}",
-        f"quantus: {tpl.as_posix()}",
-    )
-    (project_tools_config / "project.yaml").write_text(proj, encoding="utf-8")
-
-    result = runner.invoke(
-        app,
-        [
-            "run",
-            "--config-dir", str(project_tools_config),
-            "--knob", "quantus.temperature=60",
-            "--stage", "quantus",
-            "--dry-run",
-            "--auto-ext-root", str(tmp_path / "pr"),
-            "--workarea", str(workarea),
-        ],
-    )
-    assert result.exit_code == 0, result.stdout
-
-    tasks_yaml = (project_tools_config / "tasks.yaml").read_text(encoding="utf-8")
-    assert tasks_yaml  # sanity
-
-    # Find the rendered knobby file and assert it got the CLI value.
-    rendered_roots = list((tmp_path / "pr" / "runs").glob("*/rendered/knobby"))
-    assert len(rendered_roots) == 1
-    assert rendered_roots[0].read_text(encoding="utf-8").strip() == "value=60.0"
-
-
-# ---- `import` subcommand + smart merge -----------------------------------
 
 
 @pytest.fixture
@@ -448,12 +340,6 @@ def test_import_happy_path(calibre_raw_fixture: Path, tmp_path: Path) -> None:
     assert "[[library]]" in body
     # Identity literal fully removed.
     assert "INV1" not in body
-
-    manifest_path = output.with_name(output.name + ".manifest.yaml")
-    assert manifest_path.is_file()
-    manifest_text = manifest_path.read_text(encoding="utf-8")
-    assert "template: imported.qci.j2" in manifest_text
-    assert "knobs:" in manifest_text
 
     review = output.with_name(output.name + ".review.md")
     assert review.is_file()
@@ -490,16 +376,12 @@ def test_import_unknown_tool_exits_2(
     assert result.exit_code == 2
 
 
-def test_import_fresh_backs_up_existing(
+def test_import_backs_up_an_existing_template(
     calibre_raw_fixture: Path, tmp_path: Path
 ) -> None:
     output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
     output.parent.mkdir(parents=True)
     output.write_text("OLD-CONTENT\n", encoding="utf-8")
-    manifest_path = output.with_name(output.name + ".manifest.yaml")
-    manifest_path.write_text(
-        "template: imported.qci.j2\nknobs: {}\n", encoding="utf-8"
-    )
 
     result = runner.invoke(
         app,
@@ -508,349 +390,23 @@ def test_import_fresh_backs_up_existing(
             "--tool", "calibre",
             "--input", str(calibre_raw_fixture),
             "--output", str(output),
-            "--fresh",
         ],
     )
     assert result.exit_code == 0, result.stdout
 
+    # Backing up is unconditional now. It used to sit behind --fresh, which
+    # meant "ignore the sidecar manifest and re-import from scratch"; with
+    # manifests gone every import is a fresh one, so the flag selected the
+    # only behaviour left and was dropped rather than kept as a no-op.
     bak_template = output.with_name(output.name + ".bak")
-    bak_manifest = manifest_path.with_name(manifest_path.name + ".bak")
     assert bak_template.read_text(encoding="utf-8") == "OLD-CONTENT\n"
-    assert bak_manifest.is_file()
 
     # New content overwrote.
     assert "[[cell]]" in output.read_text(encoding="utf-8")
 
 
-def test_reimport_preserves_user_knob_substitutes_new_body(
-    calibre_raw_fixture: Path, tmp_path: Path
-) -> None:
-    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
-
-    # First import.
-    first = runner.invoke(
-        app,
-        [
-            "import",
-            "--tool", "calibre",
-            "--input", str(calibre_raw_fixture),
-            "--output", str(output),
-        ],
-    )
-    assert first.exit_code == 0, first.stdout
-
-    # Promote cmnNumTurbo so the manifest learns a source reference.
-    promote = runner.invoke(
-        app,
-        ["knob", "promote", str(output), "cmnNumTurbo"],
-    )
-    assert promote.exit_code == 0, promote.stdout
-
-    # Edit the manifest's description to simulate a user tweak that must
-    # round-trip through the merge.
-    manifest_path = output.with_name(output.name + ".manifest.yaml")
-    text = manifest_path.read_text(encoding="utf-8")
-    text = text.replace(
-        "cmn_num_turbo:",
-        "cmn_num_turbo:\n    description: Tuned for overnight runs",
-    )
-    manifest_path.write_text(text, encoding="utf-8")
-
-    # Re-import with a raw whose cmnNumTurbo default has moved.
-    modified_raw = tmp_path / "modified.qci"
-    modified_raw.write_text(
-        calibre_raw_fixture.read_text(encoding="utf-8").replace(
-            "*cmnNumTurbo: 2", "*cmnNumTurbo: 8"
-        ),
-        encoding="utf-8",
-    )
-    reimport = runner.invoke(
-        app,
-        [
-            "import",
-            "--tool", "calibre",
-            "--input", str(modified_raw),
-            "--output", str(output),
-        ],
-    )
-    assert reimport.exit_code == 0, reimport.stdout
-
-    body = output.read_text(encoding="utf-8")
-    assert "*cmnNumTurbo: [[cmn_num_turbo]]" in body
-
-    manifest_text = manifest_path.read_text(encoding="utf-8")
-    # Default refreshed from new raw.
-    assert "default: 8" in manifest_text
-    # User's description edit round-trips.
-    assert "Tuned for overnight runs" in manifest_text
-    # Smart-merge log mentions the bump.
-    assert "default updated" in reimport.stdout
-
-
-def test_reimport_leaves_user_defined_knob_alone(
-    calibre_raw_fixture: Path, tmp_path: Path
-) -> None:
-    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
-    first = runner.invoke(
-        app,
-        [
-            "import",
-            "--tool", "calibre",
-            "--input", str(calibre_raw_fixture),
-            "--output", str(output),
-        ],
-    )
-    assert first.exit_code == 0, first.stdout
-
-    # Add a user-defined knob manually (no source).
-    manifest_path = output.with_name(output.name + ".manifest.yaml")
-    manifest_path.write_text(
-        "template: imported.qci.j2\n"
-        "knobs:\n"
-        "  hand_rolled:\n"
-        "    type: int\n"
-        "    default: 99\n",
-        encoding="utf-8",
-    )
-
-    reimport = runner.invoke(
-        app,
-        [
-            "import",
-            "--tool", "calibre",
-            "--input", str(calibre_raw_fixture),
-            "--output", str(output),
-        ],
-    )
-    assert reimport.exit_code == 0, reimport.stdout
-
-    body = output.read_text(encoding="utf-8")
-    assert "[[hand_rolled]]" not in body
-    manifest_text = manifest_path.read_text(encoding="utf-8")
-    assert "hand_rolled" in manifest_text
-    assert "default: 99" in manifest_text
-    assert "user-defined" in reimport.stdout
-
-
-# ---- `knob suggest` / `knob promote` -------------------------------------
-
-
-def test_knob_suggest_lists_candidates(
-    calibre_raw_fixture: Path, tmp_path: Path
-) -> None:
-    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
-    imp = runner.invoke(
-        app,
-        [
-            "import",
-            "--tool", "calibre",
-            "--input", str(calibre_raw_fixture),
-            "--output", str(output),
-        ],
-    )
-    assert imp.exit_code == 0
-
-    result = runner.invoke(app, ["knob", "suggest", str(output)])
-    assert result.exit_code == 0, result.stdout
-    assert "cmnNumTurbo" in result.stdout
-    assert "cmn_num_turbo" in result.stdout
-
-
-def test_knob_promote_rewrites_template_and_manifest(
-    calibre_raw_fixture: Path, tmp_path: Path
-) -> None:
-    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
-    imp = runner.invoke(
-        app,
-        [
-            "import",
-            "--tool", "calibre",
-            "--input", str(calibre_raw_fixture),
-            "--output", str(output),
-        ],
-    )
-    assert imp.exit_code == 0
-
-    result = runner.invoke(
-        app,
-        ["knob", "promote", str(output), "cmnNumTurbo"],
-    )
-    assert result.exit_code == 0, result.stdout
-
-    body = output.read_text(encoding="utf-8")
-    assert "*cmnNumTurbo: [[cmn_num_turbo]]" in body
-
-    manifest_path = output.with_name(output.name + ".manifest.yaml")
-    text = manifest_path.read_text(encoding="utf-8")
-    assert "cmn_num_turbo:" in text
-    assert "tool: calibre" in text
-    assert "key: cmnNumTurbo" in text
-    assert "default: 2" in text
-
-
-def test_knob_promote_type_and_name_overrides(
-    calibre_raw_fixture: Path, tmp_path: Path
-) -> None:
-    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
-    imp = runner.invoke(
-        app,
-        [
-            "import",
-            "--tool", "calibre",
-            "--input", str(calibre_raw_fixture),
-            "--output", str(output),
-        ],
-    )
-    assert imp.exit_code == 0
-
-    result = runner.invoke(
-        app,
-        [
-            "knob", "promote", str(output),
-            "cmnRunHyper",
-            "--type", "int",
-            "--name", "hyper_enabled",
-        ],
-    )
-    assert result.exit_code == 0, result.stdout
-    manifest_text = output.with_name(
-        output.name + ".manifest.yaml"
-    ).read_text(encoding="utf-8")
-    assert "hyper_enabled:" in manifest_text
-    assert "type: int" in manifest_text
-    # Not bool: override forced int even though the heuristic said bool.
-    assert "default: 1" in manifest_text
-
-
-def test_knob_promote_name_with_multiple_keys_rejected(
-    calibre_raw_fixture: Path, tmp_path: Path
-) -> None:
-    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
-    runner.invoke(
-        app,
-        [
-            "import",
-            "--tool", "calibre",
-            "--input", str(calibre_raw_fixture),
-            "--output", str(output),
-        ],
-    )
-    result = runner.invoke(
-        app,
-        [
-            "knob", "promote", str(output),
-            "cmnNumTurbo", "cmnLicenseWaitTime",
-            "--name", "combined",
-        ],
-    )
-    assert result.exit_code == 2
-
-
-def test_knob_promote_unknown_key_rejected(
-    calibre_raw_fixture: Path, tmp_path: Path
-) -> None:
-    output = tmp_path / "templates" / "calibre" / "imported.qci.j2"
-    runner.invoke(
-        app,
-        [
-            "import",
-            "--tool", "calibre",
-            "--input", str(calibre_raw_fixture),
-            "--output", str(output),
-        ],
-    )
-    result = runner.invoke(
-        app,
-        ["knob", "promote", str(output), "doesNotExist"],
-    )
-    assert result.exit_code == 2
-
-
-def test_run_knob_layering_project_task_cli(
-    project_tools_config: Path,
-    workarea: Path,
-    tmp_path: Path,
-) -> None:
-    # project.yaml sets 60, tasks.yaml sets 70, --knob sets 80. Final = 80.
-    tpl = tmp_path / "knobby.j2"
-    tpl.write_text("value=[[temperature]]\n", encoding="utf-8")
-    (tmp_path / "knobby.j2.manifest.yaml").write_text(
-        "template: knobby.j2\n"
-        "knobs:\n  temperature:\n    type: float\n    default: 55.0\n",
-        encoding="utf-8",
-    )
-
-    # Replace the quantus template and add project-level knob.
-    proj_text = (project_tools_config / "project.yaml").read_text(encoding="utf-8")
-    proj_text = proj_text.replace(
-        f"quantus: {(Path(__file__).resolve().parent.parent / 'templates' / 'quantus' / 'ext.cmd.j2').as_posix()}",
-        f"quantus: {tpl.as_posix()}",
-    )
-    proj_text += "knobs:\n  quantus:\n    temperature: 60.0\n"
-    (project_tools_config / "project.yaml").write_text(proj_text, encoding="utf-8")
-
-    # Add task-level knob.
-    (project_tools_config / "tasks.yaml").write_text(
-        """\
-- library: WB_PLL_DCO
-  cell: inv
-  lvs_layout_view: layout
-  lvs_source_view: schematic
-  ground_net: vss
-  out_file: av_ext
-  knobs:
-    quantus:
-      temperature: 70.0
-  jivaro:
-    enabled: true
-    frequency_limit: 14
-    error_max: 2
-""",
-        encoding="utf-8",
-    )
-
-    # Project only -> 60.
-    res60 = runner.invoke(
-        app,
-        [
-            "run", "--config-dir", str(project_tools_config),
-            "--stage", "quantus", "--dry-run",
-            "--auto-ext-root", str(tmp_path / "pr1"),
-            "--workarea", str(workarea),
-        ],
-    )
-    assert res60.exit_code == 0, res60.stdout
-    # Task beats project -> 70. (Both project and task are set; task wins.)
-    rendered = list((tmp_path / "pr1" / "runs").glob("*/rendered/knobby"))[0]
-    assert rendered.read_text(encoding="utf-8").strip() == "value=70.0"
-
-    # CLI beats task -> 80.
-    res80 = runner.invoke(
-        app,
-        [
-            "run", "--config-dir", str(project_tools_config),
-            "--knob", "quantus.temperature=80",
-            "--stage", "quantus", "--dry-run",
-            "--auto-ext-root", str(tmp_path / "pr2"),
-            "--workarea", str(workarea),
-        ],
-    )
-    assert res80.exit_code == 0, res80.stdout
-    rendered = list((tmp_path / "pr2" / "runs").glob("*/rendered/knobby"))[0]
-    assert rendered.read_text(encoding="utf-8").strip() == "value=80.0"
-
-
-# ---- run --recipe / --profile (the catalog render path) --------------------
-#
-# ``--recipe`` is the only switch between the two render paths, so these tests
-# exercise it end to end rather than mocking the runner: migrate the legacy
-# config pair into a v2 file set, then run against what came out. That also
-# means a change to either side of the seam — the CLI's argument handling or
-# the runner's pipeline contract — shows up here.
-
-
 @pytest.fixture
-def migrated_v2(project_tools_config: Path, tmp_path: Path) -> Path:
+def migrated_v2(v1_config_dir: Path, tmp_path: Path) -> Path:
     """A written v2 file set (profile + recipe + cells + workspace + resources).
 
     Returns the root that holds ``config/`` and ``recipes/``, which is also
@@ -860,7 +416,7 @@ def migrated_v2(project_tools_config: Path, tmp_path: Path) -> Path:
     out = tmp_path / "v2"
     result = runner.invoke(
         app,
-        ["migrate", "--config-dir", str(project_tools_config),
+        ["migrate", "--config-dir", str(v1_config_dir),
          "--out-root", str(out), "--write"],
     )
     # Exit 1 is the "there are warnings" verdict, not a failure.
@@ -1007,33 +563,58 @@ def test_run_recipe_refuses_a_value_the_template_hardcodes(
     assert "0/1 tasks passed" in result.output
 
 
-def test_run_recipe_without_a_profile_is_refused(
+def test_run_with_a_recipe_and_no_profile_anywhere_is_refused(
     project_tools_config: Path,
     workarea: Path,
     migrated_v2: Path,
+    tmp_path: Path,
 ) -> None:
-    """Half a configuration is the silent-wrong-file case; it has to be loud."""
+    """Half a configuration is the silent-wrong-file case; it has to be loud.
+
+    ``--profile`` is optional only because a root with exactly one profile
+    answers the question for you. Point ``--auto-ext-root`` at a root with
+    none and there is nothing to answer it with: the corner the recipe names
+    has no literal, so the run has to stop and say where profiles come from.
+    """
+
+    empty_root = tmp_path / "no-profiles"
+    (empty_root / "recipes").mkdir(parents=True)
+    recipe_id = _only_recipe_id(migrated_v2)
+    (empty_root / "recipes" / f"{recipe_id}.yaml").write_text(
+        (migrated_v2 / "recipes" / f"{recipe_id}.yaml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
 
     result = runner.invoke(
         app,
         [
             "run",
             "--config-dir", str(project_tools_config),
-            "--auto-ext-root", str(migrated_v2),
+            "--auto-ext-root", str(empty_root),
             "--workarea", str(workarea),
-            "--recipe", _only_recipe_id(migrated_v2),
+            "--recipe", recipe_id,
             "--dry-run",
         ],
     )
     assert result.exit_code == 2
-    assert "needs a pdk profile" in result.output
+    assert "profile" in result.output
+    assert "profile discover" in result.output
 
 
-def test_run_profile_without_a_recipe_is_refused(
+def test_run_without_a_recipe_is_refused(
     project_tools_config: Path,
     workarea: Path,
     migrated_v2: Path,
 ) -> None:
+    """A run renders from the catalog, and only a Recipe says what to render.
+
+    This used to be "a profile without a recipe is refused" -- one branch of a
+    runtime pairing check, back when both were optional and omitting both meant
+    "render through project.templates". With the legacy path gone the flag is
+    simply required, and the message has to name the command that lists what
+    is available rather than only saying no.
+    """
+
     result = runner.invoke(
         app,
         [
@@ -1046,34 +627,11 @@ def test_run_profile_without_a_recipe_is_refused(
         ],
     )
     assert result.exit_code == 2
-    assert "without a recipe" in result.output
-    # The pairing error must not be buried under a health report nobody asked
-    # for, so the health table stays off when the pair is incomplete.
+    assert "--recipe is required" in result.output
+    assert "auto-ext recipe list" in result.output
+    # The missing-flag error must not be buried under a health report nobody
+    # asked for, so the health table stays off when the pair is incomplete.
     assert "Profile health" not in result.output
-
-
-def test_run_recipe_and_knob_together_are_refused(
-    project_tools_config: Path,
-    workarea: Path,
-    migrated_v2: Path,
-) -> None:
-    """The recipe path has no knob layer, so --knob would be a silent no-op."""
-
-    result = runner.invoke(
-        app,
-        [
-            "run",
-            "--config-dir", str(project_tools_config),
-            "--auto-ext-root", str(migrated_v2),
-            "--workarea", str(workarea),
-            "--recipe", _only_recipe_id(migrated_v2),
-            "--profile", "hn001",
-            "--knob", "quantus.temperature=60",
-            "--dry-run",
-        ],
-    )
-    assert result.exit_code == 2
-    assert "recipe set" in result.output
 
 
 def test_run_profile_health_blocks_the_start(
@@ -1151,12 +709,19 @@ def test_run_recipe_unknown_name_lists_the_search_path(
     assert "no recipe named 'no-such-recipe'" in result.output
 
 
-def test_run_without_recipe_still_uses_the_legacy_path(
+def test_there_is_no_second_render_path_left_to_fall_back_to(
     project_tools_config: Path,
     workarea: Path,
     migrated_v2: Path,
 ) -> None:
-    """The two paths coexist: no flags, no catalog, template names unchanged."""
+    """No flags used to mean "render through project.templates". Now it means no.
+
+    This is the test that used to assert the two paths coexisted, by looking
+    for ``calibre_lvs.qci`` -- the legacy path named a rendered file after its
+    template's stem. Nothing is written at all now, and that absence is the
+    point: a fallback that quietly rendered from a different source is exactly
+    the silent-wrong-file class this round removed.
+    """
 
     result = runner.invoke(
         app,
@@ -1169,12 +734,9 @@ def test_run_without_recipe_still_uses_the_legacy_path(
             "--dry-run",
         ],
     )
-    assert result.exit_code == 0, result.output
-    names = {p.name for p in (migrated_v2 / "runs").glob("*/rendered/*")}
-    # The legacy path names a rendered file after its template stem, so the
-    # calibre file is calibre_lvs.qci, not the catalog target's lvs.qci.
-    assert "calibre_lvs.qci" in names
-    assert "lvs.qci" not in names
+    assert result.exit_code == 2
+    assert "--recipe is required" in result.output
+    assert list((migrated_v2 / "runs").glob("*/rendered/*")) == []
 
 
 def test_run_recipe_resources_file_is_picked_up(
@@ -1248,41 +810,50 @@ def test_check_env_named_profile(migrated_v2: Path) -> None:
     assert "Profile health: hn001" in result.output
 
 
-def test_check_env_legacy_path_when_no_profile_exists(
+def test_check_env_without_a_profile_says_where_profiles_come_from(
     project_tools_config: Path, tmp_path: Path
 ) -> None:
-    """An unmigrated project still gets the old env scan and the old verdict."""
+    """No profile is not "everything is fine"; it is "there is nothing to check".
+
+    ``check-env`` used to fall back to scanning ``project.yaml`` for ``${X}``
+    references. That scan read a file the render path no longer consults, so a
+    green verdict from it meant nothing -- worse than no verdict. The command
+    now refuses and names the two ways to get a profile.
+    """
 
     result = runner.invoke(
         app,
         ["check-env", "--config-dir", str(project_tools_config),
          "--auto-ext-root", str(tmp_path / "empty-root")],
     )
-    assert result.exit_code == 0, result.output
-    assert "Env resolution" in result.output
-    assert "legacy env scan" in result.output
+    assert result.exit_code == 2, result.output
+    assert "nothing to check" in result.output
+    assert "profile discover" in result.output
+    assert "migrate" in result.output
 
 
-def test_check_env_legacy_path_reports_missing_vars(tmp_path: Path) -> None:
-    from auto_ext.core import runner as runner_module
+def test_check_env_reports_an_env_var_the_profile_needs_and_nothing_sets(
+    v2_config_dir: Path, mocks_on_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "missing vars" verdict survived; its source moved to the profile.
 
-    config_dir = tmp_path / "cfg"
-    config_dir.mkdir()
-    (config_dir / "project.yaml").write_text(
-        'extraction_output_dir: "${NOT_SET_ANYWHERE}/x"\n', encoding="utf-8"
+    A path expression that resolves to nothing used to be found by scanning
+    ``project.yaml``. It is a profile field now, so the check that finds it is
+    a health row -- and it still has to make the command exit non-zero and
+    name the variable, or a run starts against a deck path that is half a
+    string.
+    """
+
+    profile_path = v2_config_dir / "config" / "profiles" / "hn001.yaml"
+    text = profile_path.read_text(encoding="utf-8")
+    profile_path.write_text(
+        text.replace("PDK_LAYER_MAP_FILE:", "NOT_SET_ANYWHERE_UNUSED:"), encoding="utf-8"
     )
-    (config_dir / "tasks.yaml").write_text(
-        "- library: L\n  cell: c\n  lvs_layout_view: layout\n", encoding="utf-8"
-    )
-    assert runner_module is not None  # the legacy scan still lives there
+    monkeypatch.delenv("PDK_LAYER_MAP_FILE", raising=False)
 
-    result = runner.invoke(
-        app,
-        ["check-env", "--config-dir", str(config_dir),
-         "--auto-ext-root", str(tmp_path / "empty-root")],
-    )
-    assert result.exit_code == 1
-    assert "missing vars" in result.output
+    result = runner.invoke(app, ["check-env", "--auto-ext-root", str(v2_config_dir)])
+    assert result.exit_code == 1, result.output
+    assert "PDK_LAYER_MAP_FILE" in result.output
 
 
 def test_check_env_with_nothing_to_check_exits_2(tmp_path: Path) -> None:

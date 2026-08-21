@@ -28,9 +28,11 @@ _JINJA_KEYWORDS: frozenset[str] = frozenset(
      "and", "or", "not", "in", "is", "none", "set"}
 )
 
-# Mirrors :data:`auto_ext.core.manifest._IDENTITY_KEYS` without importing
-# (avoid a circular dep — manifest imports nothing from here today and
-# we want to keep it that way).
+# The names the v1 render context bound. Kept as a literal list because the
+# module that used to own it (``core/manifest.py``) is gone and the v2 context
+# is namespaced (``dut.cell``, ``recipe.lvs.deck_variant``), so there is no
+# single flat set to mirror any more. Its only use is refusing a toggle name
+# that would have shadowed one of these, which stays worth refusing.
 _IDENTITY_NAMES: frozenset[str] = frozenset(
     {
         "library", "cell", "lvs_layout_view", "lvs_source_view",

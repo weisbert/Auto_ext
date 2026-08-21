@@ -566,7 +566,7 @@ def test_recipe_snapshot_rejects_unknown_fields() -> None:
 def test_dut_snapshot_from_task_config() -> None:
     """The S1 bridge from the live ``TaskConfig`` to the frozen DUT snapshot."""
 
-    from auto_ext.core.config import JivaroConfig, TaskConfig, TemplatePaths
+    from auto_ext.core.config import JivaroConfig, TaskConfig
 
     task = TaskConfig(
         task_id="WB_PLL_DCO__amp2__layout__schematic",
@@ -574,10 +574,9 @@ def test_dut_snapshot_from_task_config() -> None:
         cell="amp2",
         lvs_source_view="schematic",
         lvs_layout_view="layout",
-        templates=TemplatePaths(),
         ground_net="vss",
         out_file="av_extracted",
-        label="the fast one",
+        display_name="the fast one",
         jivaro=JivaroConfig(),
         continue_on_lvs_fail=False,
         spec_index=0,

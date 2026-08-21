@@ -140,15 +140,18 @@ def render_template(
     env: dict[str, str],
     *,
     strict_env: bool = True,
-    knobs: dict[str, Any] | None = None,
 ) -> str:
-    """Render a ``.j2`` template with env-vars pre-substituted.
+    """Render a ``.j2`` template file with env-vars pre-substituted.
 
     Order: read file -> :func:`substitute_env` -> optional strict scan for
-    leftover env refs -> Jinja render with ``context`` merged with
-    ``knobs``. Knob names share the flat Jinja namespace with identity
-    variables; a collision raises :class:`TemplateError` (the manifest
-    loader rejects this earlier — this is belt-and-suspenders).
+    leftover env refs -> Jinja render with ``context``.
+
+    ``context`` is the whole Jinja namespace; there is no second value layer
+    merged on top of it. The ``knobs`` parameter that used to supply one is
+    gone with the ``*.manifest.yaml`` mechanism -- the catalog pipeline in
+    :mod:`auto_ext.core.render` builds one namespace and renders from a source
+    string, and this function is what everything else (tests, one-off scripts)
+    uses to render a file from disk.
 
     Raises :class:`TemplateError` for missing files, Jinja syntax errors,
     :class:`StrictUndefined` violations, and (under ``strict_env=True``)
@@ -174,14 +177,6 @@ def render_template(
     substituted = substitute_env(source, env)
 
     merged_context = dict(context)
-    if knobs:
-        collisions = sorted(set(knobs) & set(merged_context))
-        if collisions:
-            raise TemplateError(
-                f"knob name(s) collide with identity variables in "
-                f"{template_path}: {collisions}"
-            )
-        merged_context.update(knobs)
 
     # Catch the silent "None stringifies to 'None'" trap before Jinja
     # paints "None.None.qcilvs" into a path. StrictUndefined only catches
@@ -194,9 +189,9 @@ def render_template(
     if none_keys:
         raise TemplateError(
             f"template {template_path} references {none_keys} but the "
-            f"resolved value is None; set the corresponding field(s) in "
-            f"project.yaml (e.g. pdk_subdir, runset_versions.lvs/qrc, "
-            f"tech_name) or task spec before running"
+            f"resolved value is None; set the corresponding field(s) on the "
+            f"PdkProfile (e.g. tech_name, the LVS deck), the Recipe or the "
+            f"cell row before running"
         )
 
     jenv = make_jinja_env()
@@ -216,8 +211,8 @@ _JINJA_VAR_RE = re.compile(r"\[\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\]")
 class VarReference:
     """One occurrence of a ``[[var_name]]`` reference in a template.
 
-    Used by the GUI Project tab's "Used by" panel: each ``project.paths``
-    entry shows where in the template tree it's referenced. ``line_no``
+    Answers "which templates read this name": given a path key or any other
+    Jinja variable, where in the template tree it is referenced. ``line_no``
     is 1-indexed; ``line_excerpt`` is the matched line truncated to
     something readable as inline traceability.
     """
@@ -241,8 +236,7 @@ def enumerate_stage_templates(
     ``None`` or the stage subdirectory doesn't exist — callers fall
     back to "no choices" gracefully.
 
-    Manifest sidecars (``*.j2.manifest.yaml``) are filtered out by the
-    glob; only ``.j2`` template files come back.
+    Only ``.j2`` files come back; anything else in the directory is ignored.
     """
     if auto_ext_root is None:
         return []

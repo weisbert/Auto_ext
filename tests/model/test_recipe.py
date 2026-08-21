@@ -442,3 +442,74 @@ def test_dumped_yaml_is_a_flow_free_document() -> None:
     assert "netlist:" in text
     # Block style, so a human can edit it and a diff stays line oriented.
     assert "{" not in text.split("patches:")[0]
+
+
+# ---- portability: a Recipe belongs to nobody's project ----------------------
+#
+# Section 3.B.8 of the tests disposition: a Recipe is meant to be shared -- the
+# same file, on two people's projects, in two checkouts. Anything in it that
+# names *where* rather than *what* breaks that the moment it is copied.
+
+
+def test_a_recipe_carries_no_filesystem_path() -> None:
+    """Not one field of a fully-populated Recipe is a path.
+
+    Checked against ``recipe_from_catalog``, not the bare defaults: a field
+    that is empty by default and path-shaped when filled would pass the weaker
+    check and fail the user. Anything that looks like a path -- absolute, or
+    carrying a separator, or a ``$VAR`` expression -- belongs to the PdkProfile
+    (process facts), the workspace (where output lands) or the Cells table.
+    """
+
+    recipe = recipe_from_catalog(catalog=builtin_catalog())
+    for path in recipe_field_paths():
+        # The DSPF name delimiters are single punctuation characters that a
+        # netlist reader splits *node names* on -- ``/`` there separates
+        # hierarchy levels inside one identifier, not directories. They are
+        # the only fields whose legal values overlap path syntax.
+        if path.endswith("delimiter"):
+            continue
+        value = recipe
+        for part in path.split("."):
+            value = getattr(value, part, None)
+            if value is None:
+                break
+        for text in _strings_in(value):
+            assert not text.startswith(("/", "~", "$")), f"{path} = {text!r}"
+            assert "/" not in text, f"{path} = {text!r}"
+            assert chr(92) not in text, f"{path} = {text!r}"
+
+
+def _strings_in(value: object) -> list[str]:
+    """Every string reachable from ``value`` (scalars, lists, tuples)."""
+
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [item for entry in value for item in _strings_in(entry)]
+    return []
+
+
+def test_the_same_recipe_file_loads_equal_from_two_project_directories(
+    tmp_path: Path,
+) -> None:
+    """Copy the file into two projects and the two objects are identical.
+
+    Equality is by ``model_dump``, not by ``content_sha256``: the digest
+    deliberately ignores bookkeeping, so comparing digests would pass even if
+    a project path had leaked into a field the digest skips.
+    """
+
+    recipe = recipe_from_catalog(catalog=builtin_catalog(), recipe_id="rc-shared")
+    first = tmp_path / "projectA" / "recipes" / "rc-shared.yaml"
+    second = tmp_path / "projectB" / "recipes" / "rc-shared.yaml"
+    save_recipe(recipe, first)
+    second.parent.mkdir(parents=True)
+    second.write_text(first.read_text(encoding="utf-8"), encoding="utf-8")
+
+    assert load_recipe(first).model_dump() == load_recipe(second).model_dump()
+    assert load_recipe(first).content_sha256() == load_recipe(second).content_sha256()
+    # Neither project's directory name is anywhere in the file.
+    text = first.read_text(encoding="utf-8")
+    assert "projectA" not in text
+    assert str(tmp_path) not in text

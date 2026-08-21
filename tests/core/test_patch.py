@@ -1427,3 +1427,130 @@ def test_patch_conflict_error_carries_the_report() -> None:
     assert error.report is report
     assert "quantus/ext.cmd" in str(error)
     assert "lost=1" in str(error)
+
+
+# --- reverting one hunk of several (04-tests-disposition section 3.C.7) ------
+#
+# The UI offers "revert this one edit". That is only safe if hunks are
+# independent: if removing the middle one silently moved the other two, the
+# escape hatch would be a trap rather than a tool.
+
+DECOUPLE_OLD = '              -decoupling_factor 1.0 \\\n'
+DECOUPLE_NEW = '              -decoupling_factor 2.5 \\\n'
+
+
+def _three_hunk_edit(ctx: dict[str, Any]) -> str:
+    """One edit near the top, one in the middle, one further down."""
+
+    return (
+        render(TPL, ctx)
+        .replace(DECOUPLE_OLD, DECOUPLE_NEW, 1)
+        .replace(DIRNAME_OLD, DIRNAME_NEW, 1)
+        .replace(CORNER_OLD, CORNER_NEW, 1)
+    )
+
+
+def test_deleting_the_middle_hunk_leaves_the_other_two_exactly_as_they_were() -> None:
+    """Reverting one edit must equal never having made it.
+
+    "Equal" is byte equality against a patch captured from an edit that only
+    ever touched the other two lines -- not merely "the other two still
+    applied". The weaker check would pass even if removing a hunk shifted the
+    lines the survivors anchor on, which is precisely the failure a
+    line-offset-based store would have.
+    """
+
+    ctx = profile_a("pll_top")
+    three = capture(TPL, ctx, _three_hunk_edit(ctx))
+    assert len(three.hunks) == 3
+
+    without_middle = three.model_copy(
+        update={"hunks": [three.hunks[0], three.hunks[2]]}
+    )
+    never_made = capture(
+        TPL,
+        ctx,
+        render(TPL, ctx).replace(DECOUPLE_OLD, DECOUPLE_NEW, 1).replace(
+            CORNER_OLD, CORNER_NEW, 1
+        ),
+    )
+    assert len(never_made.hunks) == 2
+
+    # Apply both to a *different* cell, so the comparison also proves the
+    # surviving hunks still re-materialise their slots.
+    other = profile_a("vco_core")
+    base, values = render(TPL, other), mask_values(TPL, other)
+    reverted = apply_patch(base, without_middle, values)
+    fresh = apply_patch(base, never_made, values)
+
+    assert reverted.blocking is False and fresh.blocking is False
+    assert reverted.patched_text == fresh.patched_text
+
+    # ...and the middle edit is the only thing that went.
+    full = apply_patch(base, three, values)
+    assert full.patched_text != reverted.patched_text
+    assert "query_output_v2" in full.patched_text
+    assert "query_output_v2" not in reverted.patched_text
+    assert "-decoupling_factor 2.5" in reverted.patched_text
+    assert CORNER_NEW in reverted.patched_text
+
+
+def test_hunks_carry_no_ordering_dependency_between_each_other() -> None:
+    """Declaration order decides application order, and nothing else does.
+
+    The three hunks above touch three unrelated lines, so re-ordering the
+    stored list must not change the result. If it did, a "revert hunk 2"
+    that rewrote the list would be able to change what hunks 1 and 3 do.
+    """
+
+    ctx = profile_a("pll_top")
+    three = capture(TPL, ctx, _three_hunk_edit(ctx))
+    reversed_order = three.model_copy(update={"hunks": list(reversed(three.hunks))})
+
+    other = profile_a("vco_core")
+    base, values = render(TPL, other), mask_values(TPL, other)
+    forward = apply_patch(base, three, values)
+    backward = apply_patch(base, reversed_order, values)
+
+    assert forward.patched_text == backward.patched_text
+    assert [r.hunk_id for r in backward.resolutions] == [
+        h.id for h in reversed_order.hunks
+    ]
+
+
+# --- an edit that changed nothing (section 3.C.10) --------------------------
+
+
+def test_an_edit_that_changed_nothing_produces_no_hunk() -> None:
+    """The user opened the generated file, looked, and closed it.
+
+    Storing a zero-hunk patch would put "1 manual edit" in the UI and give the
+    stage something to re-apply forever, for a change nobody made.
+    """
+
+    ctx = profile_a("pll_top")
+    unchanged = render(TPL, ctx)
+    patch = capture(TPL, ctx, unchanged)
+
+    assert patch.hunks == []
+    assert patch.enabled_count == 0
+
+    other = profile_a("vco_core")
+    values = mask_values(TPL, other)
+    report = apply_patch(render(TPL, other), patch, values)
+    assert report.patched_text == render(TPL, other)
+    assert report.blocking is False
+    assert report.resolutions == []
+
+
+def test_an_edit_that_only_changed_trailing_whitespace_produces_no_hunk() -> None:
+    """A change the tool cannot see must not become a stored edit."""
+
+    ctx = profile_a("pll_top")
+    whitespace_only = render(TPL, ctx).replace(
+        DIRNAME_OLD, DIRNAME_OLD.rstrip("\n").rstrip() + "   \n", 1
+    )
+    assert whitespace_only != render(TPL, ctx)
+
+    patch = capture(TPL, ctx, whitespace_only)
+    assert patch.hunks == []

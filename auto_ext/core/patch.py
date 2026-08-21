@@ -1025,6 +1025,27 @@ def sha256_text(text: str) -> str:
 # --- capture ----------------------------------------------------------------
 
 
+def _is_whitespace_only(
+    before: Sequence[str], after: Sequence[str]
+) -> bool:
+    """True when two line runs differ only in trailing whitespace.
+
+    A trailing space added to a Quantus command file means nothing to the
+    tool, but as a stored hunk it has to keep matching forever and will block
+    the stage the first time the catalog reflows that line. The v1 toggle
+    engine refused such an edit outright
+    (``diff_template._all_hunks_whitespace_only``); here the opcode is dropped
+    instead, so an edit that mixes a real change with an incidental
+    re-indentation still keeps its real hunks.
+
+    Line structure is significant: this compares the rstripped lines
+    pairwise rather than concatenating them, so joining two lines into one
+    is a real change even though the two texts strip to the same characters.
+    """
+
+    return [line.rstrip() for line in before] == [line.rstrip() for line in after]
+
+
 def capture_patch(
     *,
     template_source: str,
@@ -1088,6 +1109,7 @@ def capture_patch(
             a=real_lines, b=edit_lines, autojunk=False
         ).get_opcodes()
         if op[0] != "equal"
+        and not _is_whitespace_only(real_lines[op[1] : op[2]], edit_lines[op[3] : op[4]])
     ]
 
     for index, (_tag, i1, i2, j1, j2) in enumerate(opcodes):

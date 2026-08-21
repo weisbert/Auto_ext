@@ -42,8 +42,9 @@ STATUS_COLOR: dict[str, str] = {
 }
 
 
-#: Env-resolution source → display label used by the Project tab's env
-#: panel. Keys match :data:`auto_ext.core.env.EnvSource` string values.
+#: Env-resolution source -> display label. No reader since the Project tab's
+#: env panel was deleted; the Setup drawer is the natural next one. Keys
+#: match :data:`auto_ext.core.env.EnvSource` string values.
 ENV_SOURCE_DISPLAY: dict[str, str] = {
     "override": "⇄ override",
     "shell": "✓ shell",
@@ -59,7 +60,8 @@ ENV_SOURCE_COLOR: dict[str, str] = {
     "missing": "#c83232",
 }
 
-#: Foreground color for TasksTab preview rows that have been excluded
-#: via the include checkbox. Grey matches :data:`STATUS_COLOR` for
-#: SKIPPED so excluded combinations read as "intentionally out".
+#: Foreground color for a cell row that is parked (``enabled: false``).
+#: Grey matches :data:`STATUS_COLOR` for SKIPPED so a parked row reads as
+#: "intentionally out". No reader since the Tasks tab was deleted -- the
+#: Cells screen paints the same idea from :mod:`auto_ext.ui.theme`.
 EXCLUDED_ROW_COLOR: str = "#888888"

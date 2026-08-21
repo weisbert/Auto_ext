@@ -11,10 +11,9 @@ Live subcommands:
   to try next when something failed.
 - ``check-env`` — env-var resolution plus, when a PdkProfile is in play,
   the full health report. A thin wrapper over ``profile health``.
-- ``import`` — turn a raw EDA export into a parameterised ``.j2`` +
-  sidecar manifest with identity substitutions pre-applied.
-- ``knob suggest / promote`` — inspect and promote candidate literals
-  on an already-imported template.
+- ``import`` — turn a raw EDA export into a parameterised ``.j2`` with
+  identity substitutions pre-applied. A catalog-building tool, not a daily
+  one.
 - ``recipe list / show / new / set`` — the Recipe library
   (:mod:`auto_ext.model.recipe`): one portable extraction configuration
   per YAML file, found on the search path documented in
@@ -33,14 +32,12 @@ Live subcommands:
   profile / recipe / cells / workspace world, via
   :func:`auto_ext.migrate.migrate_v1_to_v2`.
 
-Two render paths coexist in this build, and ``--recipe`` is the only thing
-that chooses between them. Without it, ``run`` renders from
-``project.templates`` plus the ``*.manifest.yaml`` knob merge, untouched.
-With it — and the ``--profile`` it requires — ``auto_ext.core.runner``
-assembles its recipe pipeline: templates from the catalog, values from the
-Recipe and the PdkProfile, manual edits from ``Recipe.patches``. This module
-resolves the two objects from disk, checks the profile's health before
-anything starts, and hands them over; it re-implements none of that logic.
+One render path. ``run`` needs a ``--recipe`` and the ``--profile`` it
+depends on; ``auto_ext.core.runner`` then renders every stage through the
+catalog, with values from the Recipe and the PdkProfile and manual edits from
+``Recipe.patches``. This module resolves the two objects from disk, checks the
+profile's health before anything starts, and hands them over; it re-implements
+none of that logic.
 
 Rendering lives in :mod:`auto_ext.cli_reporter` (Rich tables, the failure
 classifier, the LVS view); this module is the argument surface and the data
@@ -66,13 +63,6 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
-
-knob_app = typer.Typer(
-    name="knob",
-    help="Inspect or promote candidate literals on an imported template.",
-    no_args_is_help=True,
-)
-app.add_typer(knob_app, name="knob")
 
 runs_app = typer.Typer(
     name="runs",
@@ -144,7 +134,7 @@ def run(
     config_dir: Path = typer.Option(
         ...,
         "--config-dir",
-        help="Directory containing project.yaml + tasks.yaml.",
+        help="Directory containing workspace.yaml + cells.yaml.",
         exists=True,
         file_okay=False,
         dir_okay=True,
@@ -185,25 +175,19 @@ def run(
         "--workarea",
         help="EDA cwd (where si.env lands). Defaults to --auto-ext-root parent.",
     ),
-    knob: Optional[list[str]] = typer.Option(
-        None,
-        "--knob",
-        help="Override a knob for this run. Format: <stage>.<name>=<value>. "
-        "Repeatable. Quote values containing spaces, e.g. "
-        '--knob "quantus.temperature=60".',
-    ),
     recipe: Optional[str] = typer.Option(
         None,
         "--recipe",
-        help="Render through the catalog instead of project.templates + knob "
-        "manifests. Needs --profile as well. `auto-ext recipe list` shows "
-        "what is on the search path.",
+        help="Which extraction configuration to render. Required. "
+        "`auto-ext recipe list` shows what is on the search path.",
     ),
     profile: Optional[str] = typer.Option(
         None,
         "--profile",
         help="The PdkProfile supplying the corner literals, deck paths and "
-        "supply-name tables the recipe deliberately does not carry. Its "
+        "supply-name tables the recipe deliberately does not carry. Required; "
+        "omit only when exactly one profile exists under "
+        "<root>/config/profiles/, which is then selected automatically. Its "
         "health report is checked before anything starts.",
     ),
     resources: Optional[Path] = typer.Option(
@@ -245,21 +229,16 @@ def run(
 ) -> None:
     """Run extraction tasks through the configured EDA tools.
 
-    Two render paths, and ``--recipe`` is the only thing that chooses:
+    Every stage renders through :mod:`auto_ext.core.render`: templates from the
+    catalog, values from the ``--recipe`` and the ``--profile``, manual edits
+    from ``Recipe.patches``. The recipe also owns the stage set (intersected
+    with ``--stage``), whether jivaro runs, and ``continue_on_lvs_fail``;
+    ``--continue-on-lvs-fail`` overrides the last of those for one invocation.
 
-    * Without it, templates come from ``project.templates`` and values from
-      the ``*.manifest.yaml`` knob merge, exactly as before.
-    * With it (and the ``--profile`` it requires), every stage renders through
-      :mod:`auto_ext.core.render`: templates from the catalog, values from the
-      Recipe and the PdkProfile, manual edits from ``Recipe.patches``. The
-      recipe also owns the stage set (intersected with ``--stage``), whether
-      jivaro runs, and ``continue_on_lvs_fail``.
-
-    ``--knob`` belongs to the legacy path only — the recipe path has no knob
-    layer for it to override — so combining the two is refused rather than
-    silently ignored. ``--continue-on-lvs-fail`` is honoured on both: on the
-    recipe path it overrides ``recipe.policy.continue_on_lvs_fail`` for this
-    invocation.
+    ``--config-dir`` holds ``workspace.yaml`` (where the Cadence work lands)
+    and ``cells.yaml`` (the DUT table). A directory still holding the v1
+    ``project.yaml`` + ``tasks.yaml`` pair is reported with the migration
+    command rather than half-read.
 
     Press Ctrl-C once to request a graceful cancel: the in-flight
     subprocess is sent SIGTERM (10s grace) then SIGKILL; remaining
@@ -269,14 +248,12 @@ def run(
 
     from rich.console import Console
 
-    from auto_ext.core.config import load_project, load_tasks
     from auto_ext.core.errors import AutoExtError
     from auto_ext.core.progress import CancelToken, NullReporter, ProgressReporter
     from auto_ext.core.runner import STAGE_ORDER, run_tasks
 
     try:
-        project = load_project(config_dir / "project.yaml")
-        tasks = load_tasks(config_dir / "tasks.yaml", project=project)
+        project, tasks = _load_run_config(config_dir)
     except AutoExtError as exc:
         typer.secho(f"config error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
@@ -298,101 +275,102 @@ def run(
         [s.strip() for s in stage.split(",") if s.strip()] if stage else list(STAGE_ORDER)
     )
 
-    if continue_on_lvs_fail:
-        tasks = [t.model_copy(update={"continue_on_lvs_fail": True}) for t in tasks]
-
-    try:
-        cli_knobs = _parse_cli_knobs(knob or [], STAGE_ORDER)
-    except AutoExtError as exc:
-        typer.secho(f"config error: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
-
     root = (auto_ext_root or config_dir.parent).resolve()
     wa = (workarea or root.parent).resolve()
 
-    if recipe is not None and cli_knobs:
+    if recipe is None:
         typer.secho(
-            "--knob overrides a *.manifest.yaml knob, and the recipe render "
-            "path has no knob layer: the value would be ignored. Put it in "
-            "the recipe instead (`auto-ext recipe set "
-            f"{recipe} <field>=<value>`), or drop --recipe.",
+            "--recipe is required: a run renders from the catalog, and the "
+            "recipe is what says which targets and which values. "
+            "`auto-ext recipe list` shows what is on the search path.",
             fg=typer.colors.RED,
             err=True,
         )
         raise typer.Exit(code=2)
 
-    recipe_obj: Optional["Recipe"] = None
-    profile_obj: Optional["PdkProfile"] = None
+    directory = _profiles_dir(auto_ext_root, config_dir, profiles_dir)
+    selected_profile = profile or (
+        _sole_profile_id(directory) if directory.is_dir() else None
+    )
+    if selected_profile is None:
+        known = _profile_ids(directory) if directory.is_dir() else []
+        detail = (
+            f"name one with --profile: {known} live under {directory}"
+            if known
+            else f"no profile under {directory}. Run "
+            f"`auto-ext profile discover --write` to draft one."
+        )
+        typer.secho(
+            "--profile is required: the corner literals, the LVS deck "
+            "directory and the supply-name tables are process facts the "
+            f"recipe deliberately does not carry. {detail}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     resource_obj: Optional["ResourceProfile"] = None
 
     # Resolve both objects before checking anything: a mistyped recipe name is
     # cheap to report and the health report is not, and being told to pass
     # --no-health-check in order to discover a typo would be absurd.
-    if recipe is not None:
-        loaded_recipe = _load_recipe(
-            recipe_search_path(auto_ext_root, config_dir, recipes_dir), recipe
+    loaded_recipe = _load_recipe(
+        recipe_search_path(auto_ext_root, config_dir, recipes_dir), recipe
+    )
+    recipe_obj: "Recipe" = loaded_recipe.recipe
+    if continue_on_lvs_fail:
+        # The runner reads recipe.policy, so the flag has to land there or it
+        # would do nothing.
+        recipe_obj = recipe_obj.model_copy(
+            update={
+                "policy": recipe_obj.policy.model_copy(
+                    update={"continue_on_lvs_fail": True}
+                )
+            }
         )
-        recipe_obj = loaded_recipe.recipe
-        if continue_on_lvs_fail:
-            # The recipe path reads recipe.policy, not task.continue_on_lvs_fail,
-            # so the flag has to land there or it would do nothing.
-            recipe_obj = recipe_obj.model_copy(
-                update={
-                    "policy": recipe_obj.policy.model_copy(
-                        update={"continue_on_lvs_fail": True}
-                    )
-                }
-            )
-        ref = recipe_obj.ref(source_path=loaded_recipe.path)
-        typer.echo(
-            f"recipe {ref.recipe_id} v{ref.version} "
-            f"({ref.content_sha256[:12]}) from {loaded_recipe.path}"
-        )
+    ref = recipe_obj.ref(source_path=loaded_recipe.path)
+    typer.echo(
+        f"recipe {ref.recipe_id} v{ref.version} "
+        f"({ref.content_sha256[:12]}) from {loaded_recipe.path}"
+    )
 
-    if profile is not None:
-        loaded_profile = _load_profile(
-            _profiles_dir(auto_ext_root, config_dir, profiles_dir), profile
-        )
-        profile_obj = loaded_profile.profile
-        typer.echo(
-            f"profile {profile_obj.profile_id} ({profile_obj.display_name}) "
-            f"from {loaded_profile.path}"
-        )
-        # Only when the pair is complete: a profile without a recipe is about
-        # to be refused by run_tasks, and burying that message under a health
-        # report the user did not ask for helps nobody.
-        report = _run_health(profile_obj) if recipe is not None else None
-        if report is not None and not report.can_run:
-            blocking = ", ".join(result.check_id for result in report.blocking)
-            if health_check:
-                # The full report, because the user has to act on it.
-                _print_health(
-                    Console(), report, profile=profile_obj, source=loaded_profile.path
-                )
-                typer.secho(
-                    "refusing to start: the profile's health report has "
-                    "blocking checks. Fix them, or pass --no-health-check to "
-                    "run anyway.",
-                    fg=typer.colors.RED,
-                    err=True,
-                )
-                raise typer.Exit(code=2)
-            # One line, because the user already said they know: printing 20
-            # rows of a report they chose to skip only buries the run summary.
+    loaded_profile = _load_profile(directory, selected_profile)
+    profile_obj: "PdkProfile" = loaded_profile.profile
+    typer.echo(
+        f"profile {profile_obj.profile_id} ({profile_obj.display_name}) "
+        f"from {loaded_profile.path}"
+    )
+    report = _run_health(profile_obj)
+    if not report.can_run:
+        blocking = ", ".join(result.check_id for result in report.blocking)
+        if health_check:
+            # The full report, because the user has to act on it.
+            _print_health(
+                Console(), report, profile=profile_obj, source=loaded_profile.path
+            )
             typer.secho(
-                f"--no-health-check: starting with {len(report.blocking)} "
-                f"blocking check(s) unresolved ({blocking}). "
-                f"`auto-ext profile health {profile_obj.profile_id}` explains "
-                f"each one.",
-                fg=typer.colors.YELLOW,
+                "refusing to start: the profile's health report has "
+                "blocking checks. Fix them, or pass --no-health-check to "
+                "run anyway.",
+                fg=typer.colors.RED,
                 err=True,
             )
+            raise typer.Exit(code=2)
+        # One line, because the user already said they know: printing 20
+        # rows of a report they chose to skip only buries the run summary.
+        typer.secho(
+            f"--no-health-check: starting with {len(report.blocking)} "
+            f"blocking check(s) unresolved ({blocking}). "
+            f"`auto-ext profile health {profile_obj.profile_id}` explains "
+            f"each one.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
 
-    if recipe_obj is not None:
-        resource_path = resources or (root / "config" / _RESOURCES_FILENAME)
-        if resources is not None or resource_path.is_file():
-            resource_obj = _load_resources(resource_path)
-            typer.echo(f"resources {resource_obj.resource_id} from {resource_path}")
+    resource_path = resources or (root / "config" / _RESOURCES_FILENAME)
+    if resources is not None or resource_path.is_file():
+        resource_obj = _load_resources(resource_path)
+        typer.echo(f"resources {resource_obj.resource_id} from {resource_path}")
 
     cancel_token = CancelToken()
     reporter: ProgressReporter
@@ -435,7 +413,6 @@ def run(
             workarea=wa,
             verbose=verbose,
             dry_run=dry_run,
-            cli_knobs=cli_knobs,
             max_workers=jobs if jobs >= 2 else None,
             reporter=reporter,
             cancel_token=cancel_token,
@@ -849,44 +826,34 @@ def import_cmd(
     output: Path = typer.Option(
         ...,
         "--output",
-        help="Target .j2 path. The sidecar manifest is written next to it.",
+        help="Target .j2 path. A review report is written next to it.",
         resolve_path=True,
     ),
     cell: Optional[str] = typer.Option(None, "--cell"),
     library: Optional[str] = typer.Option(None, "--library"),
     lvs_layout_view: Optional[str] = typer.Option(None, "--lvs-layout-view"),
     lvs_source_view: Optional[str] = typer.Option(None, "--lvs-source-view"),
-    fresh: bool = typer.Option(
-        False,
-        "--fresh",
-        help="Wipe any existing output + manifest instead of smart-merging.",
-    ),
 ) -> None:
-    """Parameterise a raw EDA export into ``.j2`` + ``.manifest.yaml``.
+    """Parameterise a raw EDA export into a ``.j2`` catalog template.
 
     Identity values (cell / library / views / ground_net / out_file) are
     auto-inferred from recognised per-format keys and substituted with
-    ``[[...]]`` placeholders. All other literals are left as-is; use
-    ``knob suggest`` + ``knob promote`` to turn them into knobs.
+    ``[[...]]`` placeholders, and the Calibre importer additionally turns the
+    ``connect_by_name`` line and the LVS deck variant into their catalog
+    references. Every other literal is left as-is: which of them a user may
+    change is decided by adding a row to ``auto_ext/catalog/options.yaml``,
+    not by a sidecar next to the template.
 
-    If ``--output`` already has a manifest (and ``--fresh`` is not set),
-    user-promoted knobs from the existing manifest are re-applied to the
-    new body, their defaults refreshed from the raw, and manifest-level
-    edits (description, range, unit) preserved.
+    A catalog-building tool. The review report next to the output lists what
+    was substituted and what was left hardcoded, which is the working list for
+    that catalog work.
     """
     from auto_ext.core.importer import (
         Identity,
         ImportError as CoreImportError,
         import_template,
-        merge_reimport,
     )
     from auto_ext.core.io_utils import backup_if_exists
-    from auto_ext.core.manifest import (
-        TemplateManifest,
-        dump_manifest_yaml,
-        load_manifest,
-        manifest_path_for,
-    )
 
     if tool not in _VALID_IMPORT_TOOLS:
         typer.secho(
@@ -924,316 +891,33 @@ def import_cmd(
         typer.secho(f"import failed: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=2)
 
-    manifest_path = manifest_path_for(output)
-    existing_manifest: Optional[TemplateManifest] = None
-    if not fresh and output.exists() and manifest_path.exists():
-        from auto_ext.core.errors import ConfigError
-
-        try:
-            existing_manifest = load_manifest(output)
-        except ConfigError as exc:
-            typer.secho(
-                f"warning: existing manifest is unloadable, treating as --fresh: {exc}",
-                fg=typer.colors.YELLOW,
-                err=True,
-            )
-            existing_manifest = None
-
-    merge_messages: list[str] = []
-    auto_knobs = dict(result.auto_knobs)
-    if existing_manifest is not None and existing_manifest.knobs:
-        outcome = merge_reimport(result, existing_manifest)
-        body = outcome.body
-        # auto_knobs are the base; existing user-promoted knobs win on
-        # any key conflict (their description / range / source survive).
-        merged_knobs = {**auto_knobs, **outcome.manifest.knobs}
-        final_manifest = TemplateManifest(
-            template=output.name, knobs=merged_knobs
-        )
-        # ``template`` was validated to match output.name by load_manifest.
-        merge_messages = outcome.messages
-    else:
-        body = result.template_body
-        final_manifest = TemplateManifest(
-            template=output.name, knobs=auto_knobs
-        )
-
     backup_if_exists(output)
-    backup_if_exists(manifest_path)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(body, encoding="utf-8")
-    manifest_path.write_text(dump_manifest_yaml(final_manifest), encoding="utf-8")
+    output.write_text(result.template_body, encoding="utf-8")
 
     review_path = output.with_name(output.name + ".review.md")
     backup_if_exists(review_path)
-    review_path.write_text(
-        _build_review_report(result, merge_messages), encoding="utf-8"
-    )
+    review_path.write_text(_build_review_report(result), encoding="utf-8")
 
     typer.echo(f"wrote template    : {output}")
-    typer.echo(f"wrote manifest    : {manifest_path}")
     typer.echo(f"wrote review      : {review_path}")
-    if merge_messages:
-        typer.echo("")
-        typer.echo("Smart-merge log:")
-        for m in merge_messages:
-            typer.echo(f"  {m}")
+    for name, found in sorted(result.detected.items()):
+        typer.echo(
+            f"parameterised     : {name} = {found.value!r} "
+            f"(catalog row `{found.catalog_key}`)"
+        )
     if result.candidates:
         typer.echo(
-            f"\n{len(result.candidates)} knob candidate(s) detected. "
-            f"Inspect with: auto-ext knob suggest {output}"
+            f"\n{len(result.candidates)} further literal(s) look tunable; "
+            f"see {review_path.name}."
         )
 
 
-@knob_app.command("suggest")
-def knob_suggest(
-    template: Path = typer.Argument(
-        ...,
-        help="Path to the imported .j2 template.",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        resolve_path=True,
-    ),
-    show_all: bool = typer.Option(
-        False,
-        "--all",
-        help="Include low-confidence rows (default: high + medium only).",
-    ),
-) -> None:
-    """List literals that could be promoted to knobs on ``template``."""
-    from rich.console import Console
-    from rich.table import Table
-
-    from auto_ext.core.importer import (
-        ImportError as CoreImportError,
-        _detect_candidates,
-    )
-
-    tool = _infer_tool_from_path(template)
-    if tool is None:
-        typer.secho(
-            f"cannot infer tool from path {template}; "
-            "template must live under templates/{calibre,si,quantus,jivaro}/",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    body = template.read_text(encoding="utf-8")
-    try:
-        candidates = _detect_candidates(tool, body)
-    except CoreImportError as exc:
-        typer.secho(f"suggest failed: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
-
-    filtered = [c for c in candidates if show_all or c.confidence != "low"]
-    if not filtered:
-        typer.echo("no knob candidates detected.")
-        raise typer.Exit(code=0)
-
-    console = Console()
-    table = Table(title=f"Knob candidates — {template.name}")
-    table.add_column("#", justify="right")
-    table.add_column("key", style="cyan")
-    table.add_column("value")
-    table.add_column("type")
-    table.add_column("suggested_name")
-    table.add_column("line", justify="right")
-    for idx, c in enumerate(filtered, start=1):
-        type_cell = f"{c.type}*" if c.confidence == "medium" else c.type
-        if c.confidence == "low":
-            type_cell = f"[dim]{type_cell}[/]"
-        table.add_row(
-            str(idx),
-            c.key,
-            repr(c.default),
-            type_cell,
-            c.suggested_name,
-            str(c.line),
-        )
-    console.print(table)
-    console.print(
-        "[dim]rows marked * use the bool heuristic on 0/1 with a toggle-style key; "
-        "override with --type on `knob promote`.[/]"
-    )
+# ---- import helpers --------------------------------------------------------
 
 
-@knob_app.command("promote")
-def knob_promote(
-    template: Path = typer.Argument(
-        ...,
-        help="Path to the imported .j2 template.",
-        exists=True,
-        file_okay=True,
-        dir_okay=False,
-        resolve_path=True,
-    ),
-    keys: list[str] = typer.Argument(
-        ...,
-        metavar="KEY [KEY ...]",
-        help="One or more raw-file keys (from `knob suggest`) to promote.",
-    ),
-    type_override: Optional[str] = typer.Option(
-        None,
-        "--type",
-        help="Force a type for all promoted keys. One of: int, float, str, bool.",
-    ),
-    name: Optional[str] = typer.Option(
-        None,
-        "--name",
-        help=(
-            "Rename the knob. Only valid when promoting exactly one key; "
-            "otherwise the suggested snake_case name is used."
-        ),
-    ),
-) -> None:
-    """Rewrite ``template`` so ``KEY``'s literal becomes ``[[name]]``, and
-    add a matching entry to the sidecar manifest.
-    """
-    from ruamel.yaml import YAML
-
-    from auto_ext.core.errors import ConfigError
-    from auto_ext.core.importer import (
-        _CAND_PATTERNS,
-        _classify_value,
-        _snake_case,
-        _substitute_at_key,
-    )
-    from auto_ext.core.io_utils import backup_if_exists
-    from auto_ext.core.manifest import (
-        KnobSpec,
-        SourceRef,
-        TemplateManifest,
-        dump_manifest_yaml,
-        load_manifest,
-        manifest_path_for,
-    )
-
-    if type_override is not None and type_override not in (
-        "int",
-        "float",
-        "str",
-        "bool",
-    ):
-        typer.secho(
-            f"--type must be one of int/float/str/bool, got {type_override!r}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    if name is not None and len(keys) != 1:
-        typer.secho(
-            "--name is only valid when promoting exactly one key",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    tool = _infer_tool_from_path(template)
-    if tool is None:
-        typer.secho(
-            f"cannot infer tool from path {template}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    body = template.read_text(encoding="utf-8")
-
-    manifest_path = manifest_path_for(template)
-    try:
-        manifest = load_manifest(template)
-    except ConfigError as exc:
-        typer.secho(
-            f"cannot load manifest {manifest_path}: {exc}",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    if manifest is None:
-        manifest = TemplateManifest(template=template.name, knobs={})
-
-    new_knobs = dict(manifest.knobs)
-    pattern = _CAND_PATTERNS[tool]
-
-    for key in keys:
-        # Locate the raw literal on its line.
-        literal: Optional[str] = None
-        for line in body.splitlines():
-            for m in pattern.finditer(line):
-                if m.group("key") == key:
-                    literal = m.group("value")
-                    break
-            if literal is not None:
-                break
-        if literal is None:
-            typer.secho(
-                f"key {key!r} not found in {template} (or already promoted)",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(code=2)
-
-        cls = _classify_value(key, literal)
-        if cls is None:
-            typer.secho(
-                f"key {key!r} value {literal!r} is not a promotable literal",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        inferred_type, inferred_default, _ = cls
-        chosen_type = type_override or inferred_type
-
-        # Recoerce literal to chosen_type (user may override int vs bool etc).
-        try:
-            from auto_ext.core.importer import _coerce_literal
-
-            chosen_default = _coerce_literal(literal, chosen_type)
-        except ValueError as exc:
-            typer.secho(
-                f"cannot coerce {literal!r} to --type {chosen_type}: {exc}",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(code=2)
-
-        knob_name = name if name is not None else _snake_case(key)
-        if knob_name in new_knobs:
-            typer.secho(
-                f"knob {knob_name!r} already present in manifest; refusing to overwrite",
-                fg=typer.colors.RED,
-                err=True,
-            )
-            raise typer.Exit(code=2)
-
-        body, _ = _substitute_at_key(tool, body, key, f"[[{knob_name}]]")
-        new_knobs[knob_name] = KnobSpec(
-            type=chosen_type,
-            default=chosen_default,
-            source=SourceRef(tool=tool, key=key),
-        )
-
-    new_manifest = manifest.model_copy(update={"knobs": new_knobs})
-
-    backup_if_exists(template)
-    backup_if_exists(manifest_path)
-
-    template.write_text(body, encoding="utf-8")
-    manifest_path.write_text(dump_manifest_yaml(new_manifest), encoding="utf-8")
-
-    typer.echo(f"promoted {len(keys)} knob(s); updated:")
-    typer.echo(f"  {template}")
-    typer.echo(f"  {manifest_path}")
-
-
-# ---- import/knob helpers ---------------------------------------------------
-
-
-def _build_review_report(result, merge_messages: list[str]) -> str:
+def _build_review_report(result) -> str:
     from datetime import datetime
 
     lines: list[str] = []
@@ -1260,11 +944,28 @@ def _build_review_report(result, merge_messages: list[str]) -> str:
     else:
         lines.append("- (nothing extracted)")
     lines.append("")
-    lines.append("## Knob candidates")
+    lines.append("## Parameterised")
+    if result.detected:
+        for name, found in sorted(result.detected.items()):
+            lines.append(
+                f"- `{name}` = `{found.value!r}` "
+                f"(catalog row `{found.catalog_key}`)"
+            )
+    else:
+        lines.append("Identity substitutions only.")
+    lines.append("")
+    lines.append("## Literals that look tunable")
     if result.candidates:
+        for cand in result.candidates:
+            lines.append(
+                f"- line {cand.line}: `{cand.key}` = `{cand.default}` "
+                f"(suggested name: `{cand.suggested_name}`)"
+            )
+        lines.append("")
         lines.append(
-            f"{len(result.candidates)} detected. Run "
-            f"`auto-ext knob suggest <template>` to inspect them."
+            "None of these is settable yet. To make one settable, add a row to "
+            "`auto_ext/catalog/options.yaml` naming the field that owns it and "
+            "where it lands, then reference it from the template."
         )
     else:
         lines.append("None detected.")
@@ -1283,24 +984,11 @@ def _build_review_report(result, merge_messages: list[str]) -> str:
     else:
         lines.append("None detected.")
     lines.append("")
-    if merge_messages:
-        lines.append("## Smart-merge log")
-        for m in merge_messages:
-            lines.append(f"- {m}")
-        lines.append("")
     lines.append("## Next steps")
-    lines.append("- `auto-ext knob suggest <template>`")
-    lines.append("- `auto-ext knob promote <template> <key>...`")
+    lines.append("- `auto-ext catalog list` — what the generated file already models")
+    lines.append("- add a catalog row for anything above that should be settable")
     lines.append("")
     return "\n".join(lines)
-
-
-def _infer_tool_from_path(template: Path):
-    """Return the tool name by walking ``template``'s parent directories."""
-    for part in reversed(template.parts):
-        if part in ("calibre", "si", "quantus", "jivaro"):
-            return part
-    return None
 
 
 @app.command("check-env")
@@ -1308,9 +996,8 @@ def check_env(
     config_dir: Optional[Path] = typer.Option(
         None,
         "--config-dir",
-        help="Directory containing project.yaml + tasks.yaml. Without "
-        "--profile this selects the legacy env scan, which walks every "
-        "template the tasks reference.",
+        help="Config directory; its `profiles/` subdirectory is where the "
+        "profile is looked up when --profile is omitted.",
         exists=True,
         file_okay=False,
         dir_okay=True,
@@ -1332,25 +1019,17 @@ def check_env(
 ) -> None:
     """Report whether this shell can run: env vars, decks, corners, tools.
 
-    A thin wrapper over ``auto-ext profile health``. When a PdkProfile can be
-    resolved — named with ``--profile``, or the only one under
-    ``<root>/config/profiles/`` — this prints the full health report and exits
-    with :attr:`~auto_ext.model.pdk.PdkHealthReport.exit_code`.
+    A thin wrapper over ``auto-ext profile health``. The PdkProfile is named
+    with ``--profile`` or is the only one under ``<root>/config/profiles/``;
+    the full health report prints and the exit code is
+    :attr:`~auto_ext.model.pdk.PdkHealthReport.exit_code`.
 
-    With no profile and a ``--config-dir`` it falls back to the legacy scan:
-    the env vars are discovered by walking the templates the tasks reference,
-    resolved through ``project.env_overrides`` -> shell, and the exit code is
-    1 if any is missing. Same table, same verdict as before profiles existed;
-    the only reason it survives is that a project that has not been migrated
-    yet still has to be checkable.
+    There is no profile-less mode. The env vars a run needs are the profile's
+    path expressions plus the catalog's templates, so without a profile there
+    is no question to answer — which is why an unmigrated tree gets pointed at
+    ``profile discover`` / ``migrate`` instead of a partial answer.
     """
     from rich.console import Console
-
-    from auto_ext.core.config import load_project, load_tasks
-    from auto_ext.core.env import derive_parent_dir_from_env_candidates, resolve_env
-    from auto_ext.core.errors import AutoExtError
-    from auto_ext.core.health import iter_env_rows
-    from auto_ext.core.runner import _discover_env_vars
 
     console = Console()
     directory = _profiles_dir(auto_ext_root, config_dir, profiles_dir)
@@ -1363,80 +1042,50 @@ def check_env(
         _print_health(console, report, profile=loaded.profile, source=loaded.path)
         raise typer.Exit(code=report.exit_code)
 
-    if config_dir is None:
-        known = _profile_ids(directory)
-        detail = (
-            f"name one with --profile: {known} live under {directory}"
-            if known
-            else f"no profile under {directory} and no --config-dir. Run "
-            f"`auto-ext profile discover --write` to draft a profile, or "
-            f"point --config-dir at a legacy project.yaml."
-        )
-        typer.secho(f"nothing to check: {detail}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
-
-    try:
-        project = load_project(config_dir / "project.yaml")
-        tasks = load_tasks(config_dir / "tasks.yaml", project=project)
-    except AutoExtError as exc:
-        typer.secho(f"config error: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=2)
-
-    required = _discover_env_vars(project, tasks, auto_ext_root=config_dir.parent)
-    resolution = resolve_env(required, project.env_overrides)
-    console.print(_env_table(iter_env_rows(resolution), title="Env resolution"))
-
-    if project.tech_name is None:
-        derived = derive_parent_dir_from_env_candidates(
-            project.tech_name_env_vars, resolution.resolved
-        )
-        if derived is None:
-            typer.secho(
-                f"warning: tech_name not set in project.yaml and could not "
-                f"auto-derive from {project.tech_name_env_vars}. Templates "
-                f"referencing [[tech_name]] will fail to render.",
-                fg=typer.colors.YELLOW,
-            )
-
-    if resolution.missing:
-        console.print(f"[red]missing vars: {resolution.missing}[/]")
-        raise typer.Exit(code=1)
-    console.print(
-        "[dim]legacy env scan (no PdkProfile). `auto-ext profile discover` "
-        "drafts one; `auto-ext profile health` then also checks decks, "
-        "corners and tool availability.[/]"
+    known = _profile_ids(directory) if directory.is_dir() else []
+    detail = (
+        f"name one with --profile: {known} live under {directory}"
+        if known
+        else f"no profile under {directory}. Run "
+        f"`auto-ext profile discover --write` to draft one from a machine "
+        f"scan, or `auto-ext migrate --config-dir <dir> --write` if this "
+        f"tree still has a v1 project.yaml."
     )
-    raise typer.Exit(code=0)
+    typer.secho(f"nothing to check: {detail}", fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=2)
 
 
-def _parse_cli_knobs(
-    entries: list[str], valid_stages: tuple[str, ...]
-) -> dict[str, dict[str, str]]:
-    """Parse repeated ``--knob stage.name=value`` into a nested string dict.
+def _load_run_config(config_dir: Path):
+    """Load the run's workspace + DUT table, or say how to migrate.
 
-    Values stay strings here; :func:`auto_ext.core.manifest.resolve_knob_values`
-    does the per-knob type coercion at render time.
+    ``workspace.yaml`` + ``cells.yaml`` is the live pair. A directory holding
+    only the v1 ``project.yaml`` + ``tasks.yaml`` is routed through
+    :func:`auto_ext.core.config.load_project`, whose refusal names the retired
+    keys and the migration command — which is a better answer than "file not
+    found: workspace.yaml".
     """
+    from auto_ext.core.config import (
+        load_project,
+        load_tasks,
+        load_v2_config,
+        tasks_from_cells,
+    )
     from auto_ext.core.errors import ConfigError
+    from auto_ext.model.workspace import WORKSPACE_FILENAME
 
-    out: dict[str, dict[str, str]] = {}
-    for entry in entries:
-        if "=" not in entry:
-            raise ConfigError(f"--knob {entry!r}: missing '=' (expected stage.name=value)")
-        lhs, value = entry.split("=", 1)
-        if "." not in lhs:
-            raise ConfigError(
-                f"--knob {entry!r}: missing '.' in {lhs!r} (expected stage.name=value)"
-            )
-        stage, name = lhs.split(".", 1)
-        if stage not in valid_stages:
-            raise ConfigError(
-                f"--knob {entry!r}: unknown stage {stage!r}; valid: {list(valid_stages)}"
-            )
-        if not name:
-            raise ConfigError(f"--knob {entry!r}: empty knob name")
-        out.setdefault(stage, {})[name] = value
-    return out
+    if (config_dir / WORKSPACE_FILENAME).is_file():
+        project, book = load_v2_config(config_dir)
+        return project, tasks_from_cells(book)
+
+    if (config_dir / "project.yaml").is_file():
+        project = load_project(config_dir / "project.yaml")
+        return project, load_tasks(config_dir / "tasks.yaml", project=project)
+
+    raise ConfigError(
+        f"{config_dir} holds neither {WORKSPACE_FILENAME} nor project.yaml. "
+        f"`auto-ext migrate --config-dir <dir> --write` converts a v1 tree; "
+        f"`auto-ext init-project` starts a new one."
+    )
 
 
 # ---- run records: end-of-run summary ---------------------------------------

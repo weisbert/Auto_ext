@@ -14,8 +14,9 @@ returns an :class:`ImportResult` carrying:
   report (cross-file aggregation is Phase 4b2).
 
 The importer never writes files — the CLI layer composes ``ImportResult``
-+ the existing :mod:`auto_ext.core.manifest` to produce the ``.j2`` and
-``.manifest.yaml`` on disk, with backup and smart-merge logic.
+to produce the ``.j2`` on disk, with backup logic. Which of the values in
+that ``.j2`` a user can change is the catalog's business
+(:mod:`auto_ext.catalog`), not a sidecar's.
 """
 
 from __future__ import annotations
@@ -25,10 +26,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from pydantic import ValidationError
 
 from auto_ext.core.errors import AutoExtError
-from auto_ext.core.manifest import KnobSpec, TemplateManifest
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +93,28 @@ class PdkToken:
     line: int
 
 
+@dataclass(frozen=True)
+class DetectedValue:
+    """One literal the importer parameterised while writing the template.
+
+    What the importer can actually say about a value it recognised: the
+    literal it found, the closed set it belongs to when there is one, and why
+    the value matters. Everything else a settings system needs -- the type,
+    the range, whether the user may change it, where it lands -- is the
+    catalog's, and duplicating any of it here is what the sidecar manifests
+    did wrong.
+
+    :attr:`catalog_key` names the :class:`auto_ext.catalog.OptionSpec` this
+    value belongs to, so the caller can print a line the user can act on
+    (``auto-ext catalog show <key>``) instead of a bare name.
+    """
+
+    catalog_key: str
+    value: object
+    choices: tuple[str, ...] | None = None
+    description: str = ""
+
+
 @dataclass
 class ImportResult:
     """Output of importing one raw file."""
@@ -104,7 +125,10 @@ class ImportResult:
     candidates: list[Candidate] = field(default_factory=list)
     pdk_tokens: list[PdkToken] = field(default_factory=list)
     raw_source: str = ""
-    auto_knobs: dict[str, KnobSpec] = field(default_factory=dict)
+    #: Optional literals the importer recognised and turned into a Jinja
+    #: reference while writing :attr:`template_body`. Reported so the caller
+    #: can tell the user which catalog rows the new template now depends on.
+    detected: dict[str, DetectedValue] = field(default_factory=dict)
 
 
 # ---- public entry point ----------------------------------------------------
@@ -335,18 +359,18 @@ def _import_calibre(raw: str, overrides: Identity | None) -> ImportResult:
     identity, body, _aux = _apply_rules(
         "calibre", preprocessed, _CALIBRE_LINE_RE, _CALIBRE_RULES, overrides
     )
-    auto_knobs: dict[str, KnobSpec] = {}
-    body, knob = _auto_calibre_connect_by_name(body)
-    if knob is not None:
-        auto_knobs["connect_by_name"] = knob
-    body, knob = _auto_calibre_lvs_variant(body)
-    if knob is not None:
-        auto_knobs["lvs_variant"] = knob
+    detected: dict[str, DetectedValue] = {}
+    body, found = _auto_calibre_connect_by_name(body)
+    if found is not None:
+        detected["connect_by_name"] = found
+    body, found = _auto_calibre_lvs_variant(body)
+    if found is not None:
+        detected["lvs_variant"] = found
     return ImportResult(
         tool="calibre",
         identity=identity,
         template_body=body,
-        auto_knobs=auto_knobs,
+        detected=detected,
     )
 
 
@@ -372,40 +396,38 @@ _CONNECT_BY_NAME_DESCRIPTION = (
 )
 
 
-def _auto_calibre_connect_by_name(body: str) -> tuple[str, KnobSpec | None]:
+def _auto_calibre_connect_by_name(body: str) -> tuple[str, DetectedValue | None]:
     """Wrap (or inject) the *cmnVConnectNamesState ALL line under a
     ``connect_by_name`` toggle.
 
-    Returns ``(new_body, knob_or_none)``. The knob is omitted when the
-    raw lacks both the ON-variant line and the ``*cmnShowOptions:``
-    anchor — there's nothing to parameterize.
+    Returns ``(new_body, detected_or_none)``. Nothing is detected when the raw
+    lacks both the ON-variant line and the ``*cmnShowOptions:`` anchor —
+    there's nothing to parameterize.
     """
     if _CALIBRE_CONNECT_ON_LINE in body:
         # ON variant: wrap the existing line.
         new_body = body.replace(
             _CALIBRE_CONNECT_ON_LINE, _CALIBRE_CONNECT_BLOCK, 1
         )
-        spec = KnobSpec(
-            type="bool",
-            default=True,
+        return new_body, DetectedValue(
+            catalog_key="connect_by_name",
+            value=True,
             description=_CONNECT_BY_NAME_DESCRIPTION,
         )
-        return new_body, spec
 
     m = _CALIBRE_SHOW_OPTIONS_RE.search(body)
     if m is None:
-        # Neither anchor present — leave body alone, emit no knob.
+        # Neither anchor present — leave body alone, detect nothing.
         return body, None
 
     # OFF variant: inject the wrapped block right after *cmnShowOptions:.
     insert_at = m.end()
     new_body = body[:insert_at] + _CALIBRE_CONNECT_BLOCK + body[insert_at:]
-    spec = KnobSpec(
-        type="bool",
-        default=False,
+    return new_body, DetectedValue(
+        catalog_key="connect_by_name",
+        value=False,
         description=_CONNECT_BY_NAME_DESCRIPTION,
     )
-    return new_body, spec
 
 
 # *lvsRulesFile: ...<basename>.<variant>.qcilvs — capture only when the
@@ -422,11 +444,11 @@ _LVS_VARIANT_DESCRIPTION = (
 )
 
 
-def _auto_calibre_lvs_variant(body: str) -> tuple[str, KnobSpec | None]:
+def _auto_calibre_lvs_variant(body: str) -> tuple[str, DetectedValue | None]:
     """Substitute the wodio/widio suffix on ``*lvsRulesFile`` for
-    ``[[lvs_variant]]`` and emit a matching enum knob.
+    ``[[lvs_variant]]`` and report which variant the raw used.
 
-    Returns ``(new_body, knob_or_none)``. The knob is omitted when the
+    Returns ``(new_body, detected_or_none)``. Nothing is detected when the
     rules-file line is absent OR uses a suffix outside ``{wodio, widio}``.
     """
     m = _CALIBRE_LVS_VARIANT_RE.search(body)
@@ -436,13 +458,12 @@ def _auto_calibre_lvs_variant(body: str) -> tuple[str, KnobSpec | None]:
     new_body = (
         body[: m.start(2)] + "[[lvs_variant]]" + body[m.end(2) :]
     )
-    spec = KnobSpec(
-        type="str",
-        default=variant,
-        choices=["wodio", "widio"],
+    return new_body, DetectedValue(
+        catalog_key="lvs_deck_variant",
+        value=variant,
+        choices=("wodio", "widio"),
         description=_LVS_VARIANT_DESCRIPTION,
     )
-    return new_body, spec
 
 
 # SI ``si.env`` uses SKILL-style ``<key> = <value>``. Identity values are
@@ -774,151 +795,6 @@ def _detect_pdk_tokens(body: str) -> list[PdkToken]:
                 tokens.append(PdkToken(value=value, category=category, line=line_no))
     tokens.sort(key=lambda t: (t.line, t.category, t.value))
     return tokens
-
-
-# ---- smart re-import merge -------------------------------------------------
-
-
-def _substitute_at_key(
-    tool: TOOL, body: str, key: str, replacement: str
-) -> tuple[str, str | None]:
-    """Find the first ``key`` line in ``body``, swap its value for
-    ``replacement``. Returns ``(new_body, raw_literal)``; raw_literal is
-    ``None`` if the key is absent or already contains a ``[[...]]``
-    placeholder.
-    """
-    pattern = _CAND_PATTERNS[tool]
-    lines = body.splitlines(keepends=True)
-    for i, line in enumerate(lines):
-        for m in pattern.finditer(line):
-            if m.group("key") != key:
-                continue
-            literal = m.group("value")
-            if "[[" in literal:
-                return body, None
-            new_line = (
-                line[: m.start("value")] + replacement + line[m.end("value") :]
-            )
-            lines[i] = new_line
-            return "".join(lines), literal
-    return body, None
-
-
-def _coerce_literal(literal: str, spec_type: str) -> Any:
-    """Coerce a raw-file literal (always a string) to the knob's type."""
-    if spec_type == "int":
-        return int(literal)
-    if spec_type == "float":
-        return float(literal)
-    if spec_type == "str":
-        if len(literal) >= 2 and literal[0] == '"' and literal[-1] == '"':
-            return literal[1:-1]
-        return literal
-    if spec_type == "bool":
-        if literal in ("1", "true", "True", "yes"):
-            return True
-        if literal in ("0", "false", "False", "no"):
-            return False
-        raise ValueError(f"cannot parse {literal!r} as bool")
-    raise ValueError(f"unknown knob type {spec_type!r}")
-
-
-@dataclass
-class MergeOutcome:
-    """Result of re-applying a Phase 4a manifest onto a fresh import.
-
-    ``body`` is the new template body with user-promoted knobs
-    re-substituted. ``manifest`` has knob defaults refreshed from the raw
-    where the source key still exists. ``messages`` is a human-readable
-    log of merge decisions for the CLI to print.
-    """
-
-    body: str
-    manifest: TemplateManifest
-    messages: list[str] = field(default_factory=list)
-
-
-def merge_reimport(
-    new_result: ImportResult,
-    existing_manifest: TemplateManifest,
-) -> MergeOutcome:
-    """Re-apply user-promoted knobs from ``existing_manifest`` to a fresh
-    :class:`ImportResult`.
-
-    Policy:
-      - Knobs with ``source`` set → re-substitute their raw-file key in
-        the new body, refresh ``default`` from the new raw literal.
-      - Knobs without ``source`` (user-authored) → left untouched; they
-        are not tracked in the raw file and the importer must not
-        invent a source for them.
-      - If a source key has disappeared from the new raw, the knob
-        reference is kept (still valid Jinja) but the default is stale;
-        a warning surfaces in :attr:`MergeOutcome.messages`.
-      - Manifest-level edits (description, range, unit) round-trip
-        unchanged because we only ever update ``default``.
-    """
-
-    messages: list[str] = []
-    body = new_result.template_body
-    merged_knobs: dict[str, KnobSpec] = {}
-
-    for knob_name, spec in existing_manifest.knobs.items():
-        if spec.source is None:
-            merged_knobs[knob_name] = spec
-            messages.append(
-                f"{knob_name}: user-defined knob (no source); template body untouched"
-            )
-            continue
-
-        if spec.source.tool != new_result.tool:
-            merged_knobs[knob_name] = spec
-            messages.append(
-                f"{knob_name}: source.tool={spec.source.tool} does not match "
-                f"import tool {new_result.tool}; skipped"
-            )
-            continue
-
-        body, literal = _substitute_at_key(
-            new_result.tool, body, spec.source.key, f"[[{knob_name}]]"
-        )
-        if literal is None:
-            merged_knobs[knob_name] = spec
-            messages.append(
-                f"{knob_name}: source key {spec.source.key!r} not found in "
-                "new raw; default is now stale"
-            )
-            continue
-
-        try:
-            new_default = _coerce_literal(literal, spec.type)
-        except ValueError as exc:
-            merged_knobs[knob_name] = spec
-            messages.append(
-                f"{knob_name}: cannot coerce {literal!r} to {spec.type}: {exc}"
-            )
-            continue
-
-        if new_default != spec.default:
-            try:
-                merged = KnobSpec.model_validate(
-                    {**spec.model_dump(), "default": new_default}
-                )
-            except ValidationError as exc:
-                merged_knobs[knob_name] = spec
-                messages.append(
-                    f"{knob_name}: new default {new_default!r} rejected by "
-                    f"schema (kept {spec.default!r}): {exc}"
-                )
-                continue
-            merged_knobs[knob_name] = merged
-            messages.append(
-                f"{knob_name}: default updated {spec.default!r} → {new_default!r}"
-            )
-        else:
-            merged_knobs[knob_name] = spec
-
-    merged_manifest = existing_manifest.model_copy(update={"knobs": merged_knobs})
-    return MergeOutcome(body=body, manifest=merged_manifest, messages=messages)
 
 
 # ---- cross-file PDK aggregation (Phase 4b2) --------------------------------

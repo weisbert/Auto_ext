@@ -1,10 +1,16 @@
-"""MainWindow integration tests (Phase 5.7).
+"""MainWindow integration tests.
 
-First test file at the MainWindow level. Two cases pin the init-wizard
-entry points: the File menu action, and the RunTab empty-state banner
-button. Three more cases cover the Q5 dirty-controller branch
-(Save / Discard / Cancel) when the user opens the wizard while the
-project has unsaved edits.
+Three groups:
+
+* the window boots off-screen, shows the three redesign screens and nothing
+  from the retired tabs;
+* it fits inside the 940x560 floor the redesign promised -- the old window's
+  effective minimum was 724x1056, which does not shrink on a 1080p screen;
+* the wiring between the controller and the screens actually moves data.
+
+Off-screen means ``Qt.WA_DontShowOnScreen`` plus a real ``show()``: a window
+that is never shown never lays out, so a size assertion against an unshown
+window measures nothing.
 """
 
 from __future__ import annotations
@@ -16,375 +22,643 @@ import pytest
 pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
-from PyQt5.QtWidgets import QMessageBox, QPushButton  # noqa: E402
+from PyQt5.QtCore import Qt  # noqa: E402
+from PyQt5.QtWidgets import QMenu, QMessageBox  # noqa: E402
 
 from auto_ext.ui.main_window import MainWindow  # noqa: E402
+from auto_ext.ui.screens.cells_screen import CellsScreen  # noqa: E402
+from auto_ext.ui.screens.recipes_screen import RecipesScreen  # noqa: E402
+from auto_ext.ui.screens.runs_screen import RunsScreen  # noqa: E402
+from auto_ext.ui.screens.setup_drawer import SetupDrawer  # noqa: E402
+from auto_ext.ui.theme import WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH  # noqa: E402
 from auto_ext.ui.widgets.init_wizard import InitProjectWizard  # noqa: E402
+from auto_ext.ui.widgets.log_view import LogView  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def dialogs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
+    """Record every message box instead of showing it, and return the log.
+
+    An unpatched ``QMessageBox`` in a headless test does not fail -- it opens
+    a modal and blocks the run until the CI job is killed. Recording by
+    default makes an unexpected dialog an assertion instead of a hang, and a
+    test that needs a specific answer re-patches on top of this (a test's own
+    ``monkeypatch`` runs after the autouse fixture, so it wins).
+    """
+
+    log: list[tuple[str, str, str]] = []
+
+    def record(kind: str, default):
+        def handler(parent, title, text, *args, **kwargs):
+            log.append((kind, title, text))
+            return default
+
+        return handler
+
+    for kind, default in (
+        ("warning", QMessageBox.Ok),
+        ("critical", QMessageBox.Ok),
+        ("information", QMessageBox.Ok),
+        ("question", QMessageBox.Cancel),
+    ):
+        monkeypatch.setattr(QMessageBox, kind, record(kind, default))
+    return log
+
+
+@pytest.fixture(autouse=True)
+def no_unexpected_modal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make an un-patched ``exec_()`` fail instead of blocking the run.
+
+    Same reason as :func:`dialogs`: a modal opened by code under test has no
+    one to close it, so the failure mode is a hung CI job rather than a red
+    test. A test that expects a dialog patches ``exec_`` on the concrete
+    subclass, which wins over this base-class patch.
+    """
+
+    from PyQt5.QtWidgets import QDialog
+
+    def refuse(self) -> int:  # pragma: no cover - the point is it is not called
+        raise AssertionError(
+            f"{type(self).__name__}.exec_() was called without being patched"
+        )
+
+    monkeypatch.setattr(QDialog, "exec_", refuse)
+
+
+@pytest.fixture
+def window(qtbot, isolated_recipe_path: Path) -> MainWindow:
+    """An off-screen :class:`MainWindow` with no project loaded."""
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win.setAttribute(Qt.WA_DontShowOnScreen, True)
+    win.show()
+    qtbot.waitExposed(win)
+    return win
+
+
+@pytest.fixture
+def loaded_window(qtbot, v2_config_dir: Path, isolated_recipe_path: Path) -> MainWindow:
+    """An off-screen window with ``v2_config_dir`` loaded."""
+
+    win = MainWindow(
+        config_dir=v2_config_dir / "config", auto_ext_root=v2_config_dir
+    )
+    qtbot.addWidget(win)
+    win.setAttribute(Qt.WA_DontShowOnScreen, True)
+    win.show()
+    qtbot.waitExposed(win)
+    return win
 
 
 def _find_action(window: MainWindow, text_contains: str):
-    for menu in window.menuBar().findChildren(type(window.menuBar().addMenu("__"))):
+    for menu in window.menuBar().findChildren(QMenu):
         for action in menu.actions():
             if text_contains in action.text():
                 return action
-    # Fallback: walk all actions on the menu bar tree.
-    for action in window.menuBar().actions():
-        sub = action.menu()
-        if sub is None:
-            continue
-        for a in sub.actions():
-            if text_contains in a.text():
-                return a
     return None
 
 
-def test_main_window_menu_new_project_opens_wizard(
-    qtbot, monkeypatch: pytest.MonkeyPatch
+# ---- the page set -----------------------------------------------------------
+
+
+def test_the_rail_holds_exactly_the_three_redesign_screens(window: MainWindow) -> None:
+    assert window.shell.page_keys() == ["cells", "recipes", "runs"]
+    assert isinstance(window.shell.page("cells"), CellsScreen)
+    assert isinstance(window.shell.page("recipes"), RecipesScreen)
+    assert isinstance(window.shell.page("runs"), RunsScreen)
+
+
+def test_the_retired_tabs_are_gone_from_the_package(window: MainWindow) -> None:
+    """Not just unregistered -- unimportable, so nothing can resurrect one."""
+
+    import importlib
+
+    for name in (
+        "auto_ext.ui.tabs.project_tab",
+        "auto_ext.ui.tabs.tasks_tab",
+        "auto_ext.ui.tabs.templates_tab",
+        "auto_ext.ui.tabs.run_tab",
+        "auto_ext.ui.tabs.runs_tab",
+        "auto_ext.ui.templates_view",
+        "auto_ext.ui.widgets.knob_editor",
+        "auto_ext.ui.widgets.preset_picker",
+        "auto_ext.ui.widgets.dspf_out_path_combo",
+        "auto_ext.ui.widgets.diff_editor",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(name)
+
+
+def test_nav_codes_are_unique_three_letter_labels(window: MainWindow) -> None:
+    codes = [window.shell.nav_button(k).code for k in window.shell.page_keys()]
+    assert codes == ["CEL", "RCP", "RNS"]
+    assert len(set(codes)) == len(codes)
+
+
+def test_the_setup_drawer_is_mounted_and_toggles(window: MainWindow) -> None:
+    assert isinstance(window.shell.setup_widget(), SetupDrawer)
+    assert window.shell.is_setup_open() is False
+    window.shell.health_badge.clicked.emit()
+    assert window.shell.is_setup_open() is True
+
+
+def test_the_log_view_is_mounted_in_the_run_bars_slot(window: MainWindow) -> None:
+    """The Run tab's embedded log viewer moved here; it is not a screen."""
+
+    assert isinstance(window.cells_screen.run_bar.log_widget(), LogView)
+    assert window.cells_screen.run_bar.log_widget() is window.log_view
+
+
+# ---- the size floor ---------------------------------------------------------
+
+
+def test_the_window_declares_the_940x560_floor(window: MainWindow) -> None:
+    assert window.minimumWidth() == WINDOW_MIN_WIDTH == 940
+    assert window.minimumHeight() == WINDOW_MIN_HEIGHT == 560
+
+
+def test_the_window_actually_fits_inside_940x560(loaded_window: MainWindow) -> None:
+    """The hard promise of this refactor.
+
+    The old window's minimumSizeHint was 724x1056 -- the Project tab alone
+    demanded ~1000px of height, so on a 1080p screen the window could not be
+    shrunk below almost the whole display. Every screen is measured with a
+    project loaded, because an empty screen is trivially small.
+    """
+
+    hint = loaded_window.minimumSizeHint()
+    assert hint.width() <= WINDOW_MIN_WIDTH, hint
+    assert hint.height() <= WINDOW_MIN_HEIGHT, hint
+
+
+@pytest.mark.parametrize("page", ["cells", "recipes", "runs"])
+def test_no_single_screen_pushes_past_the_floor(
+    loaded_window: MainWindow, qtbot, page: str
 ) -> None:
-    window = MainWindow()
-    qtbot.addWidget(window)
+    """Measured per page: the stack's hint is the max over its children, so a
+    single greedy screen would be invisible in the aggregate number above."""
 
+    loaded_window.shell.set_current_page(page)
+    qtbot.wait(10)
+    hint = loaded_window.shell.page(page).minimumSizeHint()
+    assert hint.width() <= 700, (page, hint)
+    assert hint.height() <= 400, (page, hint)
+
+
+def test_the_window_can_be_resized_to_the_floor(
+    loaded_window: MainWindow, qtbot
+) -> None:
+    loaded_window.resize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
+    qtbot.wait(10)
+    assert loaded_window.width() == WINDOW_MIN_WIDTH
+    assert loaded_window.height() == WINDOW_MIN_HEIGHT
+    assert loaded_window.shell.is_rail_collapsed() is True
+
+
+def test_every_page_can_be_shown_at_the_floor_without_error(
+    loaded_window: MainWindow, qtbot
+) -> None:
+    """The offscreen boot check: walk the rail with the window at 940x560."""
+
+    loaded_window.resize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
+    for key in loaded_window.shell.page_keys():
+        loaded_window.shell.set_current_page(key)
+        qtbot.wait(10)
+        assert loaded_window.shell.current_page_key() == key
+        assert loaded_window.shell.current_page().isVisible()
+    loaded_window.shell.set_setup_open(True)
+    qtbot.wait(10)
+    assert loaded_window.setup_drawer.isVisible()
+
+
+# ---- controller wiring ------------------------------------------------------
+
+
+def test_loading_a_project_fills_every_screen(loaded_window: MainWindow) -> None:
+    window = loaded_window
+    controller = window.controller
+
+    assert window.shell.config_path() == str(controller.config_dir)
+    assert len(window.cells_screen.cells()) == len(controller.cells)
+    assert window.cells_screen.recipe_choices() == [
+        ("rc-coupled-typical", "RC coupled, typical")
+    ]
+    assert window.recipes_screen.current_recipe_id() == "rc-coupled-typical"
+    assert window.runs_screen.runs_root == controller.runs_root
+
+
+def test_editing_the_cell_table_stages_it_on_the_controller(
+    loaded_window: MainWindow,
+) -> None:
+    window = loaded_window
+    window.cells_screen.add_cell()
+    assert window.controller.pending_keys() == ["cells"]
+    assert len(window.controller.cells) == len(window.cells_screen.cells())
+
+
+def test_dirty_state_reaches_the_title_and_the_status_bar(
+    loaded_window: MainWindow,
+) -> None:
+    window = loaded_window
+    assert window.windowTitle() == "Auto_ext"
+    window.cells_screen.add_cell()
+    assert window.windowTitle().endswith("*")
+    assert window.shell.status_right() == "unsaved changes"
+
+    window.controller.revert()
+    assert window.windowTitle() == "Auto_ext"
+    assert window.shell.status_right() == ""
+
+
+def test_save_is_disabled_until_something_is_staged(
+    loaded_window: MainWindow,
+) -> None:
+    save = _find_action(loaded_window, "Save")
+    assert save is not None and save.isEnabled() is False
+    loaded_window.cells_screen.add_cell()
+    assert save.isEnabled() is True
+
+
+def test_save_writes_the_staged_documents(
+    loaded_window: MainWindow, v2_config_dir: Path
+) -> None:
+    from auto_ext.model.cells import CELLS_FILENAME, load_cells
+
+    window = loaded_window
+    before = len(load_cells(v2_config_dir / "config" / CELLS_FILENAME))
+    window.cells_screen.add_cell()
+    assert window.save() is True
+    assert len(load_cells(v2_config_dir / "config" / CELLS_FILENAME)) == before + 1
+    assert window.controller.is_dirty is False
+
+
+def test_a_saving_a_recipe_edit_reaches_the_controller(
+    loaded_window: MainWindow,
+) -> None:
+    window = loaded_window
+    recipe = window.controller.recipe("rc-coupled-typical")
+    window.recipes_screen.save_requested.emit(
+        recipe.model_copy(update={"description": "typed in the form"})
+    )
+    assert window.controller.recipe("rc-coupled-typical").description == (
+        "typed in the form"
+    )
+
+
+def test_a_new_recipe_gets_a_unique_id_and_reaches_both_screens(
+    loaded_window: MainWindow,
+) -> None:
+    window = loaded_window
+    window.recipes_screen.new_requested.emit()
+    ids = window.controller.recipe_ids()
+    assert "new-recipe" in ids
+    assert ("new-recipe", "New recipe") in window.cells_screen.recipe_choices()
+
+    window.recipes_screen.new_requested.emit()
+    assert "new-recipe-2" in window.controller.recipe_ids()
+
+
+def test_duplicating_a_recipe_records_its_lineage(loaded_window: MainWindow) -> None:
+    window = loaded_window
+    window.recipes_screen.duplicate_requested.emit("rc-coupled-typical")
+    clone = window.controller.recipe("rc-coupled-typical-copy")
+    assert clone is not None
+    assert clone.derived_from == "rc-coupled-typical"
+
+
+def test_deleting_a_recipe_stages_the_removal(loaded_window: MainWindow) -> None:
+    window = loaded_window
+    window.recipes_screen.delete_requested.emit("rc-coupled-typical")
+    assert window.controller.recipe_ids() == []
+    assert window.controller.pending_keys() == ["recipe:rc-coupled-typical"]
+
+
+def test_a_config_error_lands_in_the_status_bar_not_a_dialog(
+    window: MainWindow, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under X11 forwarding a modal costs a round trip; only actions get one."""
+
+    def explode(*args, **kwargs):  # pragma: no cover - the point is it is not called
+        raise AssertionError("a background load error must not open a dialog")
+
+    monkeypatch.setattr(QMessageBox, "warning", explode)
+    window.controller.load(tmp_path / "missing")
+
+    assert window.errors, "the error was recorded"
+    assert window.shell.status_left().startswith("error - ")
+
+
+def test_an_explicit_reload_failure_does_open_a_dialog(
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, v2_config_dir: Path
+) -> None:
+    """There the user pressed something and is waiting for an answer."""
+
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda parent, title, text, *a, **k: shown.append((title, text)),
+    )
+    (v2_config_dir / "config" / "workspace.yaml").write_text(
+        "pdk_profile: [not, a, slug]\n", encoding="utf-8"
+    )
+    _find_action(loaded_window, "Reload").trigger()
+
+    assert shown and "Could not load" in shown[0][0]
+
+
+# ---- the run lifecycle ------------------------------------------------------
+
+
+def test_a_finished_run_refreshes_the_history(
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window = loaded_window
+    calls: list[int] = []
+    monkeypatch.setattr(
+        type(window.runs_screen), "refresh", lambda self: calls.append(1)
+    )
+    window.cells_screen.run_finished.emit(None)
+
+    assert calls == [1]
+    assert window.shell.status_left() == "idle"
+
+
+def test_a_started_run_says_so_in_the_status_bar(loaded_window: MainWindow) -> None:
+    window = loaded_window
+    window.cells_screen.run_requested.emit(object())
+    assert window.shell.status_left() == "running"
+
+
+def test_the_log_path_the_screen_publishes_reaches_the_viewer(
+    loaded_window: MainWindow, tmp_path: Path
+) -> None:
+    log = tmp_path / "runs" / "r1" / "logs" / "calibre.log"
+    loaded_window.cells_screen.log_path_changed.emit(log)
+    assert loaded_window.log_view.path == log
+
+
+def test_the_run_bars_follow_checkbox_drives_the_viewer(
+    loaded_window: MainWindow,
+) -> None:
+    window = loaded_window
+    window.cells_screen.run_bar.set_follows_current_stage(False)
+    assert window.log_view.follows() is False
+    window.cells_screen.run_bar.set_follows_current_stage(True)
+    assert window.log_view.follows() is True
+
+
+def test_a_rerun_request_navigates_to_the_cell(loaded_window: MainWindow) -> None:
+    window = loaded_window
+    window.shell.set_current_page("runs")
+    key = window.controller.cells.cells[0].key
+
+    class _Entry:
+        task_id = key
+
+    window.runs_screen.rerun_requested.emit(_Entry())
+
+    assert window.shell.current_page_key() == "cells"
+    assert window.cells_screen.selected_keys() == (key,)
+
+
+# ---- the setup drawer -------------------------------------------------------
+
+
+def test_a_failure_that_points_at_setup_opens_the_drawer(
+    loaded_window: MainWindow,
+) -> None:
+    window = loaded_window
+    window.runs_screen.setup_requested.emit("env.WORK_ROOT")
+    assert window.shell.is_setup_open() is True
+
+
+def test_pinning_an_override_stages_the_profile_rather_than_writing_it(
+    loaded_window: MainWindow,
+) -> None:
+    """A health row must not be able to rewrite the PDK profile behind a Save."""
+
+    window = loaded_window
+    window.setup_drawer.override_requested.emit("WORK_ROOT", "/w/real")
+
+    assert window.controller.pending_keys() == ["profile"]
+    assert window.controller.profile.env_overrides["WORK_ROOT"] == "/w/real"
+    assert window.controller.is_dirty is True
+
+
+def test_the_drawer_offers_the_pin_control_because_someone_listens(
+    loaded_window: MainWindow,
+) -> None:
+    assert loaded_window.setup_drawer.can_pin_overrides() is True
+
+
+def test_recheck_forces_a_fresh_health_report(
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        type(loaded_window.controller),
+        "refresh_health",
+        lambda self, *, force=False: seen.append(force),
+    )
+    loaded_window.setup_drawer.recheck_requested.emit()
+    assert seen == [True]
+
+
+def _with_inserted_line(rendered: str, line: str = "; typed by hand") -> str:
+    """Insert ``line`` after the first line of ``rendered``.
+
+    Not appended at the end: a stored edit is placed by the lines around it,
+    so an insertion past the last line has no context after it and the patch
+    format refuses it. That refusal has its own test below.
+    """
+
+    lines = rendered.splitlines(keepends=True)
+    lines.insert(1, line + "\n")
+    return "".join(lines)
+
+
+# ---- the escape hatch -------------------------------------------------------
+
+
+def test_edit_rendered_without_the_pdk_environment_refuses_and_names_the_vars(
+    loaded_window: MainWindow, dialogs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a machine without the PDK loaded this is the expected outcome.
+
+    It has to be a refusal, not a render: an unset variable substitutes as
+    the empty string, so a preview would succeed and show a file full of
+    paths like /cds/verify/QCI_PATH_inv -- and the edit captured against
+    it would be anchored to nonsense.
+
+    The fixture profile pins its variables in ``env_overrides`` so the rest
+    of the suite can render; this test takes them away, which is what an
+    engineer who has not sourced the PDK setup actually has.
+    """
+
+    window = loaded_window
+    profile = window.controller.profile
+    for name in profile.env_overrides:
+        monkeypatch.delenv(name, raising=False)
+    window.controller.stage_profile(profile.model_copy(update={"env_overrides": {}}))
+
+    window.recipes_screen.edit_rendered_requested.emit("rc-coupled-typical")
+
+    assert dialogs, "a refusal must be visible"
+    _kind, title, message = dialogs[-1]
+    assert "environment" in title
+    assert "WORK_ROOT" in message
+    # The profile edit above is the only thing staged: nothing was captured.
+    assert window.controller.pending_keys() == ["profile"]
+
+
+def test_edit_rendered_stores_the_edit_on_the_recipe(
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env, dialogs
+) -> None:
+    """The whole escape hatch, end to end: render, edit, capture, stage."""
+
+    from auto_ext.ui.widgets import rendered_editor
+
+    def fake_exec(self) -> int:
+        self.set_text(_with_inserted_line(self.edited_text()))
+        self._store_button.click()
+        return 1
+
+    monkeypatch.setattr(rendered_editor.RenderedFileEditor, "exec_", fake_exec)
+
+    window = loaded_window
+    assert window.controller.recipe("rc-coupled-typical").manual_edit_count == 0
+
+    window.recipes_screen.edit_rendered_requested.emit("rc-coupled-typical")
+
+    assert dialogs == [], dialogs
+    updated = window.controller.recipe("rc-coupled-typical")
+    assert updated.manual_edit_count == 1
+    assert window.controller.pending_keys() == ["recipe:rc-coupled-typical"]
+    assert "manual edit" in window.shell.status_left()
+
+
+def test_edit_rendered_with_no_change_stores_nothing(
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env
+) -> None:
+    from auto_ext.ui.widgets import rendered_editor
+
+    monkeypatch.setattr(
+        rendered_editor.RenderedFileEditor,
+        "exec_",
+        lambda self: self.accept() or 1,
+    )
+    window = loaded_window
+    window.recipes_screen.edit_rendered_requested.emit("rc-coupled-typical")
+
+    assert window.controller.is_dirty is False
+
+
+def test_a_stored_edit_survives_a_save_and_reload(
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env
+) -> None:
+    from auto_ext.ui.widgets import rendered_editor
+
+    def fake_exec(self) -> int:
+        self.set_text(_with_inserted_line(self.edited_text()))
+        self._store_button.click()
+        return 1
+
+    monkeypatch.setattr(rendered_editor.RenderedFileEditor, "exec_", fake_exec)
+
+    window = loaded_window
+    window.recipes_screen.edit_rendered_requested.emit("rc-coupled-typical")
+    assert window.save() is True
+
+    reloaded = window.controller.recipe("rc-coupled-typical")
+    assert reloaded.manual_edit_count == 1
+    assert reloaded.patches[0].hunks[0].after.strip() == "; typed by hand"
+
+
+# ---- the init wizard --------------------------------------------------------
+
+
+def test_the_file_menu_opens_the_wizard(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
     opened: list[InitProjectWizard] = []
-
-    real_exec = InitProjectWizard.exec_
-
-    def fake_exec(self):
-        opened.append(self)
-        # Don't actually start the modal event loop — just record + close.
-        return 0
-
-    monkeypatch.setattr(InitProjectWizard, "exec_", fake_exec)
-
+    monkeypatch.setattr(
+        InitProjectWizard, "exec_", lambda self: opened.append(self) or 0
+    )
     action = _find_action(window, "New project")
-    assert action is not None, "File → New project action missing"
+    assert action is not None
     action.trigger()
-
-    assert len(opened) == 1
-    assert isinstance(opened[0], InitProjectWizard)
-
-
-def test_main_window_run_tab_banner_button_opens_wizard(
-    qtbot, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    window = MainWindow()
-    qtbot.addWidget(window)
-
-    opened: list[InitProjectWizard] = []
-
-    def fake_exec(self):
-        opened.append(self)
-        return 0
-
-    monkeypatch.setattr(InitProjectWizard, "exec_", fake_exec)
-
-    # No config loaded → banner is visible (not isHidden — Qt only sets
-    # isVisible after the widget is actually shown on screen).
-    run_tab = window._run_tab
-    assert not run_tab._empty_banner.isHidden()
-    new_btn = None
-    for btn in run_tab._empty_banner.findChildren(QPushButton):
-        if "New project" in btn.text():
-            new_btn = btn
-            break
-    assert new_btn is not None, "New project button missing in empty-state banner"
-    new_btn.click()
-
     assert len(opened) == 1
 
 
-# ---- Q5 dirty-controller branch ------------------------------------------
-
-
-def _make_window_with_dirty_controller(
-    qtbot, project_tools_config: Path
-) -> MainWindow:
-    """Build a MainWindow whose controller has at least one staged edit.
-
-    Uses the existing ``project_tools_config`` fixture (loads a real
-    project.yaml + tasks.yaml) and then calls ``stage_edits`` to flip
-    ``is_dirty`` to True without touching disk.
-    """
-    window = MainWindow()
-    qtbot.addWidget(window)
-    window._controller.load(project_tools_config)
-    window._controller.stage_edits({"employee_id": "bob"})
-    assert window._controller.is_dirty
-    return window
-
-
-def test_main_window_open_wizard_dirty_save(
-    qtbot, monkeypatch: pytest.MonkeyPatch, project_tools_config: Path
+def test_the_cells_empty_state_opens_the_wizard(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    window = _make_window_with_dirty_controller(qtbot, project_tools_config)
-
-    save_calls: list[bool] = []
-    monkeypatch.setattr(
-        type(window._controller),
-        "save",
-        lambda self, **kw: (save_calls.append(True) or True),
-    )
-
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        staticmethod(lambda *a, **k: QMessageBox.Save),
-    )
-
     opened: list[InitProjectWizard] = []
     monkeypatch.setattr(
-        InitProjectWizard,
-        "exec_",
-        lambda self: (opened.append(self) or 0),
+        InitProjectWizard, "exec_", lambda self: opened.append(self) or 0
     )
-
-    window._open_init_wizard()
-
-    assert save_calls == [True], "controller.save must run when user picks Save"
-    assert len(opened) == 1, "wizard must open after a successful save"
+    window.cells_screen.import_requested.emit()
+    assert len(opened) == 1
 
 
-def test_main_window_open_wizard_dirty_discard(
-    qtbot, monkeypatch: pytest.MonkeyPatch, project_tools_config: Path
+@pytest.mark.parametrize(
+    "answer, wizard_opens, still_dirty",
+    [
+        (QMessageBox.Save, True, False),
+        (QMessageBox.Discard, True, False),
+        (QMessageBox.Cancel, False, True),
+    ],
+)
+def test_opening_the_wizard_with_pending_edits_asks_first(
+    loaded_window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    answer,
+    wizard_opens: bool,
+    still_dirty: bool,
 ) -> None:
-    window = _make_window_with_dirty_controller(qtbot, project_tools_config)
+    window = loaded_window
+    window.cells_screen.add_cell()
+    assert window.controller.is_dirty is True
 
-    save_calls: list[bool] = []
-    monkeypatch.setattr(
-        type(window._controller),
-        "save",
-        lambda self, **kw: (save_calls.append(True) or True),
-    )
-
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        staticmethod(lambda *a, **k: QMessageBox.Discard),
-    )
-
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: answer)
     opened: list[InitProjectWizard] = []
     monkeypatch.setattr(
-        InitProjectWizard,
+        InitProjectWizard, "exec_", lambda self: opened.append(self) or 0
+    )
+
+    _find_action(window, "New project").trigger()
+
+    assert bool(opened) is wizard_opens
+    assert window.controller.is_dirty is still_dirty
+
+
+def test_an_edit_the_patch_format_cannot_anchor_is_refused_in_plain_words(
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env, dialogs
+) -> None:
+    """A line appended past the end of the file has no context after it.
+
+    The refusal comes from the patch layer as a pydantic validation dump; the
+    window must not show that to an RFIC engineer.
+    """
+
+    from auto_ext.ui.widgets import rendered_editor
+
+    monkeypatch.setattr(
+        rendered_editor.RenderedFileEditor,
         "exec_",
-        lambda self: (opened.append(self) or 0),
+        lambda self: (
+            self.set_text(self.edited_text() + "; appended at the very end\n"),
+            self._store_button.click(),
+            1,
+        )[-1],
     )
+    loaded_window.recipes_screen.edit_rendered_requested.emit("rc-coupled-typical")
 
-    window._open_init_wizard()
-
-    assert save_calls == [], "Discard must NOT call controller.save"
-    assert len(opened) == 1, "wizard must still open after Discard"
-
-
-def test_main_window_open_wizard_dirty_cancel(
-    qtbot, monkeypatch: pytest.MonkeyPatch, project_tools_config: Path
-) -> None:
-    window = _make_window_with_dirty_controller(qtbot, project_tools_config)
-
-    save_calls: list[bool] = []
-    monkeypatch.setattr(
-        type(window._controller),
-        "save",
-        lambda self, **kw: (save_calls.append(True) or True),
-    )
-
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        staticmethod(lambda *a, **k: QMessageBox.Cancel),
-    )
-
-    opened: list[InitProjectWizard] = []
-    monkeypatch.setattr(
-        InitProjectWizard,
-        "exec_",
-        lambda self: (opened.append(self) or 0),
-    )
-
-    window._open_init_wizard()
-
-    assert save_calls == [], "Cancel must NOT save"
-    assert opened == [], "Cancel must NOT open the wizard"
-
-
-# ---- Feature #4: Log tab merged into Run tab ---------------------------
-
-
-def test_main_window_tab_set(qtbot) -> None:
-    """Feature #4 dropped the standalone Log tab in favour of an embedded
-    LogTab inside RunTab; S1 added the Runs history tab immediately after
-    Run. MainWindow therefore exposes 5 tabs, and "Log" is not one of them.
-    """
-    window = MainWindow()
-    qtbot.addWidget(window)
-
-    assert window._tabs.count() == 5
-    titles = [window._tabs.tabText(i) for i in range(window._tabs.count())]
-    assert "Log" not in titles, (
-        "Standalone Log tab must be removed; the log viewer lives "
-        "inside the Run tab now."
-    )
-    assert set(titles) == {"Run", "Runs", "Project", "Tasks", "Templates"}
-    # Runs sits directly after Run: "what is happening now" then "what
-    # happened before" is the order the user moves through them.
-    assert titles[:2] == ["Run", "Runs"]
-
-
-def test_feature4_run_tab_owns_embedded_log_tab(qtbot) -> None:
-    """RunTab now owns its own LogTab and wires stage_selected straight
-    into ``set_active_log``. MainWindow no longer holds a separate
-    LogTab reference."""
-    from auto_ext.ui.tabs.log_tab import LogTab
-
-    window = MainWindow()
-    qtbot.addWidget(window)
-
-    assert hasattr(window._run_tab, "_log_tab")
-    assert isinstance(window._run_tab._log_tab, LogTab)
-    # MainWindow no longer holds a top-level _log_tab attribute.
-    assert not hasattr(window, "_log_tab")
-
-
-def test_feature4_stage_selected_drives_embedded_log_tab(
-    qtbot, project_tools_config: Path, tmp_path: Path
-) -> None:
-    """Emitting ``stage_selected`` from the Run tab must route the path
-    into the embedded LogTab's ``set_active_log``. The connection lives
-    inside RunTab._build_ui — this test pins it so a future refactor
-    can't silently disconnect the two."""
-    from auto_ext.ui.config_controller import ConfigController
-    from auto_ext.ui.tabs.run_tab import RunTab
-
-    ae_root = tmp_path / "pr"
-    controller = ConfigController(auto_ext_root=ae_root, workarea=tmp_path / "wa")
-    tab = RunTab(controller)
-    qtbot.addWidget(tab)
-    controller.load(project_tools_config)
-
-    task_id = controller.tasks[0].task_id
-    log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
-
-    # No log selected yet.
-    assert tab._log_tab._path is None
-
-    # Emit and check that the embedded LogTab took the path.
-    tab.stage_selected.emit(log_path)
-    assert tab._log_tab._path == log_path
-
-
-# ---- TaskSpec.label → LogTab header rendering (Features #2 + #4) ---------
-
-
-def test_log_tab_header_includes_label_when_set(
-    qtbot, project_tools_config: Path, tmp_path: Path
-) -> None:
-    """End-to-end: when a labelled spec is loaded and stage_selected
-    fires, the embedded LogTab header reads ``"<label> — <path>"``.
-    RunTab's internal slot threads the display value via
-    :meth:`RunTab.display_for_log_path` so the public
-    ``stage_selected`` signal payload stays a bare ``Path``."""
-    (project_tools_config / "tasks.yaml").write_text(
-        "- library: WB_PLL_DCO\n"
-        "  cell: inv\n"
-        "  lvs_layout_view: layout\n"
-        "  lvs_source_view: schematic\n"
-        "  label: Pretty Display\n",
-        encoding="utf-8",
-    )
-    ae_root = tmp_path / "pr"
-    window = MainWindow(auto_ext_root=ae_root, workarea=tmp_path / "wa")
-    qtbot.addWidget(window)
-    window._controller.load(project_tools_config)
-
-    task_id = "WB_PLL_DCO__inv__layout__schematic"
-    log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
-    window._run_tab.stage_selected.emit(log_path)
-
-    header = window._run_tab._log_tab._header.text()
-    assert "Pretty Display" in header
-    assert "calibre.log" in header
-
-
-def test_log_tab_header_uses_task_id_when_label_unset(
-    qtbot, project_tools_config: Path, tmp_path: Path
-) -> None:
-    """No label → header shows the canonical task_id verbatim
-    (existing behaviour unchanged)."""
-    ae_root = tmp_path / "pr"
-    window = MainWindow(auto_ext_root=ae_root, workarea=tmp_path / "wa")
-    qtbot.addWidget(window)
-    window._controller.load(project_tools_config)
-
-    task_id = "WB_PLL_DCO__inv__layout__schematic"
-    log_path = ae_root / "logs" / f"task_{task_id}" / "calibre.log"
-    window._run_tab.stage_selected.emit(log_path)
-
-    header = window._run_tab._log_tab._header.text()
-    assert task_id in header
-
-
-def test_log_tab_set_active_log_display_id_default_none(qtbot, tmp_path: Path) -> None:
-    """``LogTab.set_active_log`` keeps the legacy 1-arg shape: when
-    ``display_id`` is omitted/None, the header is just the path."""
-    from auto_ext.ui.tabs.log_tab import LogTab
-
-    log = LogTab()
-    qtbot.addWidget(log)
-    p = tmp_path / "out.log"
-    log.set_active_log(p)
-    assert log._header.text() == str(p)
-    # Now with an explicit display_id, the header gains the prefix.
-    log.set_active_log(p, "FANCY")
-    header = log._header.text()
-    assert header.startswith("FANCY — ")
-    assert str(p) in header
-
-
-# ---- S1: the Runs history tab -------------------------------------------
-
-
-def test_main_window_runs_tab_shares_the_controller(qtbot) -> None:
-    """The Runs tab reads its history from the shared controller's root.
-
-    Without the shared :class:`ConfigController` the tab would have no way to
-    find ``<auto_ext_root>/runs`` and would sit permanently on its empty state.
-    """
-    from auto_ext.ui.tabs.runs_tab import RunsTab
-
-    window = MainWindow(auto_ext_root=Path("/nowhere/pr"))
-    qtbot.addWidget(window)
-
-    assert isinstance(window._runs_tab, RunsTab)
-    assert window._runs_tab._controller is window._controller
-    assert window._runs_tab.runs_root == Path("/nowhere/pr") / "runs"
-
-
-def test_main_window_runs_tab_stays_short(qtbot) -> None:
-    """The new tab must not raise the window's minimum height.
-
-    The Project tab already forces the main window past 850 px, which is the
-    whole reason this budget exists: one more tall tab and the window can no
-    longer be shrunk to fit a 1080p screen.
-    """
-    window = MainWindow()
-    qtbot.addWidget(window)
-
-    assert window._runs_tab.minimumSizeHint().height() < 500
-
-
-def test_main_window_refreshes_the_history_when_a_run_ends(qtbot) -> None:
-    """The falling edge of ``worker_state_changed`` re-reads the history.
-
-    A run that just finished is exactly the one the user wants to look at, so
-    it must already be listed by the time they switch tabs. Nothing happens on
-    the rising edge -- the run directory is still being written.
-    """
-    window = MainWindow()
-    qtbot.addWidget(window)
-
-    calls: list[bool] = []
-    window._runs_tab.refresh = lambda: calls.append(True)  # type: ignore[method-assign]
-
-    window._run_tab.worker_state_changed.emit(True)
-    assert calls == [], "no refresh while the worker is still running"
-
-    window._run_tab.worker_state_changed.emit(False)
-    assert calls == [True]
+    assert dialogs, "the refusal must be visible"
+    _kind, title, message = dialogs[-1]
+    assert title == "Could not store the edit"
+    assert "validation error" not in message
+    assert "above the final line" in message
+    assert loaded_window.controller.is_dirty is False

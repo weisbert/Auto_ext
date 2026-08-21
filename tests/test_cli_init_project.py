@@ -86,7 +86,9 @@ def test_init_project_projectA_writes_full_skeleton(
     result = _invoke_init(runner, raw_projectA_dir, tmp_path)
     assert result.exit_code == 0, result.output
 
-    # All 10 target files exist.
+    # Six target files: the config pair plus one .j2 per tool. The knob
+    # sidecar that used to sit beside each template went out with the
+    # four-layer merge, so its absence is part of the contract.
     cfg = tmp_path / "config"
     tpl = tmp_path / "templates"
     assert (cfg / "project.yaml").is_file()
@@ -98,25 +100,25 @@ def test_init_project_projectA_writes_full_skeleton(
         ("jivaro", "xml"),
     ):
         assert (tpl / tool / f"imported.{ext}.j2").is_file()
-        assert (tpl / tool / f"imported.{ext}.j2.manifest.yaml").is_file()
+        assert not (tpl / tool / f"imported.{ext}.j2.manifest.yaml").exists()
 
-    # project.yaml reports the detected constants.
+    # project.yaml reports the one detected constant it is still allowed to
+    # carry, and loads without a migration hint.
     from auto_ext.core.config import load_project
 
     project = load_project(cfg / "project.yaml")
     assert project.tech_name == "HN001"
-    # Phase 5.6.5: paths schema replaces pdk_subdir / runset_versions.
-    assert (
-        project.paths["calibre_lvs_dir"]
-        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
-    )
-    assert (
-        project.paths["qrc_deck_dir"]
-        == "$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
-    )
-    # Template pointers resolve to the written .j2 files.
-    assert project.templates.calibre == tpl / "calibre" / "imported.qci.j2"
-    assert project.templates.jivaro == tpl / "jivaro" / "imported.xml.j2"
+
+    # The deck directories the scan found are *not* written as keys -- they
+    # belong to the PdkProfile, and a project.yaml carrying `paths:` is
+    # refused. They are printed as a comment so the information is not lost,
+    # next to the command that puts them where they go.
+    text = (cfg / "project.yaml").read_text(encoding="utf-8")
+    assert "\npaths:" not in text
+    assert "\ntemplates:" not in text
+    assert "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX" in text
+    assert "QRC/Ver_Plus_1.0a/CFXXX/QCI_deck" in text
+    assert "profile discover" in text
 
 
 def test_init_project_tasks_yaml_uses_detected_identity(
@@ -159,8 +161,6 @@ def test_init_project_without_jivaro_skips_template(
     from auto_ext.core.config import load_project, load_tasks
 
     project = load_project(tmp_path / "config" / "project.yaml")
-    # jivaro pointer absent.
-    assert project.templates.jivaro is None
     tasks = load_tasks(tmp_path / "config" / "tasks.yaml", project=project)
     assert tasks[0].jivaro.enabled is False
 
@@ -171,11 +171,22 @@ def test_init_project_dry_run_passes_end_to_end(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The generated project must be immediately runnable (dry-run)
-    against the shipped templates — no manual edits required.
+    """The generated pair loads, and the run says what is still missing.
+
+    ``init-project`` used to emit a project that ran on the spot, because
+    ``project.yaml`` also named the four templates. It no longer can: which
+    ``.j2`` renders which target is the catalog's answer, and the values are a
+    Recipe's. What it must still guarantee is that its output is *valid* --
+    both files reload without a migration hint -- and that the very next
+    command tells the user what to do rather than failing obscurely.
     """
     result = _invoke_init(runner, raw_projectA_dir, tmp_path)
     assert result.exit_code == 0, result.output
+
+    from auto_ext.core.config import load_project, load_tasks
+
+    project = load_project(tmp_path / "config" / "project.yaml")
+    assert load_tasks(tmp_path / "config" / "tasks.yaml", project=project)
 
     workarea = tmp_path / "w"
     workarea.mkdir()
@@ -198,13 +209,11 @@ def test_init_project_dry_run_passes_end_to_end(
             str(workarea),
         ],
     )
-    assert run_result.exit_code == 0, run_result.output
-    # Every stage rendered, into this run's own directory.
-    rendered = _only_run_dir(tmp_path / "run_root") / "rendered"
-    assert (rendered / "imported.qci").is_file()
-    assert (rendered / "imported.env").is_file()
-    assert (rendered / "imported.cmd").is_file()
-    assert (rendered / "imported.xml").is_file()
+    assert run_result.exit_code == 2, run_result.output
+    assert "--recipe is required" in run_result.output
+    assert "auto-ext recipe list" in run_result.output
+    # Nothing was half-written on the way to that verdict.
+    assert not (tmp_path / "run_root" / "runs").exists()
 
 
 def test_init_project_refuses_overwrite_without_force(
@@ -371,16 +380,19 @@ def test_init_project_cross_project_abstraction(
     pB = load_project(out_B / "config" / "project.yaml")
     assert pA.tech_name == "HN001"
     assert pB.tech_name == "HN042"
-    assert (
-        pA.paths["calibre_lvs_dir"]
-        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
-    )
-    assert (
-        pB.paths["calibre_lvs_dir"]
-        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Minus_2.1a_0.3/CFBETA"
-    )
-    assert "QRC/Ver_Plus_1.0a/CFXXX/QCI_deck" in pA.paths["qrc_deck_dir"]
-    assert "QRC/Ver_Minus_2.1c/CFBETA/QCI_deck" in pB.paths["qrc_deck_dir"]
+
+    # The deck directories are the PdkProfile's now, so they are reported
+    # rather than written as keys -- but they still have to be *different*,
+    # and each still has to name its own project's paths. That difference is
+    # the whole claim: one template body, two technologies behind it.
+    textA = (out_A / "config" / "project.yaml").read_text(encoding="utf-8")
+    textB = (out_B / "config" / "project.yaml").read_text(encoding="utf-8")
+    assert "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX" in textA
+    assert "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Minus_2.1a_0.3/CFBETA" in textB
+    assert "QRC/Ver_Plus_1.0a/CFXXX/QCI_deck" in textA
+    assert "QRC/Ver_Minus_2.1c/CFBETA/QCI_deck" in textB
+    assert "CFBETA" not in textA
+    assert "CFXXX" not in textB
 
 
 def test_init_project_projectB_dry_run_passes(
@@ -389,11 +401,21 @@ def test_init_project_projectB_dry_run_passes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The projectB fixture must also complete init → dry-run without
-    hand-editing, proving init-project is not hardcoded to projectA shapes.
+    """The projectB fixture must reach the same place, proving init-project
+    is not hardcoded to projectA shapes.
+
+    "The same place" is now "a valid config pair plus a run that names the
+    missing recipe" -- see ``test_init_project_dry_run_passes_end_to_end`` for
+    why the walk stops there.
     """
     result = _invoke_init(runner, raw_projectB_dir, tmp_path)
     assert result.exit_code == 0, result.output
+
+    from auto_ext.core.config import load_project, load_tasks
+
+    project = load_project(tmp_path / "config" / "project.yaml")
+    tasks = load_tasks(tmp_path / "config" / "tasks.yaml", project=project)
+    assert tasks[0].cell == "AMP2"
 
     workarea = tmp_path / "w"
     workarea.mkdir()
@@ -416,9 +438,8 @@ def test_init_project_projectB_dry_run_passes(
             str(workarea),
         ],
     )
-    assert run_result.exit_code == 0, run_result.output
-    rendered = _only_run_dir(tmp_path / "run_root") / "rendered"
-    assert (rendered / "imported.qci").is_file()
+    assert run_result.exit_code == 2, run_result.output
+    assert "--recipe is required" in run_result.output
 
 
 def test_init_project_summary_shows_promoted_constants(

@@ -22,8 +22,12 @@ from typing import Any
 import pytest
 
 from auto_ext.catalog import Owner, builtin_catalog
-from auto_ext.core.config import load_project, load_tasks
-from auto_ext.core.manifest import load_manifest, resolve_knob_values
+from auto_ext.legacy_v1 import (
+    load_manifest_v1,
+    load_project_v1,
+    load_tasks_v1_with_raw,
+    resolve_knob_values_v1,
+)
 from auto_ext.migrate import (
     MigrationDecision,
     MigrationError,
@@ -43,10 +47,19 @@ from auto_ext.model.recipe import OutputKind, load_recipe
 from auto_ext.model.workspace import WorkspaceConfig, load_workspace
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: The shipped catalog templates. Only :func:`shipped_texts` reads these: it
+#: cross-checks the catalog against what Auto_ext renders *today*.
 TEMPLATES = REPO_ROOT / "templates"
 
-REAL_CONFIG = REPO_ROOT / "config"
-DEMO_CONFIG = REPO_ROOT / "examples" / "demo"
+#: The archived v1 tree -- ``.j2`` bodies *and* their ``*.j2.manifest.yaml``
+#: knob sidecars, which the shipped tree no longer carries. This is the
+#: migration's input, so it is deliberately frozen: a v1 tree on a user's disk
+#: does not change when Auto_ext ships a new template.
+V1_TEMPLATES = REPO_ROOT / "examples" / "legacy" / "templates"
+
+REAL_CONFIG = REPO_ROOT / "examples" / "legacy" / "config"
+DEMO_CONFIG = REPO_ROOT / "examples" / "legacy" / "demo" / "config"
 
 EXPECTED_FILES = {
     "config/workspace.yaml",
@@ -90,7 +103,9 @@ def _stage_templates(task: Any) -> dict[str, Path]:
     }
     out: dict[str, Path] = {}
     for stage, raw in slots.items():
-        resolved = _resolve_template_file(raw, template_root=TEMPLATES, repo_root=REPO_ROOT)
+        resolved = _resolve_template_file(
+            raw, template_root=V1_TEMPLATES, repo_root=V1_TEMPLATES.parent
+        )
         if resolved is not None:
             out[stage] = resolved
     return out
@@ -99,8 +114,8 @@ def _stage_templates(task: Any) -> dict[str, Path]:
 def assert_semantics_preserved(config_dir: Path, report: MigrationReport) -> None:
     """The migrated objects describe the same runs the old config described."""
 
-    project = load_project(config_dir / "project.yaml")
-    tasks = load_tasks(config_dir / "tasks.yaml", project)
+    project = load_project_v1(config_dir / "project.yaml")
+    tasks, _raw = load_tasks_v1_with_raw(config_dir / "tasks.yaml", project)
     catalog = builtin_catalog()
 
     # ---- same cell set, same per-DUT settings
@@ -134,11 +149,10 @@ def assert_semantics_preserved(config_dir: Path, report: MigrationReport) -> Non
     for task in tasks:
         recipe = by_key[task.task_id]
         for stage, template in _stage_templates(task).items():
-            effective = resolve_knob_values(
-                load_manifest(template),
+            effective = resolve_knob_values_v1(
+                load_manifest_v1(template),
                 dict(project.knobs.get(stage, {})),
                 dict(task.knobs.get(stage, {})),
-                {},
             )
             for name, value in effective.items():
                 option = catalog.by_template_var(name)
@@ -165,7 +179,7 @@ def run_migration(config_dir: Path, out_root: Path, **kwargs: Any) -> MigrationR
     return migrate_v1_to_v2(
         config_dir / "project.yaml",
         config_dir / "tasks.yaml",
-        template_root=TEMPLATES,
+        template_root=V1_TEMPLATES,
         out_root=out_root,
         **kwargs,
     )
@@ -831,9 +845,9 @@ def test_edited_template_literals_win_over_the_catalog(
         target = templates / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
-            (TEMPLATES / relative).read_text(encoding="utf-8"), encoding="utf-8"
+            (V1_TEMPLATES / relative).read_text(encoding="utf-8"), encoding="utf-8"
         )
-        manifest = TEMPLATES / (relative + ".manifest.yaml")
+        manifest = V1_TEMPLATES / (relative + ".manifest.yaml")
         if manifest.is_file():
             (templates / (relative + ".manifest.yaml")).write_text(
                 manifest.read_text(encoding="utf-8"), encoding="utf-8"
@@ -917,9 +931,11 @@ def test_missing_template_is_a_warning_not_a_crash(tmp_path: Path, elsewhere: No
     for relative in ("si/default.env.j2", "calibre/calibre_lvs.qci.j2", "jivaro/default.xml.j2"):
         target = templates / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text((TEMPLATES / relative).read_text(encoding="utf-8"), encoding="utf-8")
+        target.write_text(
+            (V1_TEMPLATES / relative).read_text(encoding="utf-8"), encoding="utf-8"
+        )
     (templates / "calibre/calibre_lvs.qci.j2.manifest.yaml").write_text(
-        (TEMPLATES / "calibre/calibre_lvs.qci.j2.manifest.yaml").read_text(encoding="utf-8"),
+        (V1_TEMPLATES / "calibre/calibre_lvs.qci.j2.manifest.yaml").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
 

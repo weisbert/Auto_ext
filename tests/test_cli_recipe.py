@@ -847,14 +847,14 @@ def test_migrate_reports_a_missing_implementation(
 
 
 def test_migrate_reports_every_field_and_writes_nothing_by_default(
-    project_tools_config: Path, tmp_path: Path
+    v1_config_dir: Path, tmp_path: Path
 ) -> None:
     """Nothing may vanish silently: every legacy field gets a disposition row."""
 
     out = tmp_path / "v2"
     result = runner.invoke(
         app,
-        ["migrate", "--config-dir", str(project_tools_config), "--out-root", str(out)],
+        ["migrate", "--config-dir", str(v1_config_dir), "--out-root", str(out)],
     )
     # Warnings are expected on a migration this thin, and they mean exit 1.
     assert result.exit_code == 1, result.output
@@ -873,7 +873,7 @@ def test_migrate_reports_every_field_and_writes_nothing_by_default(
 
 
 def test_migrate_write_produces_the_whole_v2_file_set(
-    project_tools_config: Path, tmp_path: Path
+    v1_config_dir: Path, tmp_path: Path
 ) -> None:
     from auto_ext.core.profile_discover import read_profile_yaml
     from auto_ext.model.cells import load_cells
@@ -883,7 +883,7 @@ def test_migrate_write_produces_the_whole_v2_file_set(
     out = tmp_path / "v2"
     result = runner.invoke(
         app,
-        ["migrate", "--config-dir", str(project_tools_config),
+        ["migrate", "--config-dir", str(v1_config_dir),
          "--out-root", str(out), "--write"],
     )
     assert result.exit_code == 1, result.output
@@ -899,12 +899,12 @@ def test_migrate_write_produces_the_whole_v2_file_set(
     assert (out / "config" / "resources.yaml").is_file()
 
 
-def test_migrate_is_idempotent(project_tools_config: Path, tmp_path: Path) -> None:
+def test_migrate_is_idempotent(v1_config_dir: Path, tmp_path: Path) -> None:
     """A second --write leaves the files alone rather than rewriting them."""
 
     out = tmp_path / "v2"
     args = [
-        "migrate", "--config-dir", str(project_tools_config),
+        "migrate", "--config-dir", str(v1_config_dir),
         "--out-root", str(out), "--write",
     ]
     first = runner.invoke(app, args)
@@ -919,11 +919,11 @@ def test_migrate_is_idempotent(project_tools_config: Path, tmp_path: Path) -> No
 
 
 def test_migrate_plain_uses_the_shared_formatter(
-    project_tools_config: Path, tmp_path: Path
+    v1_config_dir: Path, tmp_path: Path
 ) -> None:
     result = runner.invoke(
         app,
-        ["migrate", "--config-dir", str(project_tools_config),
+        ["migrate", "--config-dir", str(v1_config_dir),
          "--out-root", str(tmp_path / "v2"), "--plain"],
     )
     assert result.exit_code == 1, result.output
@@ -932,13 +932,13 @@ def test_migrate_plain_uses_the_shared_formatter(
 
 
 def test_migrate_seed_patches_is_refused_not_ignored(
-    project_tools_config: Path, tmp_path: Path
+    v1_config_dir: Path, tmp_path: Path
 ) -> None:
     """``--seed-patches`` needs the C2 renderer; saying so beats a silent no-op."""
 
     result = runner.invoke(
         app,
-        ["migrate", "--config-dir", str(project_tools_config),
+        ["migrate", "--config-dir", str(v1_config_dir),
          "--out-root", str(tmp_path / "v2"), "--seed-patches"],
     )
     assert result.exit_code == 2
