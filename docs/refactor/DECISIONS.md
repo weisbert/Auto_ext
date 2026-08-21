@@ -80,3 +80,38 @@ diff 会把它冻死在补丁里，换 cell 产出错文件**且不报错**（�
 | 现有 knob 实际是 7 个不是 5 个（calibre manifest 另有 2 个） | `templates/calibre/*.manifest.yaml` | 记录，S2 迁移时按 7 个算 |
 | `*cmnFDIDEFLayoutPath: [[cell]].def` 整条流水线没人产也没人读 | `templates/calibre/calibre_lvs.qci.j2:44` | 标记为 Calibre 面板残留，保留字面量以免 runset 不完整 |
 | `dspf.cmd` 缺 `-design_cell_name`，DSPF 流程靠什么定 top cell 不明 | `templates/quantus/dspf.cmd.j2` | 列进待确认 |
+
+---
+
+# 我自己动手改的（agent 报上来、我判断该修的）
+
+Agent 把这三条如实报了上来并标成 "production fix, not a test fix"，没有粉饰成测试问题。
+我复核后确认都是真缺陷，直接修了。
+
+| 缺陷 | 位置 | 后果 | 修法 |
+|---|---|---|---|
+| review 报告读了 `Candidate` 上不存在的字段 | `cli.py` 的 import 报告 | `auto-ext import` 直接崩 | 字段名 `value` 改 `default` |
+| `RecipeSnapshot.dspf_out_path` 存的是**解析后的路径**而不是**表达式** | `runner._recipe_snapshot_from_recipe` | run.json 把同一个解析结果存了两遍，模式一份没留 —— **这条记录换个 workspace 就没法复现** | 改传 `project.dspf_out_path`（模式本身） |
+| `capture_patch` 没有空白差异过滤器 | `core/patch.py` | 只改了个行尾空格也会变成一条永久 hunk，将来 catalog 一重排那一行就会挡住整个 stage | 加 `_is_whitespace_only`，按行 rstrip 比较（比 v1 更严：合并两行算真实改动） |
+
+另外一条**我故意没修**：
+
+- `templates/jivaro/default.xml.j2:6` 的 `viewsToReduce="av_extracted"` 与 `out_file`（`av_ext`）
+  对不上。这是 A 轮查出来的疑似真 bug，但"应该改哪一边"取决于你们 PDK 的实际约定 ——
+  改错方向比不改更糟。已列进 [OFFICE_TODO.md](OFFICE_TODO.md) 第一条待确认项。
+
+# 交付时的实测数字
+
+| 指标 | 重构前 | 现在 |
+|---|---|---|
+| 测试 | 897 passed | **2052 passed / 11 skipped / 1 xfailed** |
+| `MainWindow.minimumSizeHint` | 724 × 1056（1080p 上缩不小） | **633 × 290**，显式下限 940 × 560 |
+| Project tab 最小高 | 1001 px | 该 tab 已不存在 |
+| `project.yaml` 顶层键 | 14 | `workspace.yaml` **5** |
+| 每条 task 的键 | 15 | `cells.yaml` 每行 **7** |
+| 覆盖机制 | 5 套互不相同 | Recipe 一套 + patch 逃生舱 |
+| 参数从哪来 | 模板字面量 / identity / paths / manifest knob / env 五处 | catalog **一处**，177 条 |
+| 运行历史 | 无（日志每次覆盖） | `runs/<UTC>_<slug>/`，永不覆盖 |
+
+新旧渲染路径产出的 `si.env` / `ext.cmd` / `.qci` **逐字节相同** —— catalog 是接管了现有行为，
+不是重新发明了一套。
