@@ -121,12 +121,61 @@ def _phase59_bc_seed_run_tree(
 def _phase59_bc_make_rendered_calibre(
     ae_root: Path, task_id: str, content: str = "*lvsRunDir: /tmp/run\n*lvsReportFile: r.report\n"
 ) -> Path:
-    """Materialize a fake rendered calibre runset on disk so the menu's
-    "Open rendered template" action enables for the calibre row."""
-    rendered_dir = ae_root / "runs" / f"task_{task_id}" / "rendered"
-    rendered_dir.mkdir(parents=True, exist_ok=True)
-    qci = rendered_dir / "calibre_lvs.qci"
+    """Materialize a finished run whose calibre stage rendered a runset.
+
+    ``rendered_path_for`` reads :attr:`StageRecord.rendered_path` out of the
+    newest run record for this DUT — it no longer recomputes a path from the
+    task id — so enabling the menu's "Open rendered template" action means
+    seeding a real run directory plus its ``run.json``, not just a loose file.
+    """
+    from auto_ext.core.run_store import write_record
+    from auto_ext.model.run import (
+        DutSnapshot,
+        RecipeSnapshot,
+        RunRecord,
+        StageRecord,
+        StageStatus,
+        TaskStatus,
+        allocate_run_dir,
+        make_run_slug,
+        parse_run_id,
+        utcnow,
+    )
+
+    library, cell, layout_view, source_view = task_id.split("__")
+    dut = DutSnapshot(
+        library=library, cell=cell, layout_view=layout_view, source_view=source_view
+    )
+    recipe = RecipeSnapshot(recipe_id="ext")
+    run_dir = allocate_run_dir(ae_root / "runs", make_run_slug(dut, recipe))
+
+    qci = run_dir / "rendered" / "calibre_lvs.qci"
     qci.write_text(content, encoding="utf-8")
+
+    now = utcnow()
+    _, slug = parse_run_id(run_dir.name)
+    write_record(
+        run_dir,
+        RunRecord(
+            run_id=run_dir.name,
+            slug=slug,
+            created_at=now,
+            ended_at=now,
+            overall=TaskStatus.PASSED,
+            dut=dut,
+            recipe=recipe,
+            workspace_dir=str(ae_root / "ws"),
+            run_dir=str(run_dir),
+            stages=[
+                StageRecord(
+                    key="calibre",
+                    stage="calibre",
+                    status=StageStatus.PASSED,
+                    rendered_path="rendered/calibre_lvs.qci",
+                )
+            ],
+        ),
+    )
     return qci
 
 

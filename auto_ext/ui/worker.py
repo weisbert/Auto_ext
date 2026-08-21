@@ -5,6 +5,11 @@ Progress events come out via the attached :class:`QtProgressReporter`;
 cancellation flips a shared :class:`CancelToken` which the runner
 checks before each stage and forwards into :func:`run_subprocess` so
 in-flight EDA tools are terminated (SIGTERM → 10s grace → SIGKILL).
+
+Each task the worker runs produces a Run directory under
+``<auto_ext_root>/runs/``; :attr:`RunWorker.records` exposes the finalized
+:class:`~auto_ext.model.run.RunRecord` list once the thread has finished,
+and the attached reporter emits each one as it is written.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from auto_ext.core.progress import CancelToken
 from auto_ext.core.runner import RunSummary, run_tasks
+from auto_ext.model.run import RunRecord
 
 
 class RunWorker(QThread):
@@ -53,6 +59,20 @@ class RunWorker(QThread):
     def summary(self) -> RunSummary | None:
         """The final :class:`RunSummary`, once :meth:`run` has returned."""
         return self._summary
+
+    @property
+    def records(self) -> list[RunRecord]:
+        """Finalized run records, in task order. Empty until the run ends.
+
+        Same objects as ``summary.runs``; exposed here so a caller holding
+        only the worker does not have to reach through the summary.
+        """
+        return list(self._summary.runs) if self._summary is not None else []
+
+    @property
+    def run_dirs(self) -> list[Path]:
+        """Run directories for this dispatch, including ones still in flight."""
+        return list(self._summary.run_dirs) if self._summary is not None else []
 
     def request_cancel(self) -> None:
         """Flip the shared cancel flag. The runner sees it on its next check."""

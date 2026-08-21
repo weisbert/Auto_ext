@@ -1,8 +1,24 @@
-"""Task + stage execution driver (serial or parallel).
+"""Task + stage execution driver (serial or parallel), and the run recorder.
 
 Loads the resolved env once (fail-fast), instantiates each :class:`Tool`
 once, and iterates tasks × stages in the canonical order:
 ``si`` → ``strmout`` → ``calibre`` → ``quantus`` → ``jivaro``.
+
+Every task executed here produces a **Run**: an immutable directory under
+``<auto_ext_root>/runs/<run_id>/`` (see :mod:`auto_ext.model.run`) holding
+the rendered inputs, the stage logs, the archived evidence and a
+``run.json`` :class:`~auto_ext.model.run.RunRecord`. The directory is
+claimed with ``mkdir(exist_ok=False)`` before the first stage runs, so a
+rerun can never overwrite the previous one — which the old
+``logs/task_<id>/<stage>.log`` layout did on every single rerun::
+
+    runs/20260821T143205Z_inv-ext/
+      run.json          skeleton at start, finalized once at the end
+      events.jsonl      appended as stages start and finish
+      rendered/         si.env, calibre_lvs.qci, ext.cmd, default.xml
+      logs/             si.log, strmout.log, calibre.log, ...
+      results/          lvs.report + lvs_summary.json rescued from the workarea
+      work/             parallel-isolation cwd (serial runs have none)
 
 Two execution modes:
 
@@ -10,11 +26,17 @@ Two execution modes:
   ``si.env`` is swapped into ``workarea/si.env`` via
   :func:`serial_workdir` for the duration of the ``si`` stage.
 - **Parallel** (``max_workers >= 2``): each task gets its own workdir at
-  ``<auto_ext_root>/runs/task_<id>/`` with symlinks to ``workarea/cds.lib``
+  ``runs/<run_id>/work/`` with symlinks to ``workarea/cds.lib``
   and ``workarea/.cdsinit``. All stages for that task run with
-  ``cwd = task_dir``; the rendered ``si.env`` is written directly into
-  ``task_dir`` with no shared-file mutation. Tasks are dispatched via a
+  ``cwd = work_dir``; the rendered ``si.env`` is written directly into
+  ``work_dir`` with no shared-file mutation. Tasks are dispatched via a
   :class:`concurrent.futures.ThreadPoolExecutor`.
+
+The Cadence workspace (``extraction_output_dir``) is *not* part of a run's
+identity — it is shared, reusable, and rewritten by the next run of that
+cell. Two tasks reusing one workspace sequentially is legal; using it
+concurrently is not, and :func:`auto_ext.core.workdir.workspace_lock`
+enforces that with an advisory lock file rather than a preflight veto.
 
 Failure handling (identical in both modes):
 
@@ -29,13 +51,19 @@ Failure handling (identical in both modes):
 - ``jivaro`` stage is silently skipped (not failed) when
   ``task.jivaro.enabled`` is False.
 
-Observability (Phase 5.1):
+Observability:
 
 - ``reporter`` (optional :class:`ProgressReporter`) receives lifecycle
   events at run / task / stage boundaries, including synthetic
   start+end pairs for every skipped stage so UI trees stay consistent.
   Reporter exceptions are logged and swallowed — a buggy reporter must
-  never tear down a running subprocess.
+  never tear down a running subprocess. A reporter that also implements
+  :class:`~auto_ext.core.progress.RunAwareReporter` additionally receives
+  each task's run directory and its finalized record.
+- Persisting the run (``run.json`` / ``events.jsonl`` / the archived
+  evidence) is treated the same way: an I/O failure there is logged and
+  swallowed, because losing the bookkeeping must never abort an EDA run
+  that is otherwise fine.
 - ``cancel_token`` (optional :class:`CancelToken`) is checked before
   each stage and forwarded into :func:`run_subprocess`; when set
   mid-subprocess, the in-flight EDA process is terminated (SIGTERM
@@ -47,24 +75,31 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
 import shutil
+import socket
+import time
+import uuid
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from auto_ext import __version__ as AUTO_EXT_VERSION
 from auto_ext.core.config import ProjectConfig, TaskConfig
 from auto_ext.core.env import (
+    EnvResolution,
     derive_parent_dir_from_env_candidates,
     discover_required_vars,
     resolve_env,
     resolve_path_expr,
     substitute_env,
 )
-from auto_ext.core.errors import AutoExtError, ConfigError
+from auto_ext.core.errors import AutoExtError, ConfigError, WorkdirError
 from auto_ext.core.manifest import load_manifest, resolve_knob_values
-from auto_ext.core.template import resolve_template_path
 from auto_ext.core.progress import (
     CancelToken,
     NullReporter,
@@ -72,10 +107,39 @@ from auto_ext.core.progress import (
     StageStatus,
     TaskStatus,
 )
+from auto_ext.core.run_store import (
+    append_event,
+    list_runs,
+    read_record,
+    write_batch,
+    write_record,
+)
+from auto_ext.core.template import resolve_template_path
 from auto_ext.core.workdir import (
     place_si_env_in_parallel_dir,
     prepare_parallel_workdir,
     serial_workdir,
+    workspace_lock,
+)
+from auto_ext.model.run import (
+    RUN_TIMESTAMP_FORMAT,
+    DutSnapshot,
+    EnvBinding,
+    JivaroSnapshot,
+    JsonScalar,
+    LvsResult,
+    RecipeSnapshot,
+    RunBatch,
+    RunPaths,
+    RunRecord,
+    RunResults,
+    StageRecord,
+    allocate_run_dir,
+    make_run_slug,
+    parse_run_id,
+    run_paths,
+    slugify,
+    utcnow,
 )
 from auto_ext.tools.base import Tool, ToolResult
 from auto_ext.tools.calibre import CalibreTool
@@ -97,7 +161,15 @@ _TOOL_REGISTRY: dict[str, type[Tool]] = {
     "jivaro": JivaroTool,
 }
 
-_UNSAFE_TASK_ID = re.compile(r"[^A-Za-z0-9_.-]")
+#: Name of the archived Calibre LVS report inside ``runs/<run_id>/results/``.
+LVS_REPORT_NAME = "lvs.report"
+#: Name of the derived LVS summary written next to it.
+LVS_SUMMARY_NAME = "lvs_summary.json"
+#: Canonical name of the archived si control file inside ``rendered/``.
+#: The rendered file itself is named after its template (``default.env``);
+#: this copy makes the run directory self-describing and matches what gets
+#: published into the Cadence workspace.
+SI_ENV_ARCHIVE_NAME = "si.env"
 
 
 # ---- result types ----------------------------------------------------------
@@ -109,24 +181,51 @@ class StageResult:
 
     ``status`` is a :class:`StageStatus`; string comparisons (``== "passed"``)
     continue to work because ``StageStatus`` is a :class:`~enum.StrEnum`.
+
+    ``record`` carries the persisted :class:`~auto_ext.model.run.StageRecord`
+    for this stage — timings, argv, exit code, run-relative log and rendered
+    paths, workarea artifacts and tool diagnostics. It is the same object that
+    lands in ``run.json``; the loose fields above stay for callers that only
+    ever wanted the status.
     """
 
     stage: str
     status: StageStatus
     tool_result: ToolResult | None = None
     error: str | None = None
+    record: StageRecord | None = None
 
 
 @dataclass
 class TaskResult:
+    """One task's outcome, plus the Run it produced.
+
+    ``run_dir`` is available as soon as the run directory is claimed (before
+    the first stage), which is what a consumer needs to tail a log while the
+    run is still going. ``record`` only appears once the run is finalized.
+    """
+
     task_id: str
     stages: list[StageResult] = field(default_factory=list)
     overall: TaskStatus = TaskStatus.PENDING
+    run_dir: Path | None = None
+    record: RunRecord | None = None
 
 
 @dataclass
 class RunSummary:
+    """The whole dispatch: one :class:`TaskResult` per task.
+
+    ``runs`` is the list the GUI and the CLI read to render outcomes; each
+    entry is a finalized :class:`~auto_ext.model.run.RunRecord` and can be
+    re-read from disk later via :func:`auto_ext.core.run_store.read_record`.
+    """
+
     tasks: list[TaskResult] = field(default_factory=list)
+    #: Set when the dispatch covered more than one task; the index file lives
+    #: at ``runs/batches/<batch_id>.json``.
+    batch_id: str | None = None
+    runs_root: Path | None = None
 
     @property
     def total(self) -> int:
@@ -144,6 +243,18 @@ class RunSummary:
     def cancelled(self) -> int:
         return sum(1 for t in self.tasks if t.overall == TaskStatus.CANCELLED)
 
+    @property
+    def runs(self) -> list[RunRecord]:
+        """Finalized run records, in task submission order."""
+
+        return [t.record for t in self.tasks if t.record is not None]
+
+    @property
+    def run_dirs(self) -> list[Path]:
+        """Run directories, in task submission order, including unfinalized ones."""
+
+        return [t.run_dir for t in self.tasks if t.run_dir is not None]
+
 
 @dataclass
 class _TaskExecCtx:
@@ -151,13 +262,13 @@ class _TaskExecCtx:
 
     ``parallel=False``: ``cwd`` is the shared workarea; si uses
     :func:`serial_workdir` to swap si.env in/out.
-    ``parallel=True``: ``cwd`` is the task's isolated
-    ``runs/task_<id>/`` dir; si.env is copied directly into it.
+    ``parallel=True``: ``cwd`` is the run's isolated ``work/`` dir; si.env
+    is copied directly into it.
     """
 
     cwd: Path
-    rendered_dir: Path
-    log_dir: Path
+    run_dir: Path
+    paths: RunPaths
     parallel: bool
 
 
@@ -185,9 +296,10 @@ def run_tasks(
     - Validates ``stages`` (must be a non-empty subset of :data:`STAGE_ORDER`).
     - If ``jivaro`` is among ``stages``, every task with ``jivaro.enabled=True``
       must have ``out_file`` set, else :class:`ConfigError`.
-    - Rejects tasks with duplicate ``(library, cell)`` pairs — they would
-      share ``extraction_output_dir`` and clobber each other (harmful in
-      parallel, misleading in serial).
+    - Checks whether tasks share a resolved ``extraction_output_dir``. In
+      serial that is legal (the workspace is reused, not contended) and only
+      logged; in parallel it is refused, because two concurrent tasks writing
+      one svdb corrupt each other.
     - Discovers env vars from every template in use and resolves them
       (override → shell → missing); any missing raises
       :class:`auto_ext.core.errors.EnvResolutionError` before any
@@ -200,7 +312,7 @@ def run_tasks(
     ``max_workers`` gates the execution mode: ``None`` or ``<= 1`` runs
     serially (cwd = ``workarea``, si.env swapped via
     :func:`serial_workdir`); ``>= 2`` runs tasks on a thread pool, each
-    task isolated under ``<auto_ext_root>/runs/task_<id>/``.
+    task isolated under its own ``runs/<run_id>/work/``.
 
     ``reporter`` / ``cancel_token`` default to a :class:`NullReporter`
     and a fresh :class:`CancelToken` that is never set — same blocking
@@ -218,20 +330,25 @@ def run_tasks(
     resolution = resolve_env(required_env, project.env_overrides)
     resolved_env = resolution.require()
 
-    # output_dir collision check needs resolved env so ``${WORK_ROOT}`` is
+    parallel = max_workers is not None and max_workers >= 2
+
+    # The workspace-sharing check needs resolved env so ``${WORK_ROOT}`` is
     # gone before ``str.format`` runs (Python would otherwise interpret
     # ``{WORK_ROOT}`` as a missing format key). Runs after env resolution
     # but before any subprocess; env errors are more fundamental anyway.
-    _validate_task_outputs(tasks, project, resolved_env)
+    _validate_task_outputs(tasks, project, resolved_env, parallel=parallel)
 
     subprocess_env: dict[str, str] = {**os.environ, **project.env_overrides}
 
     tool_instances: dict[str, Tool] = {name: cls() for name, cls in _TOOL_REGISTRY.items()}
+    tool_paths = _resolve_tool_paths(tool_instances, subprocess_env)
 
     cli_knobs = cli_knobs or {}
-    parallel = max_workers is not None and max_workers >= 2
+    runs_root = Path(auto_ext_root) / "runs"
+    started_at = utcnow()
+    batch_id = _new_batch_id(started_at) if len(tasks) > 1 else None
 
-    summary = RunSummary()
+    summary = RunSummary(batch_id=batch_id, runs_root=runs_root)
     _safe_call(reporter, "on_run_start", len(tasks), list(stages))
 
     def _submit(task: TaskConfig) -> TaskResult:
@@ -240,14 +357,19 @@ def run_tasks(
             task=task,
             stages=stages,
             auto_ext_root=auto_ext_root,
+            runs_root=runs_root,
             workarea=workarea,
+            resolution=resolution,
             resolved_env=resolved_env,
             subprocess_env=subprocess_env,
             tools=tool_instances,
+            tool_paths=tool_paths,
             cli_knobs=cli_knobs,
             verbose=verbose,
             dry_run=dry_run,
             parallel=parallel,
+            max_workers=max_workers or 1,
+            batch_id=batch_id,
             reporter=reporter,
             cancel_token=cancel_token,
         )
@@ -268,6 +390,9 @@ def run_tasks(
         # callers see deterministic output regardless of completion order.
         summary.tasks = [results_by_id[t.task_id] for t in tasks]
 
+    if batch_id is not None:
+        _write_batch_index(runs_root, batch_id, started_at, summary, max_workers or 1)
+
     logger.info(
         "run complete: %d/%d passed, %d failed, %d cancelled",
         summary.passed,
@@ -279,24 +404,30 @@ def run_tasks(
     return summary
 
 
-# ---- per-task / per-stage --------------------------------------------------
+# ---- run directory / record lookup -----------------------------------------
 
 
-def _task_run_dirs(auto_ext_root: Path, task: TaskConfig) -> tuple[Path, Path, Path]:
-    """Return ``(task_base, rendered_dir, log_dir)`` for ``task``.
+def latest_run_record_for(auto_ext_root: Path, task: TaskConfig) -> RunRecord | None:
+    """Return the most recent :class:`RunRecord` for ``task``'s DUT, or ``None``.
 
-    Single source of truth for the runner's path conventions:
-    ``<auto_ext_root>/runs/task_<safe_id>/`` for the per-task workdir,
-    ``rendered/`` underneath for rendered templates, and
-    ``<auto_ext_root>/logs/task_<safe_id>/`` for stage logs. Both serial
-    and parallel modes use this layout (parallel additionally treats
-    ``task_base`` as the cwd; serial uses the shared workarea).
+    "Same DUT" is the four identity axes the old ``task_id`` encoded —
+    library, cell, layout view, source view. Runs are enumerated from
+    ``<auto_ext_root>/runs/``; unreadable directories are skipped by
+    :func:`auto_ext.core.run_store.list_runs` rather than raising, so a
+    corrupt history never breaks a lookup.
     """
-    safe_id = _UNSAFE_TASK_ID.sub("_", task.task_id)
-    task_base = auto_ext_root / "runs" / f"task_{safe_id}"
-    rendered_dir = task_base / "rendered"
-    log_dir = auto_ext_root / "logs" / f"task_{safe_id}"
-    return task_base, rendered_dir, log_dir
+
+    runs_root = Path(auto_ext_root) / "runs"
+    key = f"{task.library}__{task.cell}__{task.lvs_layout_view}__{task.lvs_source_view}"
+    for entry in list_runs(runs_root):  # newest first
+        if entry.dut_key != key:
+            continue
+        try:
+            return read_record(entry.run_dir)
+        except AutoExtError as exc:
+            logger.warning("%s: cannot read run record (%s)", entry.run_dir, exc)
+            continue
+    return None
 
 
 def rendered_path_for(
@@ -304,40 +435,51 @@ def rendered_path_for(
     task: TaskConfig,
     stage: str,
     project: ProjectConfig,
+    *,
+    record: RunRecord | None = None,
 ) -> Path | None:
-    """Return where the runner writes (or would write) the rendered template.
+    """Return where the runner *wrote* this stage's rendered template.
 
-    Mirrors the per-stage path math in :func:`_run_single_stage` so the
-    GUI's "Open rendered template" action and the runner stay in sync.
+    Read straight out of :attr:`~auto_ext.model.run.StageRecord.rendered_path`
+    in the run record — deliberately not recomputed. The GUI's "Open rendered
+    template" action used to mirror the runner's path arithmetic, which meant
+    two implementations of one convention that could (and did) drift apart.
+    Now there is one: whatever the runner recorded.
 
-    Returns:
-        - The absolute path under
-          ``<auto_ext_root>/runs/task_<safe_id>/rendered/<template_stem>``
-          for stages that render a template (``si`` / ``calibre`` /
-          ``quantus`` / ``jivaro``).
-        - ``None`` for ``strmout`` (the strmout tool has
-          ``has_template=False``; it consumes ``output_dir`` /
-          ``layer_map`` directly and produces no rendered input file).
-        - ``None`` for any stage that has neither a per-task override nor
-          a project default configured — the runner would also error in
-          this case, and the GUI should disable the action.
+    ``record`` defaults to the newest run of ``task``'s DUT
+    (:func:`latest_run_record_for`).
 
-    Per-stage template resolution is per-task override → project default,
-    matching :func:`_resolve_template_path`. ``project`` is currently
-    unused at runtime (template fields are merged into ``task.templates``
-    upstream by :func:`auto_ext.core.config.load_tasks`) but kept in the
-    signature so future per-stage routing changes don't ripple through
-    every caller.
+    Returns ``None`` when:
+
+    - ``stage`` is not a known stage, or is ``strmout`` (the strmout tool has
+      ``has_template=False``: it consumes ``output_dir`` / ``layer_map``
+      directly and produces no rendered input file);
+    - the DUT has never been run, so there is no record to read;
+    - the recorded stage produced no rendered file (skipped, cancelled, or a
+      render that failed before writing).
+
+    ``project`` is unused at runtime — template resolution now happens once,
+    inside the run — but is kept in the signature so existing callers do not
+    have to change.
     """
-    if stage not in STAGE_ORDER:
+    if stage not in STAGE_ORDER or stage == "strmout":
         return None
-    if stage == "strmout":
+    if record is None:
+        record = latest_run_record_for(auto_ext_root, task)
+    if record is None:
         return None
-    template_path = _resolve_template_path(task, stage, auto_ext_root=auto_ext_root)
-    if template_path is None:
+    stage_record = record.stage(stage)
+    if stage_record is None or stage_record.rendered_path is None:
         return None
-    _, rendered_dir, _ = _task_run_dirs(auto_ext_root, task)
-    return rendered_dir / template_path.stem
+    base = (
+        Path(record.run_dir)
+        if record.run_dir
+        else Path(auto_ext_root) / "runs" / record.run_id
+    )
+    return base / stage_record.rendered_path
+
+
+# ---- per-task / per-stage --------------------------------------------------
 
 
 def _run_single_task(
@@ -346,74 +488,229 @@ def _run_single_task(
     task: TaskConfig,
     stages: list[str],
     auto_ext_root: Path,
+    runs_root: Path,
     workarea: Path,
+    resolution: EnvResolution,
     resolved_env: dict[str, str],
     subprocess_env: dict[str, str],
     tools: dict[str, Tool],
+    tool_paths: dict[str, str],
     cli_knobs: dict[str, dict[str, Any]],
     verbose: bool,
     dry_run: bool,
     parallel: bool = False,
+    max_workers: int,
+    batch_id: str | None,
     reporter: ProgressReporter,
     cancel_token: CancelToken,
 ) -> TaskResult:
-    _, rendered_dir, log_dir = _task_run_dirs(auto_ext_root, task)
+    dut = DutSnapshot.from_task_config(task)
+    recipe_id = _derive_recipe_id(task)
 
+    # The slug only reads ``recipe_id``, so a minimal snapshot names the
+    # directory; the full snapshot needs the render context, which in turn
+    # may need the run id, so it is built once the directory exists.
+    run_dir = allocate_run_dir(runs_root, make_run_slug(dut, RecipeSnapshot(recipe_id=recipe_id)))
+    run_id = run_dir.name
+    _, slug = parse_run_id(run_id)
+    paths = run_paths(run_dir)
+    created_at = utcnow()
+
+    task_result = TaskResult(task_id=task.task_id, run_dir=run_dir)
+    _safe_optional_call(reporter, "on_run_dir", task.task_id, run_dir)
+
+    try:
+        context = _build_context(project, task, resolved_env, run_slug=slug, run_id=run_id)
+        recipe = _recipe_snapshot(
+            project, task, context, cli_knobs, auto_ext_root=auto_ext_root, recipe_id=recipe_id
+        )
+    except AutoExtError:
+        # A configuration error here (an unknown dspf_out_path format key, say)
+        # means nothing about this run can be described, so there is nothing
+        # worth recording. Give the directory back before re-raising rather
+        # than leaving an empty run for the history list to warn about
+        # forever; it is still untouched, so removing it is safe.
+        shutil.rmtree(run_dir, ignore_errors=True)
+        raise
+
+    # Each run owns runs/<run_id>/work, so there is nothing to contend over.
+    # A symlink failure (no Developer Mode on Windows, a workarea missing
+    # cds.lib) is this task's failure, not the dispatch's: the run directory
+    # is already claimed, so it has to end up with a record explaining itself
+    # rather than being left behind as an empty orphan.
+    setup_error: str | None = None
+    cwd = workarea
     if parallel:
-        # prepare_parallel_workdir does rmtree-on-exist + fresh symlinks,
-        # so a stale task_base from a prior run is handled. It also raises
-        # WorkdirError cleanly if symlink creation fails.
-        task_dir = prepare_parallel_workdir(auto_ext_root, workarea, task.task_id)
-        cwd = task_dir
-    else:
-        cwd = workarea
+        try:
+            cwd = prepare_parallel_workdir(run_dir, workarea)
+        except AutoExtError as exc:
+            setup_error = f"cannot prepare the parallel work dir: {exc}"
 
-    exec_ctx = _TaskExecCtx(
-        cwd=cwd, rendered_dir=rendered_dir, log_dir=log_dir, parallel=parallel
-    )
-    context = _build_context(project, task, resolved_env)
-
+    exec_ctx = _TaskExecCtx(cwd=cwd, run_dir=run_dir, paths=paths, parallel=parallel)
     active_stages = [s for s in STAGE_ORDER if s in stages]
+
+    base_fields: dict[str, Any] = {
+        "run_id": run_id,
+        "slug": slug,
+        "created_at": created_at,
+        "batch_id": batch_id,
+        "dut": dut,
+        "recipe": recipe,
+        "requested_stages": active_stages,
+        "dry_run": dry_run,
+        "continue_on_lvs_fail": task.continue_on_lvs_fail,
+        "max_workers": max_workers,
+        "workspace_dir": str(context["output_dir"]),
+        "intermediate_dir": _opt_str(context.get("intermediate_dir")),
+        "dspf_path": _opt_str(context.get("dspf_out_path")),
+        "workarea": str(workarea),
+        "run_dir": str(run_dir),
+        "work_dir": str(cwd) if parallel and setup_error is None else None,
+        "env": EnvBinding.from_resolution(resolution),
+        "context": _jsonable_context(context),
+        "tools": tool_paths,
+        "host": _hostname(),
+        "user": os.environ.get("USER") or os.environ.get("USERNAME"),
+        "auto_ext_version": AUTO_EXT_VERSION,
+        "python_version": platform.python_version(),
+    }
+
+    _safe_store(write_record, run_dir, RunRecord(**base_fields))
+    _safe_store(
+        append_event,
+        run_dir,
+        {
+            "event": "run_start",
+            "run_id": run_id,
+            "task_id": task.task_id,
+            "stages": active_stages,
+            "dry_run": dry_run,
+            "parallel": parallel,
+        },
+    )
+
     _safe_call(reporter, "on_task_start", task.task_id, active_stages)
 
-    task_result = TaskResult(task_id=task.task_id)
+    # A dry run must not touch the Cadence workspace at all, so it neither
+    # creates the directory nor takes the lock.
+    lock = (
+        workspace_lock(Path(context["output_dir"]), run_id)
+        if not dry_run and setup_error is None
+        else _NullContext()
+    )
+    try:
+        if setup_error is not None:
+            raise WorkdirError(setup_error)
+        with lock:
+            _execute_stages(
+                task=task,
+                project=project,
+                stages=active_stages,
+                task_result=task_result,
+                exec_ctx=exec_ctx,
+                context=context,
+                resolved_env=resolved_env,
+                subprocess_env=subprocess_env,
+                tools=tools,
+                cli_knobs=cli_knobs,
+                dry_run=dry_run,
+                cancel_token=cancel_token,
+                auto_ext_root=auto_ext_root,
+                reporter=reporter,
+                run_dir=run_dir,
+            )
+    except AutoExtError as exc:
+        # Two things raise out here: the work-dir setup above, and the
+        # workspace lock when another run owns the Cadence workspace. Both are
+        # recorded as a failed run rather than tearing down the whole dispatch.
+        logger.error("task %s: %s", task.task_id, exc)
+        _append_synthetic_stage(
+            task_result,
+            reporter,
+            task.task_id,
+            active_stages[0] if active_stages else "si",
+            StageStatus.FAILED,
+            str(exc),
+            run_dir=run_dir,
+        )
+
+    task_result.overall = _compute_overall(task_result)
+    if verbose:
+        print(f"[task {task.task_id}] {task_result.overall}")
+
+    record = _finalize_run(
+        run_dir=run_dir,
+        paths=paths,
+        base_fields=base_fields,
+        task_result=task_result,
+    )
+    task_result.record = record
+    if record is not None:
+        _safe_optional_call(reporter, "on_task_record", task.task_id, record)
+
+    _safe_call(reporter, "on_task_end", task.task_id, task_result.overall)
+    return task_result
+
+
+def _execute_stages(
+    *,
+    task: TaskConfig,
+    project: ProjectConfig,
+    stages: list[str],
+    task_result: TaskResult,
+    exec_ctx: _TaskExecCtx,
+    context: dict[str, Any],
+    resolved_env: dict[str, str],
+    subprocess_env: dict[str, str],
+    tools: dict[str, Tool],
+    cli_knobs: dict[str, dict[str, Any]],
+    dry_run: bool,
+    cancel_token: CancelToken,
+    auto_ext_root: Path,
+    reporter: ProgressReporter,
+    run_dir: Path,
+) -> None:
+    """Walk the stage list, appending a :class:`StageResult` for each."""
+
     abort = False
     cancel_seen = False  # once set: first stage marked CANCELLED, rest SKIPPED
 
-    for stage in active_stages:
+    for stage in stages:
         # Pre-stage cancel check: short-circuit before any rendering or
         # subprocess spawn.
         if not cancel_seen and cancel_token.is_cancelled():
             # First stage hit by cancel → CANCELLED; subsequent → SKIPPED.
-            _emit_synthetic_stage(
+            _append_synthetic_stage(
                 task_result, reporter, task.task_id, stage,
-                StageStatus.CANCELLED, "run cancelled by user",
+                StageStatus.CANCELLED, "run cancelled by user", run_dir=run_dir,
             )
             cancel_seen = True
             continue
 
         if cancel_seen:
-            _emit_synthetic_stage(
+            _append_synthetic_stage(
                 task_result, reporter, task.task_id, stage,
-                StageStatus.SKIPPED, "aborted after cancellation",
+                StageStatus.SKIPPED, "aborted after cancellation", run_dir=run_dir,
             )
             continue
 
         if stage == "jivaro" and not task.jivaro.enabled:
-            _emit_synthetic_stage(
+            _append_synthetic_stage(
                 task_result, reporter, task.task_id, stage,
-                StageStatus.SKIPPED, "jivaro disabled for task",
+                StageStatus.SKIPPED, "jivaro disabled for task", run_dir=run_dir,
             )
             continue
 
         if abort:
-            _emit_synthetic_stage(
+            _append_synthetic_stage(
                 task_result, reporter, task.task_id, stage,
                 StageStatus.SKIPPED, "aborted after earlier stage failure",
+                run_dir=run_dir,
             )
             continue
 
         _safe_call(reporter, "on_stage_start", task.task_id, stage)
+        _safe_store(append_event, run_dir, {"event": "stage_start", "stage": stage})
         sr = _run_single_stage(
             stage=stage,
             project=project,
@@ -432,15 +729,23 @@ def _run_single_task(
         # as CANCELLED so the summary distinguishes "user stopped us"
         # from "the tool errored".
         if sr.status == StageStatus.FAILED and cancel_token.is_cancelled():
+            error = sr.error or "stage terminated by user cancellation"
+            record = sr.record
+            if record is not None:
+                record = record.model_copy(
+                    update={"status": StageStatus.CANCELLED, "error": error}
+                )
             sr = StageResult(
                 stage=sr.stage,
                 status=StageStatus.CANCELLED,
                 tool_result=sr.tool_result,
-                error=sr.error or "stage terminated by user cancellation",
+                error=error,
+                record=record,
             )
             cancel_seen = True
 
         task_result.stages.append(sr)
+        _safe_store(append_event, run_dir, _stage_end_event(sr))
         _safe_call(reporter, "on_stage_end", task.task_id, stage, sr.status, sr.error)
 
         if sr.status == StageStatus.FAILED:
@@ -454,20 +759,16 @@ def _run_single_task(
         elif sr.status == StageStatus.CANCELLED:
             cancel_seen = True
 
-    task_result.overall = _compute_overall(task_result)
-    if verbose:
-        print(f"[task {task.task_id}] {task_result.overall}")
-    _safe_call(reporter, "on_task_end", task.task_id, task_result.overall)
-    return task_result
 
-
-def _emit_synthetic_stage(
+def _append_synthetic_stage(
     task_result: TaskResult,
     reporter: ProgressReporter,
     task_id: str,
     stage: str,
     status: StageStatus,
     reason: str,
+    *,
+    run_dir: Path,
 ) -> None:
     """Append a skipped/cancelled :class:`StageResult` and emit both events.
 
@@ -475,9 +776,27 @@ def _emit_synthetic_stage(
     ``on_stage_end`` pair happen here so callers don't accidentally
     emit one without the other — a GUI tree that sees ``on_stage_start``
     without an end gets stuck on "running" forever.
+
+    The synthetic stage still gets a :class:`StageRecord`: a run whose
+    ``stages`` list silently omitted everything that was skipped would be
+    unreadable six months later, when "did jivaro not run, or did it not get
+    recorded?" is exactly the question being asked.
     """
     _safe_call(reporter, "on_stage_start", task_id, stage)
-    task_result.stages.append(StageResult(stage=stage, status=status, error=reason))
+    moment = utcnow()
+    record = StageRecord(
+        key=stage,
+        stage=stage,
+        status=status,
+        started_at=moment,
+        ended_at=moment,
+        duration_s=0.0,
+        error=reason if status in (StageStatus.CANCELLED, StageStatus.FAILED) else None,
+        skip_reason=reason,
+    )
+    result = StageResult(stage=stage, status=status, error=reason, record=record)
+    task_result.stages.append(result)
+    _safe_store(append_event, run_dir, _stage_end_event(result))
     _safe_call(reporter, "on_stage_end", task_id, stage, status, reason)
 
 
@@ -496,15 +815,49 @@ def _run_single_stage(
     cancel_token: CancelToken,
     auto_ext_root: Path,
 ) -> StageResult:
-    log_path = exec_ctx.log_dir / f"{stage}.log"
+    log_path = exec_ctx.paths.logs / f"{stage}.log"
+    started_at = utcnow()
+    started_perf = time.perf_counter()
+
+    def _finish(
+        status: StageStatus,
+        *,
+        tool_result: ToolResult | None = None,
+        error: str | None = None,
+        rendered: Path | None = None,
+        argv: list[str] | None = None,
+        logged: bool = False,
+    ) -> StageResult:
+        record = StageRecord(
+            key=stage,
+            stage=stage,
+            status=status,
+            started_at=started_at,
+            ended_at=utcnow(),
+            duration_s=round(time.perf_counter() - started_perf, 3),
+            argv=list(argv or []),
+            cwd=str(exec_ctx.cwd),
+            exit_code=_exit_code_of(tool_result),
+            log_path=_run_relative(exec_ctx.run_dir, log_path) if logged else None,
+            rendered_path=_run_relative(exec_ctx.run_dir, rendered),
+            artifacts=[str(p) for p in (tool_result.artifact_paths if tool_result else [])],
+            details=_jsonable_diagnostics(tool_result),
+            error=error,
+        )
+        return StageResult(
+            stage=stage,
+            status=status,
+            tool_result=tool_result,
+            error=error,
+            record=record,
+        )
 
     rendered_path: Path
     if tool.has_template:
         template_path = _resolve_template_path(task, stage, auto_ext_root=auto_ext_root)
         if template_path is None:
-            return StageResult(
-                stage=stage,
-                status=StageStatus.FAILED,
+            return _finish(
+                StageStatus.FAILED,
                 error=(
                     f"no template configured for {stage}: neither project.templates.{stage} "
                     f"nor task.templates.{stage} is set"
@@ -522,25 +875,29 @@ def _run_single_stage(
                 template_path=template_path,
                 context=context,
                 env=resolved_env,
-                out_path=exec_ctx.rendered_dir / template_path.stem,
+                out_path=exec_ctx.paths.rendered / template_path.stem,
                 knobs=stage_knobs,
             )
         except AutoExtError as exc:
-            return StageResult(
-                stage=stage, status=StageStatus.FAILED, error=f"render failed: {exc}"
-            )
+            return _finish(StageStatus.FAILED, error=f"render failed: {exc}")
+        if stage == "si":
+            _archive_si_env(rendered_path, exec_ctx.paths.rendered)
+        rendered_record: Path | None = rendered_path
     else:
-        rendered_path = exec_ctx.rendered_dir
+        # strmout consumes output_dir / layer_map directly; build_argv still
+        # wants a path, but there is no rendered file to point a record at.
+        rendered_path = exec_ctx.paths.rendered
+        rendered_record = None
 
     if dry_run:
-        return StageResult(stage=stage, status=StageStatus.DRY_RUN)
+        return _finish(StageStatus.DRY_RUN, rendered=rendered_record)
 
     argv = tool.build_argv(rendered_path, context)
 
     try:
         if stage == "si":
             if exec_ctx.parallel:
-                # Parallel: each task owns its cwd, so si.env is placed
+                # Parallel: each run owns its cwd, so si.env is placed
                 # directly inside it with no cleanup contention.
                 place_si_env_in_parallel_dir(exec_ctx.cwd, rendered_path)
                 raw = tool.run(
@@ -571,10 +928,374 @@ def _run_single_stage(
             )
         result = tool.parse_result(raw)
     except AutoExtError as exc:
-        return StageResult(stage=stage, status=StageStatus.FAILED, error=str(exc))
+        return _finish(
+            StageStatus.FAILED, error=str(exc), rendered=rendered_record,
+            argv=argv, logged=log_path.exists(),
+        )
 
     status = StageStatus.PASSED if result.success else StageStatus.FAILED
-    return StageResult(stage=stage, status=status, tool_result=result)
+    return _finish(
+        status, tool_result=result, rendered=rendered_record, argv=argv,
+        logged=log_path.exists(),
+    )
+
+
+# ---- run record assembly ---------------------------------------------------
+
+
+def _derive_recipe_id(task: TaskConfig) -> str:
+    """Name the effective configuration for the run directory.
+
+    S1 has no ``Recipe`` object yet, so the closest stand-in for "which
+    configuration is this" is the template that shapes the extraction. The
+    first configured stage template wins, in the order the stages differ
+    most: quantus, then calibre, then si, then jivaro. ``ext.cmd.j2``
+    becomes ``ext``; a task with no templates at all becomes ``adhoc``,
+    which still produces a well-formed slug.
+    """
+
+    for stage in ("quantus", "calibre", "si", "jivaro"):
+        raw = getattr(task.templates, stage, None)
+        if not raw:
+            continue
+        base = Path(str(raw)).name.split(".")[0]
+        if base:
+            return slugify(base, max_len=28)
+    return "adhoc"
+
+
+def _recipe_snapshot(
+    project: ProjectConfig,
+    task: TaskConfig,
+    context: dict[str, Any],
+    cli_knobs: dict[str, dict[str, Any]],
+    *,
+    auto_ext_root: Path,
+    recipe_id: str,
+) -> RecipeSnapshot:
+    """Freeze the effective configuration of this run.
+
+    Everything needed to explain the rendered files afterwards: which
+    template each stage used, the merged knob values, the jivaro settings,
+    the ``dspf_out_path`` *expression* (its resolved value is
+    :attr:`RunRecord.dspf_path`) and the resolved ``project.paths`` entries.
+    Editing ``project.yaml`` tomorrow cannot rewrite this.
+
+    Knob resolution is best-effort: a template whose manifest cannot be read
+    is left out of ``knobs`` rather than aborting here, because the same
+    failure is about to be reported properly — with its stage attached — when
+    that stage renders.
+    """
+
+    templates: dict[str, str] = {}
+    knobs: dict[str, dict[str, JsonScalar]] = {}
+    for stage in ("si", "calibre", "quantus", "jivaro"):
+        template_path = _resolve_template_path(task, stage, auto_ext_root=auto_ext_root)
+        if template_path is None:
+            continue
+        templates[stage] = str(template_path)
+        try:
+            manifest = load_manifest(template_path)
+            values = resolve_knob_values(
+                manifest,
+                project_knobs=project.knobs.get(stage, {}),
+                task_knobs=task.knobs.get(stage, {}),
+                cli_knobs=cli_knobs.get(stage, {}),
+            )
+        except AutoExtError as exc:
+            logger.debug("recipe snapshot: no knobs for %s (%s)", stage, exc)
+            continue
+        if values:
+            knobs[stage] = {k: _scalar(v) for k, v in values.items()}
+
+    return RecipeSnapshot(
+        recipe_id=recipe_id,
+        name=task.label,
+        templates=templates,
+        knobs=knobs,
+        jivaro=JivaroSnapshot(
+            enabled=task.jivaro.enabled,
+            frequency_limit=task.jivaro.frequency_limit,
+            error_max=task.jivaro.error_max,
+        ),
+        dspf_out_path=task.dspf_out_path or project.dspf_out_path,
+        paths={k: str(context[k]) for k in project.paths if k in context},
+    )
+
+
+def _finalize_run(
+    *,
+    run_dir: Path,
+    paths: RunPaths,
+    base_fields: dict[str, Any],
+    task_result: TaskResult,
+) -> RunRecord | None:
+    """Rescue the evidence, write the final ``run.json``, and return it.
+
+    Two things happen here that cannot happen earlier:
+
+    - **Evidence is archived.** The Cadence workspace holds gigabytes of
+      intermediates and is rewritten by the next run of the same cell; the
+      run directory keeps the small, decisive artifacts. Concretely: the
+      Calibre LVS report is copied to ``results/lvs.report`` and a derived
+      ``results/lvs_summary.json`` is written beside it. The rendered inputs
+      need no rescue — under this layout they were written into
+      ``runs/<run_id>/rendered/`` in the first place — and the workarea paths
+      of everything too large to copy are recorded in
+      :attr:`StageRecord.artifacts`.
+    - **The record becomes immutable.** ``run.json`` is rewritten once, with
+      ``overwrite=True``, and never touched again.
+
+    Returns ``None`` only if the record could not be assembled at all; a
+    failure to *write* it is logged and the in-memory record still returned,
+    because the caller (and the GUI) can still use it.
+    """
+
+    stage_records = [s.record for s in task_result.stages if s.record is not None]
+    lvs = _archive_lvs(paths, task_result)
+    ended_at = utcnow()
+
+    try:
+        record = RunRecord(
+            **base_fields,
+            ended_at=ended_at,
+            overall=task_result.overall,
+            stages=stage_records,
+            results=RunResults(lvs=lvs),
+            cancelled_by=("user" if task_result.overall == TaskStatus.CANCELLED else None),
+        )
+    except Exception:  # noqa: BLE001 — a broken record must not kill the run
+        logger.exception("cannot assemble run record for %s", run_dir)
+        return None
+
+    _safe_store(write_record, run_dir, record, overwrite=True)
+    _safe_store(
+        append_event,
+        run_dir,
+        {
+            "event": "run_end",
+            "run_id": record.run_id,
+            "overall": str(record.overall),
+            "duration_s": record.duration_s,
+        },
+    )
+    return record
+
+
+def _archive_lvs(paths: RunPaths, task_result: TaskResult) -> LvsResult | None:
+    """Copy the Calibre LVS report into ``results/`` and build the typed result.
+
+    ``core/checks.py`` parses the report in detail — banner, discrepancy
+    count, CELL SUMMARY fallback — and until now that landed in
+    ``ToolResult.diagnostics["lvs_report"]`` where nothing read it. It becomes
+    :attr:`RunRecord.results.lvs`, and the report itself is copied out of the
+    workarea before the next run of this cell overwrites it.
+    """
+
+    report = None
+    for sr in task_result.stages:
+        if sr.stage != "calibre" or sr.tool_result is None:
+            continue
+        candidate = sr.tool_result.diagnostics.get("lvs_report")
+        if candidate is not None:
+            report = candidate
+            break
+    if report is None:
+        return None
+
+    archived: str | None = None
+    source = Path(str(getattr(report, "source", "")))
+    if source.is_file():
+        try:
+            paths.results.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, paths.results / LVS_REPORT_NAME)
+            archived = f"{paths.results.name}/{LVS_REPORT_NAME}"
+        except OSError as exc:
+            logger.warning("cannot archive LVS report %s: %s", source, exc)
+
+    try:
+        lvs = LvsResult.from_lvs_report(report, archived_path=archived)
+    except Exception:  # noqa: BLE001 — diagnostics is an open bag
+        logger.exception("cannot build LvsResult from %r", report)
+        return None
+
+    try:
+        paths.results.mkdir(parents=True, exist_ok=True)
+        (paths.results / LVS_SUMMARY_NAME).write_text(
+            lvs.model_dump_json(indent=2) + "\n", encoding="utf-8", newline="\n"
+        )
+    except OSError as exc:
+        logger.warning("cannot write %s: %s", paths.results / LVS_SUMMARY_NAME, exc)
+    return lvs
+
+
+def _archive_si_env(rendered_path: Path, rendered_dir: Path) -> None:
+    """Keep a copy of the si control file under its canonical name.
+
+    The rendered file is named after its template (``default.env``), but what
+    si reads — and what gets published into the Cadence workspace to dodge
+    Quantus LBRCXM-756 — is ``si.env``. Archiving it under that name makes
+    the run directory readable without knowing which template produced it.
+    """
+
+    if rendered_path.name == SI_ENV_ARCHIVE_NAME:
+        return
+    try:
+        shutil.copy2(rendered_path, rendered_dir / SI_ENV_ARCHIVE_NAME)
+    except OSError as exc:
+        logger.warning("cannot archive si.env in %s: %s", rendered_dir, exc)
+
+
+def _new_batch_id(moment: datetime) -> str:
+    """``<timestamp>_batch-<random>`` — same shape as a run id.
+
+    The random tail is what keeps two dispatches started in the same second
+    from writing over each other's index file.
+    """
+
+    return f"{moment.strftime(RUN_TIMESTAMP_FORMAT)}_batch-{uuid.uuid4().hex[:6]}"
+
+
+def _write_batch_index(
+    runs_root: Path,
+    batch_id: str,
+    created_at: datetime,
+    summary: RunSummary,
+    max_workers: int,
+) -> None:
+    """Write ``runs/batches/<batch_id>.json`` listing this dispatch's runs."""
+
+    run_ids = [t.record.run_id for t in summary.tasks if t.record is not None]
+    _safe_store(
+        write_batch,
+        runs_root,
+        RunBatch(
+            batch_id=batch_id,
+            created_at=created_at,
+            ended_at=utcnow(),
+            run_ids=run_ids,
+            max_workers=max_workers,
+        ),
+    )
+
+
+def _stage_end_event(sr: StageResult) -> dict[str, Any]:
+    record = sr.record
+    return {
+        "event": "stage_end",
+        "stage": sr.stage,
+        "status": str(sr.status),
+        "duration_s": record.duration_s if record else None,
+        "exit_code": record.exit_code if record else None,
+        "error": sr.error,
+    }
+
+
+def _run_relative(run_dir: Path, path: Path | None) -> str | None:
+    """POSIX path of ``path`` relative to ``run_dir``, or ``None``.
+
+    Paths outside the run directory return ``None`` rather than a ``..``
+    chain: :class:`StageRecord` rejects those on purpose, so that a run
+    directory stays self-contained when it is copied elsewhere.
+    """
+
+    if path is None:
+        return None
+    try:
+        return path.relative_to(run_dir).as_posix()
+    except ValueError:
+        logger.debug("%s is outside run dir %s; not recorded", path, run_dir)
+        return None
+
+
+def _exit_code_of(result: ToolResult | None) -> int | None:
+    if result is None:
+        return None
+    value = result.diagnostics.get("exit_code")
+    return value if isinstance(value, int) else None
+
+
+def _scalar(value: Any) -> JsonScalar:
+    """Coerce to something a JSON scalar field accepts."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _jsonable(value: Any) -> Any:
+    """Recursively coerce ``value`` into JSON-safe types.
+
+    ``ToolResult.diagnostics`` is an open bag: it carries ints, argv lists,
+    :class:`~pathlib.Path` objects and — from ``CalibreTool.parse_result`` —
+    a whole :class:`~auto_ext.core.checks.LvsReport` dataclass. All of it goes
+    into :attr:`StageRecord.details` verbatim, which means all of it has to
+    survive ``json.dumps``.
+    """
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return {k: _jsonable(v) for k, v in asdict(value).items()}
+    if isinstance(value, Mapping):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_jsonable(v) for v in value]
+    return str(value)
+
+
+def _jsonable_diagnostics(result: ToolResult | None) -> dict[str, Any]:
+    if result is None:
+        return {}
+    return {str(k): _jsonable(v) for k, v in result.diagnostics.items()}
+
+
+def _jsonable_context(context: dict[str, Any]) -> dict[str, JsonScalar]:
+    return {str(k): _scalar(v) for k, v in context.items()}
+
+
+def _opt_str(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def _hostname() -> str | None:
+    try:
+        return socket.gethostname()
+    except OSError:  # pragma: no cover - gethostname failing is exotic
+        return None
+
+
+def _resolve_tool_paths(
+    tools: Mapping[str, Tool], subprocess_env: Mapping[str, str]
+) -> dict[str, str]:
+    """Record which binary each stage would actually invoke.
+
+    Resolved through the same ``PATH`` the subprocess will see, so the record
+    answers "which calibre was this?" months later, when the module
+    environment has moved on. An unresolvable name is stored bare rather than
+    omitted — "we looked for `qrc` and found nothing" is itself the answer.
+    """
+
+    resolved: dict[str, str] = {}
+    for name, tool in tools.items():
+        executable = getattr(tool, "executable", None)
+        if not executable:
+            continue
+        found = shutil.which(executable, path=subprocess_env.get("PATH"))
+        resolved[name] = found or executable
+    return resolved
+
+
+class _NullContext:
+    """Stand-in for the workspace lock when a dry run must not touch anything."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
 
 
 # ---- helpers ---------------------------------------------------------------
@@ -591,6 +1312,31 @@ def _safe_call(reporter: ProgressReporter, method: str, *args: Any) -> None:
         getattr(reporter, method)(*args)
     except Exception:  # noqa: BLE001 — intentional broad catch
         logger.exception("reporter.%s raised; ignoring", method)
+
+
+def _safe_optional_call(reporter: ProgressReporter, method: str, *args: Any) -> None:
+    """Like :func:`_safe_call`, but silent when the reporter lacks the method.
+
+    The run-layer events (:class:`~auto_ext.core.progress.RunAwareReporter`)
+    are optional; a reporter written before they existed must not produce a
+    logged AttributeError on every single stage.
+    """
+    if not hasattr(reporter, method):
+        return
+    _safe_call(reporter, method, *args)
+
+
+def _safe_store(fn: Any, *args: Any, **kwargs: Any) -> None:
+    """Run a run-store write, logging and swallowing storage failures.
+
+    Bookkeeping is worth a lot, but not as much as the multi-hour extraction
+    it is describing: a full disk must not abort a Calibre run that is
+    otherwise going fine.
+    """
+    try:
+        fn(*args, **kwargs)
+    except (AutoExtError, OSError):
+        logger.exception("run store: %s failed; continuing", getattr(fn, "__name__", fn))
 
 
 def _resolve_template_path(
@@ -614,9 +1360,25 @@ def _resolve_template_path(
 
 
 def _build_context(
-    project: ProjectConfig, task: TaskConfig, resolved_env: dict[str, str]
+    project: ProjectConfig,
+    task: TaskConfig,
+    resolved_env: dict[str, str],
+    *,
+    run_slug: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
-    output_dir = _resolve_output_dir(project, task, resolved_env)
+    """Build the Jinja render context for one task.
+
+    ``run_slug`` / ``run_id`` are not context keys — they are format keys
+    available to ``extraction_output_dir`` for users who want one Cadence
+    workspace per run. They are passed through to :func:`_resolve_output_dir`
+    and nowhere else, so the Jinja context stays exactly the set that
+    :data:`auto_ext.core.manifest._IDENTITY_KEYS` and the GUI's
+    ``jinja_variable_status`` know about.
+    """
+    output_dir = _resolve_output_dir(
+        project, task, resolved_env, run_slug=run_slug, run_id=run_id
+    )
     intermediate_tpl = substitute_env(project.intermediate_dir, resolved_env)
     intermediate_dir = intermediate_tpl.format(cell=task.cell, library=task.library)
     layer_map = substitute_env(str(project.layer_map), resolved_env)
@@ -917,6 +1679,10 @@ def _publish_si_env_to_output_dir(rendered_si_env: Path, output_dir: Path) -> No
     (:func:`_run_single_stage`) only invokes this on ``raw.success``:
     publishing on failure or cancel would leave stale state for the
     next Quantus run or retry.
+
+    The run's own archive copy lives at ``rendered/si.env``
+    (:func:`_archive_si_env`) — this one is overwritten by the next run of
+    the cell, that one is not.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(rendered_si_env, output_dir / "si.env")
@@ -928,6 +1694,8 @@ _OUTPUT_DIR_FORMAT_KEYS: tuple[str, ...] = (
     "task_id",
     "lvs_layout_view",
     "lvs_source_view",
+    "run_slug",
+    "run_id",
 )
 
 
@@ -935,21 +1703,43 @@ def _resolve_output_dir(
     project: ProjectConfig,
     task: TaskConfig,
     resolved_env: dict[str, str],
+    *,
+    run_slug: str | None = None,
+    run_id: str | None = None,
 ) -> str:
     """Substitute env vars + format keys in ``project.extraction_output_dir``.
 
     Format keys: ``{cell}``, ``{library}``, ``{task_id}``,
-    ``{lvs_layout_view}``, ``{lvs_source_view}``. Default pattern uses
-    only ``{cell}``; users who want same-cell parallel runs with
-    different knobs change the pattern to include another axis (e.g.
-    ``QCI_PATH_{cell}_{lvs_layout_view}``) so each task lands in its
-    own directory.
+    ``{lvs_layout_view}``, ``{lvs_source_view}``, ``{run_slug}``, ``{run_id}``.
+    The default pattern uses only ``{cell}``, which means every run of that
+    cell reuses one Cadence workspace — correct, and cheap, since the
+    workspace holds gigabytes of regenerable intermediates. A user who wants
+    hard isolation instead (keep two parameter sweeps of one cell side by
+    side, run them concurrently) writes ``QCI_PATH_{cell}_{run_slug}`` or
+    ``..._{run_id}`` and gets a fresh workspace per run.
+
+    ``run_slug`` / ``run_id`` are only known once the run directory is
+    claimed. A pattern that references them while they are unavailable
+    raises :class:`ConfigError` rather than quietly formatting an empty
+    string into the path.
 
     Env vars must be resolved before this runs — Python ``str.format``
     would otherwise treat ``{WORK_ROOT}`` (from an unresolved
     ``${WORK_ROOT}``) as a format field and raise ``KeyError``.
     """
     tpl = substitute_env(project.extraction_output_dir, resolved_env)
+
+    missing = [
+        name
+        for name, value in (("run_slug", run_slug), ("run_id", run_id))
+        if value is None and f"{{{name}}}" in tpl
+    ]
+    if missing:
+        raise ConfigError(
+            f"extraction_output_dir references {missing} but no run has been "
+            "allocated in this context"
+        )
+
     try:
         return tpl.format(
             cell=task.cell,
@@ -957,6 +1747,8 @@ def _resolve_output_dir(
             task_id=task.task_id,
             lvs_layout_view=task.lvs_layout_view,
             lvs_source_view=task.lvs_source_view,
+            run_slug=run_slug or "",
+            run_id=run_id or "",
         )
     except KeyError as exc:
         raise ConfigError(
@@ -969,20 +1761,42 @@ def _validate_task_outputs(
     tasks: list[TaskConfig],
     project: ProjectConfig,
     resolved_env: dict[str, str],
+    *,
+    parallel: bool,
 ) -> None:
-    """Reject tasks whose resolved ``output_dir`` collides with another.
+    """Decide what to do about tasks that share one Cadence workspace.
 
-    Collision detection is on the **fully substituted** output dir, not
-    just the ``(library, cell)`` pair. Users who customise
-    ``extraction_output_dir`` to include other axes (``{task_id}``,
-    ``{lvs_layout_view}``, etc.) so same-cell tasks land in separate
-    dirs are NOT flagged. Harmful in parallel (race), misleading in
-    serial (second task silently overwrites). Always enforced.
+    This check used to reject *any* two tasks resolving to the same
+    ``extraction_output_dir``, because back then the workspace was also the
+    run's identity: two configurations of one cell would overwrite each
+    other's logs and rendered inputs with no trace. That is no longer true —
+    each run owns ``runs/<run_id>/`` — so:
+
+    - **Serial**: sharing is legal and expected. Two recipes for one cell
+      reuse the workspace one after the other, which is exactly how a
+      parameter sweep should behave. Logged at info level, never refused.
+    - **Parallel**: sharing is refused. Two Calibre runs writing one ``svdb``
+      concurrently corrupt both, and silently serialising them behind a lock
+      would look like a hang. The fix is in the message: add a discriminator
+      key to the pattern.
+
+    Cross-*process* contention (a second Auto_ext started from another shell)
+    is not visible here at all; that is what
+    :func:`auto_ext.core.workdir.workspace_lock` covers at run time.
+
+    ``{run_slug}`` / ``{run_id}`` in the pattern are resolved per task with
+    the slug that task's run will actually get, and a unique placeholder for
+    the run id — a pattern keyed on ``{run_id}`` can never collide, since no
+    two runs share one.
     """
     seen: dict[str, str] = {}
     collisions: list[str] = []
-    for t in tasks:
-        out = _resolve_output_dir(project, t, resolved_env)
+    for index, t in enumerate(tasks):
+        dut = DutSnapshot.from_task_config(t)
+        slug = make_run_slug(dut, RecipeSnapshot(recipe_id=_derive_recipe_id(t)))
+        out = _resolve_output_dir(
+            project, t, resolved_env, run_slug=slug, run_id=f"@pending-{index}"
+        )
         prior = seen.get(out)
         if prior is not None:
             collisions.append(
@@ -991,14 +1805,26 @@ def _validate_task_outputs(
             )
         else:
             seen[out] = t.task_id
-    if collisions:
-        raise ConfigError(
-            "duplicate extraction_output_dir(s) across tasks:\n  "
-            + "\n  ".join(collisions)
-            + "\n\nHint: if these tasks should run independently, change "
-            "project.extraction_output_dir to include a discriminator key "
-            f"(supported: {list(_OUTPUT_DIR_FORMAT_KEYS)})."
+
+    if not collisions:
+        return
+
+    if not parallel:
+        logger.info(
+            "%d task(s) share a Cadence workspace with an earlier task; "
+            "they will reuse it in sequence:\n  %s",
+            len(collisions),
+            "\n  ".join(collisions),
         )
+        return
+
+    raise ConfigError(
+        "duplicate extraction_output_dir(s) across concurrently dispatched tasks:\n  "
+        + "\n  ".join(collisions)
+        + "\n\nHint: these tasks would write the same Cadence workspace at the "
+        "same time. Run them serially (--jobs 1), or add a discriminator key to "
+        f"project.extraction_output_dir (supported: {list(_OUTPUT_DIR_FORMAT_KEYS)})."
+    )
 
 
 def _compute_overall(task_result: TaskResult) -> TaskStatus:

@@ -6,6 +6,10 @@ checklist (``docs/OFFICE_QUICKSTART.md §5``).
 
 Skipped on Windows without Developer Mode — ``prepare_parallel_workdir``
 uses ``os.symlink`` and there is no silent copy fallback.
+
+Each task now runs in ``runs/<run_id>/work/`` rather than in a shared
+``runs/task_<id>/``, so the isolation is a property of the run directory and
+not of a task id two runs could both claim.
 """
 
 from __future__ import annotations
@@ -18,7 +22,19 @@ import pytest
 
 from auto_ext.core.config import load_project, load_tasks
 from auto_ext.core.errors import ConfigError
+from auto_ext.core.run_store import read_record
 from auto_ext.core.runner import run_tasks
+
+
+def _run_dirs(auto_ext_root: Path) -> list[Path]:
+    """Run directories under ``auto_ext_root``, oldest name first."""
+
+    root = auto_ext_root / "runs"
+    if not root.is_dir():
+        return []
+    return sorted(
+        p for p in root.iterdir() if p.is_dir() and p.name not in ("batches", "latest")
+    )
 
 
 def _host_can_symlink() -> bool:
@@ -76,7 +92,7 @@ def test_parallel_two_jobs_both_pass(
     tmp_path: Path,
 ) -> None:
     """Two independent tasks under --jobs 2 both complete, each in its own
-    task_dir with its own rendered si.env.
+    run directory with its own work dir and rendered si.env.
     """
     (project_tools_config / "tasks.yaml").write_text(_TWO_TASKS_YAML, encoding="utf-8")
     project, tasks = _load(project_tools_config)
@@ -94,14 +110,23 @@ def test_parallel_two_jobs_both_pass(
     assert summary.passed == 2
     assert summary.failed == 0
 
-    for task in tasks:
-        task_dir = tmp_path / "project_root" / "runs" / f"task_{task.task_id}"
-        assert task_dir.is_dir(), f"parallel task_dir missing: {task_dir}"
-        assert (task_dir / "si.env").is_file(), (
-            f"si.env not placed inside parallel task_dir for {task.task_id}"
+    run_dirs = _run_dirs(tmp_path / "project_root")
+    assert len(run_dirs) == 2, [d.name for d in run_dirs]
+    cells = set()
+    for run_dir in run_dirs:
+        record = read_record(run_dir)
+        cells.add(record.dut.cell)
+        work_dir = run_dir / "work"
+        assert record.work_dir == str(work_dir)
+        assert work_dir.is_dir(), f"parallel work dir missing: {work_dir}"
+        assert (work_dir / "si.env").is_file(), (
+            f"si.env not placed inside the work dir for {record.dut.cell}"
         )
-        assert (task_dir / "cds.lib").exists(), "cds.lib symlink missing"
-        assert (task_dir / ".cdsinit").exists(), ".cdsinit symlink missing"
+        assert (work_dir / "cds.lib").exists(), "cds.lib symlink missing"
+        assert (work_dir / ".cdsinit").exists(), ".cdsinit symlink missing"
+        # Stages ran with the work dir as cwd, and said so in the record.
+        assert all(st.cwd == str(work_dir) for st in record.stages if st.cwd)
+    assert cells == {"inv", "buf"}
 
     # Serial path's side effect (writing to workarea/si.env) must NOT
     # happen in parallel mode — the shared workarea stays clean.
@@ -251,14 +276,18 @@ def test_preflight_rejects_unknown_format_key(
         )
 
 
-def test_preflight_rejects_duplicate_library_cell(
+def test_preflight_rejects_concurrent_workspace_sharing(
     project_tools_config: Path,
     workarea: Path,
     tmp_path: Path,
 ) -> None:
-    """Two tasks with identical (library, cell) would collide on
-    extraction_output_dir. The preflight refuses before any subprocess
-    or thread starts — enforced in serial and parallel alike.
+    """Two tasks resolving to one workspace cannot run *at the same time*.
+
+    Serial reuse of a workspace is legal now (see
+    ``test_serial_tasks_may_share_one_workspace``); concurrent use is not,
+    because two Calibre runs writing one svdb corrupt each other. The
+    preflight refuses before any thread starts rather than silently
+    serialising, which would look like a hang.
     """
     # Same library + cell, different out_file → still a collision on
     # the extraction output dir.
@@ -285,7 +314,7 @@ def test_preflight_rejects_duplicate_library_cell(
     )
     project, tasks = _load(project_tools_config)
 
-    with pytest.raises(ConfigError, match="duplicate"):
+    with pytest.raises(ConfigError) as excinfo:
         run_tasks(
             project,
             tasks,
@@ -295,10 +324,65 @@ def test_preflight_rejects_duplicate_library_cell(
             max_workers=2,
             dry_run=True,
         )
+    message = str(excinfo.value)
+    assert "duplicate" in message
+    # The message must name both escape hatches, or the user's only move is
+    # to give up on --jobs.
+    assert "--jobs 1" in message
+    assert "run_slug" in message
 
-    # Preflight runs before any rendering, so no rendered dir should
-    # exist.
+    # Preflight runs before any run directory is claimed.
     assert not (tmp_path / "project_root" / "runs").exists()
+
+
+@symlink_required
+def test_parallel_same_cell_allowed_when_run_slug_isolates(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+) -> None:
+    """The documented fix for the refusal above, exercised end to end."""
+
+    proj_path = project_tools_config / "project.yaml"
+    proj_path.write_text(
+        proj_path.read_text(encoding="utf-8").replace(
+            '"${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"',
+            '"${WORK_ROOT}/cds/verify/QCI_PATH_{cell}_{run_id}"',
+        ),
+        encoding="utf-8",
+    )
+    (project_tools_config / "tasks.yaml").write_text(
+        """\
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout
+  lvs_source_view: schematic
+  jivaro:
+    enabled: false
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout_test
+  lvs_source_view: schematic
+  jivaro:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["si"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        max_workers=2,
+        dry_run=True,
+    )
+
+    assert summary.total == 2
+    workspaces = {r.workspace_dir for r in summary.runs}
+    assert len(workspaces) == 2, "{run_id} must give each run its own workspace"
 
 
 def test_jobs_one_takes_serial_path(
@@ -308,8 +392,8 @@ def test_jobs_one_takes_serial_path(
     tmp_path: Path,
 ) -> None:
     """max_workers=None and max_workers=1 must behave identically: no
-    parallel workdir created, si.env placed via serial_workdir (swapped
-    in/out of workarea), summary green.
+    work dir created, si.env placed via serial_workdir (swapped in/out of
+    the workarea), summary green.
     """
     project, tasks = _load(project_tools_config)
 
@@ -323,13 +407,57 @@ def test_jobs_one_takes_serial_path(
     )
 
     assert summary.passed == 1
-    task_id = tasks[0].task_id
-    task_dir = tmp_path / "project_root" / "runs" / f"task_{task_id}"
-    # Serial path still uses runs/task_<id>/rendered/ for rendered
-    # templates, but there must be no symlinks (cds.lib / .cdsinit)
-    # placed at task_dir's top level — those are the parallel marker.
-    assert not (task_dir / "cds.lib").exists()
-    assert not (task_dir / ".cdsinit").exists()
+    run_dirs = _run_dirs(tmp_path / "project_root")
+    assert len(run_dirs) == 1
+    run_dir = run_dirs[0]
+    record = read_record(run_dir)
+    # Serial still writes rendered/ and logs/ into the run directory, but
+    # there is no work/ dir and no symlink farm — that is the parallel marker.
+    assert (run_dir / "rendered").is_dir()
+    assert not (run_dir / "work").exists()
+    assert record.work_dir is None
+    assert record.max_workers == 1
+    assert all(st.cwd == str(workarea) for st in record.stages if st.cwd)
     # And after the run, workarea/si.env must have been cleaned up by
     # the serial context manager.
     assert not (workarea / "si.env").exists()
+
+
+def test_work_dir_setup_failure_is_recorded_not_raised(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run directory is claimed before the work dir is built, so a symlink
+    failure has to end up *in* that directory as a failed record.
+
+    Letting it propagate would tear down the whole dispatch and leave an
+    empty run directory behind that ``list_runs`` can only warn about.
+    """
+
+    def _denied(*args: object, **kwargs: object) -> None:
+        raise OSError("symlink not permitted here")
+
+    monkeypatch.setattr(os, "symlink", _denied)
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["si", "calibre"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        max_workers=2,
+        dry_run=True,
+    )
+
+    assert summary.failed == 1
+    run_dirs = _run_dirs(ae_root)
+    assert len(run_dirs) == 1
+    record = read_record(run_dirs[0])
+    assert record.overall == "failed"
+    assert record.work_dir is None
+    assert "work dir" in (record.stages[0].error or "")

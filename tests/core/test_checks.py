@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from auto_ext.core.checks import LvsReport, parse_lvs_report, parse_lvs_report_detailed
+from auto_ext.core.checks import (
+    CellSummaryRow,
+    DiscrepancyTrend,
+    LvsReport,
+    compare_discrepancies,
+    parse_lvs_report,
+    parse_lvs_report_detailed,
+)
 from auto_ext.core.errors import CheckError
 
 
@@ -197,3 +204,234 @@ def test_lvs_pass_no_count_fixture(fixtures_dir: Path) -> None:
 
 def test_lvs_conflicting_fixture(fixtures_dir: Path) -> None:
     assert parse_lvs_report(fixtures_dir / "lvs_conflicting.rep") is False
+
+
+# ---- S1: CELL SUMMARY rows are kept, not just counted -----------------------
+#
+# The parser has always scanned this table; it only ever kept the verdicts
+# long enough to decide pass/fail on the Calibre v2019.2 fallback path. The
+# rows themselves are what a GUI needs to answer "which sub-cells did not
+# match", so they are now retained on every report.
+
+
+_MIXED_SUMMARY = """
+                  ##############################
+                  #         INCORRECT          #
+                  ##############################
+
+                                      CELL  SUMMARY
+
+  Result         Layout                        Source
+  -----------    -----------                   --------------
+  CORRECT        buf_x2                        buf_x2
+  INCORRECT      bias_gen                      bias_gen
+  INCORRECT      LO_Trace_v3                   LO_Trace_v3
+"""
+
+
+def test_cell_rows_are_kept_on_a_failing_report(tmp_path: Path) -> None:
+    rep = _write(tmp_path, _MIXED_SUMMARY)
+    detail = parse_lvs_report_detailed(rep)
+
+    assert detail.passed is False
+    assert detail.cell_summary_present is True
+    assert [row.layout for row in detail.cells] == ["buf_x2", "bias_gen", "LO_Trace_v3"]
+    assert [row.result for row in detail.cells] == ["CORRECT", "INCORRECT", "INCORRECT"]
+
+
+def test_mismatched_cells_lists_only_the_incorrect_rows(tmp_path: Path) -> None:
+    detail = parse_lvs_report_detailed(_write(tmp_path, _MIXED_SUMMARY))
+    assert detail.mismatched_cells == ("bias_gen", "LO_Trace_v3")
+    assert detail.matched_cells == ("buf_x2",)
+    assert detail.incorrect_cell_count == 2
+
+
+def test_cell_rows_are_kept_on_the_v2019_2_pass_path(tmp_path: Path) -> None:
+    # Same fixture shape as the fallback pass test above: the rows must
+    # survive there too, not only on failures.
+    body = """
+                  ##############################
+                  #          CORRECT           #
+                  ##############################
+
+                                      CELL  SUMMARY
+
+  Result         Layout                        Source
+  -----------    -----------                   --------------
+  CORRECT        cell_a                        cell_a
+  CORRECT        cell_b                        cell_b
+"""
+    detail = parse_lvs_report_detailed(_write(tmp_path, body))
+    assert detail.passed is True
+    assert detail.matched_cells == ("cell_a", "cell_b")
+    assert detail.mismatched_cells == ()
+
+
+def test_no_cell_summary_section_is_distinguishable_from_an_empty_one(
+    tmp_path: Path,
+) -> None:
+    without = parse_lvs_report_detailed(
+        _write(tmp_path, "CORRECT\nDISCREPANCIES = 0\n", name="without.rep")
+    )
+    assert without.cell_summary_present is False
+    assert without.cells == ()
+
+    empty = parse_lvs_report_detailed(
+        _write(
+            tmp_path,
+            "CORRECT\nDISCREPANCIES = 0\nCELL SUMMARY\n(table truncated)\n",
+            name="empty.rep",
+        )
+    )
+    assert empty.cell_summary_present is True
+    assert empty.cells == ()
+
+
+def test_cell_row_verdict_is_upper_cased(tmp_path: Path) -> None:
+    # The row regex is case-insensitive; the stored verdict is normalised so
+    # callers can compare against the CELL_CORRECT / CELL_INCORRECT constants.
+    body = "CORRECT\nDISCREPANCIES = 0\nCELL SUMMARY\n  correct  cell_a  cell_a\n"
+    detail = parse_lvs_report_detailed(_write(tmp_path, body))
+    assert detail.cells[0].result == "CORRECT"
+    assert detail.cells[0].passed is True
+
+
+def test_three_single_token_lines_do_not_form_a_phantom_row(tmp_path: Path) -> None:
+    # Regression guard for the row regex: under re.MULTILINE an inter-column
+    # ``\s+`` also matches a newline, so three consecutive one-token lines
+    # used to parse as one row. Column separators are spaces/tabs only.
+    body = "CORRECT\nDISCREPANCIES = 0\nCELL SUMMARY\nCORRECT\ncell_a\ncell_a\n"
+    detail = parse_lvs_report_detailed(_write(tmp_path, body))
+    assert detail.cells == ()
+
+
+def test_cell_summary_lines_round_trip_the_three_columns(tmp_path: Path) -> None:
+    detail = parse_lvs_report_detailed(_write(tmp_path, _MIXED_SUMMARY))
+    assert detail.cell_summary_lines() == [
+        "CORRECT buf_x2 buf_x2",
+        "INCORRECT bias_gen bias_gen",
+        "INCORRECT LO_Trace_v3 LO_Trace_v3",
+    ]
+
+
+def test_cell_row_name_is_the_layout_side() -> None:
+    row = CellSummaryRow(result="INCORRECT", layout="lay_cell", source="sch_cell")
+    assert row.name == "lay_cell"
+    assert row.passed is False
+    assert row.as_line() == "INCORRECT lay_cell sch_cell"
+
+
+# ---- effective_discrepancies ------------------------------------------------
+
+
+def test_effective_discrepancies_prefers_the_printed_count(tmp_path: Path) -> None:
+    detail = parse_lvs_report_detailed(_write(tmp_path, "INCORRECT\nDISCREPANCIES = 7\n"))
+    assert detail.effective_discrepancies == 7
+
+
+def test_effective_discrepancies_is_zero_on_the_v2019_2_clean_pass(
+    tmp_path: Path,
+) -> None:
+    # No DISCREPANCIES line, but the table states every cell is CORRECT.
+    # Zero is what the report says, not something inferred.
+    body = "CORRECT\nCELL SUMMARY\n  CORRECT  cell_a  cell_a\n"
+    detail = parse_lvs_report_detailed(_write(tmp_path, body))
+    assert detail.discrepancies is None
+    assert detail.effective_discrepancies == 0
+
+
+def test_effective_discrepancies_is_unknown_when_the_report_states_none(
+    tmp_path: Path,
+) -> None:
+    # A failing report with no count: the INCORRECT row count is NOT a
+    # discrepancy count, so the honest answer is None.
+    detail = parse_lvs_report_detailed(_write(tmp_path, _MIXED_SUMMARY))
+    assert detail.discrepancies is None
+    assert detail.incorrect_cell_count == 2
+    assert detail.effective_discrepancies is None
+
+
+def test_effective_discrepancies_unknown_without_any_table(tmp_path: Path) -> None:
+    detail = parse_lvs_report_detailed(_write(tmp_path, "INCORRECT\n"))
+    assert detail.effective_discrepancies is None
+
+
+# ---- compare_discrepancies --------------------------------------------------
+
+
+def _report(count: int | None, *, passed: bool = False) -> LvsReport:
+    return LvsReport(
+        passed=passed,
+        banner="CORRECT" if passed else "INCORRECT",
+        discrepancies=count,
+        source=Path("report.rep"),
+    )
+
+
+def test_compare_reports_improvement() -> None:
+    delta = compare_discrepancies(_report(3), _report(7))
+    assert delta.trend is DiscrepancyTrend.IMPROVED
+    assert (delta.current, delta.previous, delta.delta) == (3, 7, -4)
+    assert delta.comparable is True
+    assert "7" in delta.summary and "3" in delta.summary
+
+
+def test_compare_reports_no_change() -> None:
+    delta = compare_discrepancies(_report(3), _report(3))
+    assert delta.trend is DiscrepancyTrend.UNCHANGED
+    assert delta.delta == 0
+    assert "unchanged" in delta.summary.lower()
+
+
+def test_compare_reports_regression() -> None:
+    delta = compare_discrepancies(_report(9), _report(4))
+    assert delta.trend is DiscrepancyTrend.REGRESSED
+    assert delta.delta == 5
+    assert "+5" in delta.summary
+
+
+def test_compare_without_a_previous_run_says_so() -> None:
+    delta = compare_discrepancies(_report(3), None)
+    assert delta.trend is DiscrepancyTrend.NO_BASELINE
+    assert delta.previous is None
+    assert delta.delta is None
+    assert delta.comparable is False
+    assert "no previous run" in delta.summary.lower()
+
+
+def test_no_baseline_beats_unknown_current() -> None:
+    # Both unknown at once: "there is nothing to compare against" is the more
+    # actionable statement, so it wins.
+    delta = compare_discrepancies(_report(None), None)
+    assert delta.trend is DiscrepancyTrend.NO_BASELINE
+
+
+def test_compare_with_unknown_current_count_is_not_guessed() -> None:
+    delta = compare_discrepancies(_report(None), 4)
+    assert delta.trend is DiscrepancyTrend.UNKNOWN
+    assert delta.current is None
+    assert delta.previous == 4
+    assert delta.delta is None
+
+
+def test_compare_accepts_bare_ints_from_the_run_index() -> None:
+    # run_store.RunIndexEntry.lvs_discrepancies is an ``int | None``; the
+    # comparison must take it without re-parsing the archived report.
+    delta = compare_discrepancies(2, 5)
+    assert delta.trend is DiscrepancyTrend.IMPROVED
+    assert delta.delta == -3
+
+
+def test_compare_uses_effective_count_for_the_v2019_2_pass(tmp_path: Path) -> None:
+    body = "CORRECT\nCELL SUMMARY\n  CORRECT  cell_a  cell_a\n"
+    current = parse_lvs_report_detailed(_write(tmp_path, body))
+    delta = compare_discrepancies(current, 3)
+    assert delta.trend is DiscrepancyTrend.IMPROVED
+    assert (delta.current, delta.previous, delta.delta) == (0, 3, -3)
+
+
+def test_compare_result_is_json_safe() -> None:
+    import json
+
+    payload = compare_discrepancies(_report(1), _report(2)).as_dict()
+    assert json.loads(json.dumps(payload))["trend"] == "improved"

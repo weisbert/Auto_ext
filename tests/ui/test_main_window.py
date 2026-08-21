@@ -208,21 +208,24 @@ def test_main_window_open_wizard_dirty_cancel(
 # ---- Feature #4: Log tab merged into Run tab ---------------------------
 
 
-def test_feature4_main_window_has_four_tabs(qtbot) -> None:
+def test_main_window_tab_set(qtbot) -> None:
     """Feature #4 dropped the standalone Log tab in favour of an embedded
-    LogTab inside RunTab. MainWindow now exposes 4 tabs, not 5.
+    LogTab inside RunTab; S1 added the Runs history tab immediately after
+    Run. MainWindow therefore exposes 5 tabs, and "Log" is not one of them.
     """
     window = MainWindow()
     qtbot.addWidget(window)
 
-    assert window._tabs.count() == 4
+    assert window._tabs.count() == 5
     titles = [window._tabs.tabText(i) for i in range(window._tabs.count())]
     assert "Log" not in titles, (
         "Standalone Log tab must be removed; the log viewer lives "
         "inside the Run tab now."
     )
-    # All four expected tabs are still present.
-    assert set(titles) == {"Run", "Project", "Tasks", "Templates"}
+    assert set(titles) == {"Run", "Runs", "Project", "Tasks", "Templates"}
+    # Runs sits directly after Run: "what is happening now" then "what
+    # happened before" is the order the user moves through them.
+    assert titles[:2] == ["Run", "Runs"]
 
 
 def test_feature4_run_tab_owns_embedded_log_tab(qtbot) -> None:
@@ -333,3 +336,55 @@ def test_log_tab_set_active_log_display_id_default_none(qtbot, tmp_path: Path) -
     header = log._header.text()
     assert header.startswith("FANCY — ")
     assert str(p) in header
+
+
+# ---- S1: the Runs history tab -------------------------------------------
+
+
+def test_main_window_runs_tab_shares_the_controller(qtbot) -> None:
+    """The Runs tab reads its history from the shared controller's root.
+
+    Without the shared :class:`ConfigController` the tab would have no way to
+    find ``<auto_ext_root>/runs`` and would sit permanently on its empty state.
+    """
+    from auto_ext.ui.tabs.runs_tab import RunsTab
+
+    window = MainWindow(auto_ext_root=Path("/nowhere/pr"))
+    qtbot.addWidget(window)
+
+    assert isinstance(window._runs_tab, RunsTab)
+    assert window._runs_tab._controller is window._controller
+    assert window._runs_tab.runs_root == Path("/nowhere/pr") / "runs"
+
+
+def test_main_window_runs_tab_stays_short(qtbot) -> None:
+    """The new tab must not raise the window's minimum height.
+
+    The Project tab already forces the main window past 850 px, which is the
+    whole reason this budget exists: one more tall tab and the window can no
+    longer be shrunk to fit a 1080p screen.
+    """
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    assert window._runs_tab.minimumSizeHint().height() < 500
+
+
+def test_main_window_refreshes_the_history_when_a_run_ends(qtbot) -> None:
+    """The falling edge of ``worker_state_changed`` re-reads the history.
+
+    A run that just finished is exactly the one the user wants to look at, so
+    it must already be listed by the time they switch tabs. Nothing happens on
+    the rising edge -- the run directory is still being written.
+    """
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    calls: list[bool] = []
+    window._runs_tab.refresh = lambda: calls.append(True)  # type: ignore[method-assign]
+
+    window._run_tab.worker_state_changed.emit(True)
+    assert calls == [], "no refresh while the worker is still running"
+
+    window._run_tab.worker_state_changed.emit(False)
+    assert calls == [True]

@@ -7,6 +7,10 @@ No ``.j2`` template: argv is assembled directly from task context.
 Output file is named ``<cell>.calibre.db`` to match the Calibre LVS runset
 template's ``*lvsLayoutPaths`` field. The content is still GDSII; Calibre
 auto-detects layout format from file magic bytes rather than the suffix.
+
+Because there is no rendered input file to read outputs back out of, the
+argv *is* the declaration: ``-strmFile`` names the one artifact this stage
+produces.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from auto_ext.tools.base import Tool
+from auto_ext.tools.base import Tool, ToolResult, argv_path
 
 
 class StrmoutTool(Tool):
@@ -37,3 +41,11 @@ class StrmoutTool(Tool):
             "-strmFile", str(layout_out),
             "-layerMap", str(layer_map),
         ]
+
+    def parse_result(self, result: ToolResult) -> ToolResult:
+        """Record the GDS stream file named by ``-strmFile``."""
+
+        stream_file = argv_path(result, "-strmFile")
+        if stream_file is None:
+            return result
+        return result.with_artifacts([stream_file])

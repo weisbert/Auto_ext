@@ -1,10 +1,14 @@
 """Typer CLI entry point.
 
-Live subcommands as of Phase 4b1:
+Live subcommands:
 
 - ``version`` — prints the package version (Phase 1).
 - ``run`` — loads ``project.yaml`` + ``tasks.yaml`` and drives
   :func:`auto_ext.core.runner.run_tasks`.
+- ``runs list / show / prune`` — the run history under
+  ``<auto-ext-root>/runs/``: what ran, how long each stage took, what LVS
+  said, how that compares with the previous run of the same cell, and what
+  to try next when something failed.
 - ``check-env`` — prints a Rich table of env-var resolution for every
   template referenced by the tasks. Exits 1 if anything is missing.
 - ``import`` — turn a raw EDA export into a parameterised ``.j2`` +
@@ -13,14 +17,22 @@ Live subcommands as of Phase 4b1:
   on an already-imported template.
 
 ``migrate`` stays a Phase 4c stub.
+
+Rendering lives in :mod:`auto_ext.cli_reporter` (Rich tables, the failure
+classifier, the LVS view); this module is the argument surface and the data
+plumbing between the core API and those views.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import typer
+
+if TYPE_CHECKING:
+    from auto_ext.cli_reporter import SummaryRow
+    from auto_ext.core.run_store import RunIndexEntry
 
 app = typer.Typer(
     name="auto-ext",
@@ -35,6 +47,13 @@ knob_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(knob_app, name="knob")
+
+runs_app = typer.Typer(
+    name="runs",
+    help="Inspect the run history under <auto-ext-root>/runs/.",
+    no_args_is_help=True,
+)
+app.add_typer(runs_app, name="runs")
 
 
 @app.command()
@@ -59,7 +78,10 @@ def run(
     task: Optional[list[str]] = typer.Option(
         None,
         "--task",
-        help="Filter to specific task_id(s). Repeat to include multiple tasks.",
+        help="Filter to specific task_id(s). Repeat to include multiple tasks. "
+        "A task_id is the cell row's key — "
+        "<library>__<cell>__<lvs_layout_view>__<lvs_source_view> — which is "
+        "what `auto-ext runs list` shows a run's DUT as.",
     ),
     stage: Optional[str] = typer.Option(
         None,
@@ -80,7 +102,8 @@ def run(
     auto_ext_root: Optional[Path] = typer.Option(
         None,
         "--auto-ext-root",
-        help="Root for runs/ and logs/ output. Defaults to --config-dir parent.",
+        help="Root holding runs/. Each task lands in its own runs/<run_id>/ "
+        "with its rendered files, logs and results. Defaults to --config-dir parent.",
     ),
     workarea: Optional[Path] = typer.Option(
         None,
@@ -101,7 +124,7 @@ def run(
         min=1,
         max=64,
         help="Run up to N tasks concurrently. Default 1 (serial). "
-        "N>=2 isolates each task under runs/task_<id>/ with symlinked "
+        "N>=2 isolates each task under runs/<run_id>/work/ with symlinked "
         "cds.lib/.cdsinit. License budget is yours to manage.",
     ),
     no_progress: bool = typer.Option(
@@ -213,7 +236,7 @@ def run(
     finally:
         signal.signal(signal.SIGINT, previous_handler)
 
-    _print_summary(summary)
+    _print_summary(summary, runs_root=summary.runs_root or root / "runs")
     exit_code = 0 if (summary.failed == 0 and summary.cancelled == 0) else 1
     raise typer.Exit(code=exit_code)
 
@@ -1058,33 +1081,403 @@ def _parse_cli_knobs(
     return out
 
 
-def _print_summary(summary) -> None:
-    from rich.console import Console
-    from rich.table import Table
+# ---- run records: end-of-run summary ---------------------------------------
 
-    overall_style = {
-        "passed": "green",
-        "failed": "red",
-        "cancelled": "yellow",
-        "pending": "dim",
-    }
+
+def _live_lvs(task_result):
+    """The LVS outcome still sitting in this run's ``ToolResult.diagnostics``."""
+    from auto_ext.cli_reporter import LvsView
+
+    for stage_result in task_result.stages:
+        tool_result = getattr(stage_result, "tool_result", None)
+        if tool_result is None:
+            continue
+        report = tool_result.diagnostics.get("lvs_report")
+        if report is not None:
+            return LvsView.from_any(report)
+    return None
+
+
+def _live_failures(task_result, lvs, run_id: Optional[str]) -> list:
+    """Classify the bad stages of an in-memory ``TaskResult``."""
+    from auto_ext.cli_reporter import classify_stage_failure
+
+    out = []
+    for stage_result in task_result.stages:
+        tool_result = getattr(stage_result, "tool_result", None)
+        details = tool_result.diagnostics if tool_result is not None else {}
+        log_path = None
+        if tool_result is not None and tool_result.stdout_path is not None:
+            log_path = str(tool_result.stdout_path)
+        diagnosis = classify_stage_failure(
+            stage=stage_result.stage,
+            status=stage_result.status,
+            error=stage_result.error,
+            details=details,
+            log_path=log_path,
+            lvs=lvs if stage_result.stage == "calibre" else None,
+            run_id=run_id,
+        )
+        if diagnosis is not None:
+            out.append(diagnosis)
+    return out
+
+
+def _summary_rows(summary) -> list["SummaryRow"]:
+    """Fuse each ``TaskResult`` with the run record that was written for it.
+
+    The record is authoritative when it exists — it holds the per-stage
+    timings, the archived LVS report path and the ``quantus.ext`` /
+    ``quantus.dspf`` stage keys the in-memory result cannot express. A task
+    that died before its record was finalized still gets a row, built from the
+    ``ToolResult`` diagnostics that are in memory either way.
+    """
+    from auto_ext.cli_reporter import LvsView, SummaryRow, run_failures
+
+    rows: list[SummaryRow] = []
+    for task_result in summary.tasks:
+        record = task_result.record
+        live_lvs = _live_lvs(task_result)
+
+        if record is not None and record.stages:
+            run_dir = task_result.run_dir or (
+                Path(record.run_dir) if record.run_dir else None
+            )
+            rows.append(
+                SummaryRow(
+                    task_id=task_result.task_id,
+                    overall=str(task_result.overall),
+                    stages=tuple((s.key, str(s.status)) for s in record.stages),
+                    run_id=record.run_id,
+                    display_name=record.default_display_name,
+                    lvs=LvsView.from_any(record.results.lvs) or live_lvs,
+                    failures=tuple(run_failures(record, run_dir=run_dir)),
+                )
+            )
+            continue
+
+        run_id = task_result.run_dir.name if task_result.run_dir else None
+        rows.append(
+            SummaryRow(
+                task_id=task_result.task_id,
+                overall=str(task_result.overall),
+                stages=tuple((s.stage, str(s.status)) for s in task_result.stages),
+                run_id=run_id,
+                display_name=record.default_display_name if record else None,
+                lvs=live_lvs,
+                failures=tuple(_live_failures(task_result, live_lvs, run_id)),
+            )
+        )
+    return rows
+
+
+def _print_summary(summary, *, runs_root: Optional[Path] = None) -> None:
+    """Closing block of ``auto-ext run``: table, failure notes, where it went."""
+    from rich.console import Console
+
+    from auto_ext.cli_reporter import build_summary_table, print_failure_notes
 
     console = Console()
-    table = Table(title="Run summary")
-    table.add_column("task_id", style="cyan")
-    table.add_column("overall")
-    table.add_column("stages")
-    for t in summary.tasks:
-        stages_str = " ".join(f"{s.stage}:{str(s.status)[0]}" for s in t.stages)
-        style = overall_style.get(str(t.overall), "red")
-        table.add_row(t.task_id, f"[{style}]{t.overall}[/]", stages_str)
-    console.print(table)
+    rows = _summary_rows(summary)
+    # Rich's Live leaves no trailing newline on a non-TTY, so without this the
+    # summary title lands on the same line as the progress table's bottom rule.
+    console.print()
+    console.print(build_summary_table(rows))
+    print_failure_notes(console, rows)
+
     extras = []
     if summary.failed:
         extras.append(f"[red]{summary.failed} failed[/]")
     if summary.cancelled:
         extras.append(f"[yellow]{summary.cancelled} cancelled[/]")
     tail = f" ({', '.join(extras)})" if extras else ""
-    console.print(
-        f"[bold]{summary.passed}/{summary.total} tasks passed[/]" + tail
+    console.print(f"[bold]{summary.passed}/{summary.total} tasks passed[/]" + tail)
+
+    recorded = [row.run_id for row in rows if row.run_id]
+    if recorded and runs_root is not None:
+        console.print(f"run records written to {runs_root}")
+        console.print(f"  [dim]inspect with: auto-ext runs show {recorded[0]}[/]")
+
+
+# ---- runs (history) --------------------------------------------------------
+
+
+def _resolve_runs_root(
+    auto_ext_root: Optional[Path], config_dir: Optional[Path]
+) -> Path:
+    """``<auto-ext-root>/runs``, resolved the same way ``run`` resolves it."""
+    if auto_ext_root is not None:
+        root = auto_ext_root
+    elif config_dir is not None:
+        root = config_dir.parent
+    else:
+        root = Path.cwd()
+    return root.resolve() / "runs"
+
+
+def _require_run(entries: list["RunIndexEntry"], token: str) -> "RunIndexEntry":
+    """Resolve ``token`` to exactly one run, or exit 2 explaining why not.
+
+    Accepts a full run id, any unique prefix of one (the timestamp alone is
+    usually enough), or ``latest``.
+    """
+    if not entries:
+        typer.secho("no runs recorded yet", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    if token == "latest":
+        return entries[0]
+    for entry in entries:
+        if entry.run_id == token:
+            return entry
+
+    matches = [e for e in entries if e.run_id.startswith(token)]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        typer.secho(
+            f"{token!r} matches {len(matches)} runs; be more specific:",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        for entry in matches[:10]:
+            typer.secho(f"  {entry.run_id}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    typer.secho(
+        f"no run matching {token!r}; `auto-ext runs list` shows what is on record",
+        fg=typer.colors.RED,
+        err=True,
     )
+    raise typer.Exit(code=2)
+
+
+_RUNS_ROOT_HELP = "Root holding runs/. Defaults to --config-dir's parent, else cwd."
+_RUNS_CONFIG_HELP = "Config dir; its parent is used as the root when --auto-ext-root is omitted."
+
+
+@runs_app.command("list")
+def runs_list(
+    auto_ext_root: Optional[Path] = typer.Option(
+        None, "--auto-ext-root", help=_RUNS_ROOT_HELP
+    ),
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        help=_RUNS_CONFIG_HELP,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    limit: int = typer.Option(
+        20, "--limit", "-n", min=0, help="Show at most N runs. 0 shows all."
+    ),
+    cell: Optional[str] = typer.Option(
+        None, "--cell", help="Only runs of this cell (exact match)."
+    ),
+    task: Optional[str] = typer.Option(
+        None,
+        "--task",
+        help="Only runs of this cell row key "
+        "(<library>__<cell>__<lvs_layout_view>__<lvs_source_view>).",
+    ),
+    failed: bool = typer.Option(
+        False, "--failed", help="Only runs that did not pass."
+    ),
+) -> None:
+    """List the run history, newest first.
+
+    One row per ``runs/<run_id>/``: when it started, its name, the cell, how
+    it ended, and what LVS said. Directories that are not runs (and runs with
+    an unreadable ``run.json``) are skipped with a warning on stderr rather
+    than taking the listing down.
+    """
+    from rich.console import Console
+
+    from auto_ext.cli_reporter import build_runs_table
+    from auto_ext.core.run_store import list_runs
+
+    runs_root = _resolve_runs_root(auto_ext_root, config_dir)
+    entries = list_runs(runs_root)
+    total = len(entries)
+
+    if cell is not None:
+        entries = [e for e in entries if e.cell == cell]
+    if task is not None:
+        entries = [e for e in entries if e.dut_key == task]
+    if failed:
+        entries = [e for e in entries if e.overall != "passed"]
+    matched = len(entries)
+    if limit:
+        entries = entries[:limit]
+
+    if not entries:
+        typer.echo(
+            f"no runs on record under {runs_root}"
+            if total == 0
+            else f"no run matches the filter ({total} on record under {runs_root})"
+        )
+        raise typer.Exit(code=0)
+
+    console = Console()
+    console.print(build_runs_table(entries))
+    console.print(
+        f"[dim]{len(entries)} of {matched} matching run(s), {total} on record "
+        f"under {runs_root}[/]"
+    )
+
+
+@runs_app.command("show")
+def runs_show(
+    run_id: str = typer.Argument(
+        ...,
+        metavar="RUN_ID",
+        help="A run id, any unique prefix of one, or 'latest'.",
+    ),
+    auto_ext_root: Optional[Path] = typer.Option(
+        None, "--auto-ext-root", help=_RUNS_ROOT_HELP
+    ),
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        help=_RUNS_CONFIG_HELP,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+) -> None:
+    """Show one run in full.
+
+    Per-stage status with durations and exit codes, the structured LVS
+    outcome, how its discrepancy count compares with the previous run of the
+    same DUT, the artifacts it left in the workarea, and — for anything that
+    failed — a failure class plus the next thing to try.
+    """
+    from rich.console import Console
+
+    from auto_ext.cli_reporter import (
+        LvsView,
+        build_stages_table,
+        print_artifacts,
+        print_comparison,
+        print_diagnoses,
+        print_lvs_block,
+        print_run_header,
+        print_skips,
+        run_failures,
+    )
+    from auto_ext.core.errors import AutoExtError
+    from auto_ext.core.run_store import (
+        find_previous_run,
+        list_runs,
+        read_annotations,
+        read_record,
+    )
+
+    runs_root = _resolve_runs_root(auto_ext_root, config_dir)
+    entries = list_runs(runs_root)
+    entry = _require_run(entries, run_id)
+
+    try:
+        record = read_record(entry.run_dir)
+    except AutoExtError as exc:
+        typer.secho(f"cannot read {entry.run_id}: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    annotations = read_annotations(entry.run_dir)
+    console = Console()
+    print_run_header(console, record, run_dir=entry.run_dir, annotations=annotations)
+
+    if record.stages:
+        console.print()
+        console.print(build_stages_table(record))
+    else:
+        console.print()
+        console.print(
+            "[dim]no stage recorded — the run was still in flight when it was "
+            "written[/]"
+        )
+
+    lvs = LvsView.from_any(record.results.lvs)
+    if lvs is not None and not lvs.empty:
+        print_lvs_block(console, lvs)
+
+    print_comparison(
+        console,
+        current=record,
+        current_lvs=lvs,
+        previous=find_previous_run(runs_root, entry, entries=entries),
+    )
+    print_skips(console, record)
+    print_artifacts(console, record)
+    print_diagnoses(
+        console,
+        # The discrepancy delta is already a few lines above; do not tell the
+        # user to run the command they are currently reading the output of.
+        run_failures(record, run_dir=entry.run_dir, suggest_compare=False),
+    )
+
+
+@runs_app.command("prune")
+def runs_prune(
+    keep: int = typer.Option(
+        ...,
+        "--keep",
+        min=0,
+        help="Keep the N newest runs. 0 means unlimited (nothing is removed).",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        help="Actually delete. Without it, prune only reports what it would remove.",
+    ),
+    auto_ext_root: Optional[Path] = typer.Option(
+        None, "--auto-ext-root", help=_RUNS_ROOT_HELP
+    ),
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        help=_RUNS_CONFIG_HELP,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+) -> None:
+    """Delete all but the N newest runs.
+
+    Three classes of run are never deleted, and none of them consumes one of
+    the N slots: runs the user pinned (starred, or carrying any tag), runs
+    that never finished, and directories that could not be parsed as runs at
+    all. Nothing prunes on a timer — this is the only entry point.
+    """
+    from auto_ext.core.run_store import list_runs, prune_runs
+
+    runs_root = _resolve_runs_root(auto_ext_root, config_dir)
+    if keep == 0:
+        typer.echo("--keep 0 means unlimited; nothing removed.")
+        raise typer.Exit(code=0)
+
+    entries = list_runs(runs_root)
+    protected = [e for e in entries if e.pinned or e.overall == "pending"]
+    removed = prune_runs(runs_root, keep, dry_run=not yes)
+
+    if not removed:
+        typer.echo(
+            f"nothing to prune: {len(entries)} run(s) on record under {runs_root}, "
+            f"keeping {keep}."
+        )
+    else:
+        verb = "removed" if yes else "would remove"
+        typer.echo(f"{verb} {len(removed)} run(s):")
+        for run in removed:
+            typer.echo(f"  {run}")
+    if protected:
+        typer.echo(
+            f"kept {len(protected)} pinned / unfinished run(s) outside the "
+            f"--keep {keep} window."
+        )
+    if removed and not yes:
+        typer.secho("nothing was deleted; re-run with --yes.", fg=typer.colors.YELLOW)

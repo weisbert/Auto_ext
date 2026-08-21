@@ -8,6 +8,9 @@ Covers:
   loop), reclassification of the killed stage as ``CANCELLED``.
 - Reporter exception isolation: a reporter that raises must not abort
   the run.
+- The optional ``RunAwareReporter`` half: ``on_run_dir`` / ``on_task_record``
+  reach a reporter that implements them, and their absence is not an error
+  for one that does not.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from auto_ext.core.progress import (
     CancelToken,
     NullReporter,
     ProgressReporter,
+    RunAwareReporter,
     StageStatus,
     TaskStatus,
 )
@@ -388,3 +392,138 @@ def test_run_subprocess_cancels_mid_drain(tmp_path: Path) -> None:
     assert elapsed < 15.0, f"cancel took too long: {elapsed}s"
     assert exit_code != 0
     assert "CANCELLED" in log_path.read_text(encoding="utf-8")
+
+
+# ---- RunAwareReporter: the optional second half ----------------------------
+
+
+@dataclass
+class RunAwareSpyReporter(SpyReporter):
+    """SpyReporter that also implements the run-layer events."""
+
+    run_dirs: dict[str, Path] = field(default_factory=dict)
+    records: dict[str, Any] = field(default_factory=dict)
+
+    def on_run_dir(self, task_id: str, run_dir: Path) -> None:
+        with self._lock:
+            self.events.append(("run_dir", task_id, run_dir))
+            self.run_dirs[task_id] = run_dir
+
+    def on_task_record(self, task_id: str, record: Any) -> None:
+        with self._lock:
+            self.events.append(("task_record", task_id, record.run_id))
+            self.records[task_id] = record
+
+
+def test_protocols_are_independent() -> None:
+    """Adding the run events must not retroactively break existing reporters.
+
+    ``ProgressReporter`` is ``runtime_checkable``, so growing it would have
+    made every pre-run-layer implementation fail ``isinstance``. They are two
+    protocols precisely to avoid that.
+    """
+    plain = SpyReporter()
+    aware = RunAwareSpyReporter()
+
+    assert isinstance(plain, ProgressReporter)
+    assert isinstance(aware, ProgressReporter)
+    assert isinstance(NullReporter(), ProgressReporter)
+
+    assert not isinstance(plain, RunAwareReporter)
+    assert isinstance(aware, RunAwareReporter)
+    assert isinstance(NullReporter(), RunAwareReporter)
+
+
+def test_run_dir_event_arrives_before_the_first_stage(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """The run directory has to be known while the run is still going.
+
+    Logs live at ``<run_dir>/logs/<stage>.log`` and the run id is not
+    derivable from a task id, so a log viewer that only learns the directory
+    at the end is useless during a multi-hour extraction.
+    """
+    project, tasks = _load(project_tools_config)
+    reporter = RunAwareSpyReporter()
+
+    run_tasks(
+        project,
+        tasks,
+        stages=["si", "calibre"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        dry_run=True,
+        reporter=reporter,
+    )
+
+    kinds = [e[0] for e in reporter.events]
+    assert kinds.index("run_dir") < kinds.index("task_start")
+    assert kinds.index("run_dir") < kinds.index("stage_start")
+    # task_record closes the task, after the last stage and before task_end.
+    assert kinds[:4] == ["run_start", "run_dir", "task_start", "stage_start"]
+    assert kinds[-1] == "run_end"
+    assert kinds[-2] == "task_end"
+    assert kinds[-3] == "task_record"
+
+    run_dir = reporter.run_dirs[tasks[0].task_id]
+    assert run_dir.is_dir()
+    assert (run_dir / "logs").is_dir()
+    record = reporter.records[tasks[0].task_id]
+    assert record.run_id == run_dir.name
+    assert record.overall == TaskStatus.PASSED
+
+
+def test_reporter_without_the_run_events_still_runs(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reporter written before the run layer must not log an error per stage."""
+    import logging
+
+    project, tasks = _load(project_tools_config)
+    reporter = SpyReporter()
+
+    caplog.set_level(logging.ERROR, logger="auto_ext.core.runner")
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["si", "calibre"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        dry_run=True,
+        reporter=reporter,
+    )
+
+    assert summary.total == 1
+    assert not caplog.records, [r.getMessage() for r in caplog.records]
+    assert [e[0] for e in reporter.events][:2] == ["run_start", "task_start"]
+
+
+def test_run_events_are_isolated_from_a_raising_reporter(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """A reporter that raises in the new callbacks must not abort the run
+    either — same contract the original events already had."""
+
+    class Exploding(SpyReporter):
+        def on_run_dir(self, task_id: str, run_dir: Path) -> None:
+            raise RuntimeError("boom in on_run_dir")
+
+        def on_task_record(self, task_id: str, record: Any) -> None:
+            raise RuntimeError("boom in on_task_record")
+
+    project, tasks = _load(project_tools_config)
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["si"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        dry_run=True,
+        reporter=Exploding(),
+    )
+
+    assert summary.total == 1
+    assert summary.runs and summary.runs[0].overall == TaskStatus.PASSED

@@ -3,15 +3,23 @@
 Uses the production templates under ``Auto_ext/templates/`` and the mock
 EDA binaries under ``tests/mocks/`` (bash required — skipped on Windows
 if git-bash is not installed, via the ``mocks_on_path`` fixture).
+
+Every task now lands in its own run directory
+``<auto_ext_root>/runs/<UTC-stamp>_<cell>-<recipe>/`` holding ``rendered/``,
+``logs/``, ``results/`` and ``run.json``. Because the directory name carries
+a timestamp, tests locate it with :func:`_only_run_dir` / :func:`_run_dirs`
+rather than by spelling it out.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from auto_ext.core.config import load_project, load_tasks
+from auto_ext.core.run_store import read_events, read_record
 from auto_ext.core.runner import run_tasks
 
 
@@ -19,6 +27,29 @@ def _load(config_dir: Path):
     project = load_project(config_dir / "project.yaml")
     tasks = load_tasks(config_dir / "tasks.yaml", project=project)
     return project, tasks
+
+
+def _run_dirs(auto_ext_root: Path) -> list[Path]:
+    """Every run directory under ``auto_ext_root``, oldest name first.
+
+    ``batches/`` is part of the layout, not a run, so it is filtered out —
+    the same rule :func:`auto_ext.core.run_store.list_runs` applies.
+    """
+
+    root = auto_ext_root / "runs"
+    if not root.is_dir():
+        return []
+    return sorted(
+        p for p in root.iterdir() if p.is_dir() and p.name not in ("batches", "latest")
+    )
+
+
+def _only_run_dir(auto_ext_root: Path) -> Path:
+    """The single run directory a one-task dispatch produced."""
+
+    dirs = _run_dirs(auto_ext_root)
+    assert len(dirs) == 1, f"expected exactly one run dir, found {[d.name for d in dirs]}"
+    return dirs[0]
 
 
 def test_happy_path_all_stages_pass(
@@ -48,16 +79,17 @@ def test_happy_path_all_stages_pass(
         "quantus": "passed",
         "jivaro": "passed",
     }
-    # Rendered inputs should exist per task.
-    rendered_dir = tmp_path / "project_root" / "runs" / f"task_{tasks[0].task_id}" / "rendered"
+    # Rendered inputs and logs both live inside this run's own directory.
+    run_dir = _only_run_dir(tmp_path / "project_root")
+    rendered_dir = run_dir / "rendered"
     assert (rendered_dir / "default.env").is_file()
     assert (rendered_dir / "calibre_lvs.qci").is_file()
     assert (rendered_dir / "ext.cmd").is_file()
     assert (rendered_dir / "default.xml").is_file()
-    # Logs should exist per stage.
-    log_dir = tmp_path / "project_root" / "logs" / f"task_{tasks[0].task_id}"
+    # The si control file is also archived under the name si actually reads.
+    assert (rendered_dir / "si.env").is_file()
     for stage in ("si", "strmout", "calibre", "quantus", "jivaro"):
-        assert (log_dir / f"{stage}.log").is_file()
+        assert (run_dir / "logs" / f"{stage}.log").is_file()
 
 
 def test_si_env_published_to_output_dir(
@@ -190,7 +222,7 @@ def test_dry_run_renders_but_skips_subprocesses(
     stage_status = {s.stage: s.status for s in summary.tasks[0].stages}
     assert stage_status == {"si": "dry_run", "calibre": "dry_run"}
     # Renders still happened so templates are exercised without needing bash.
-    rendered_dir = tmp_path / "project_root" / "runs" / f"task_{tasks[0].task_id}" / "rendered"
+    rendered_dir = _only_run_dir(tmp_path / "project_root") / "rendered"
     assert (rendered_dir / "default.env").is_file()
     assert (rendered_dir / "calibre_lvs.qci").is_file()
 
@@ -215,8 +247,7 @@ def test_calibre_lvs_default_knobs_render(
         dry_run=True,
     )
     rendered = (
-        tmp_path / "project_root" / "runs" / f"task_{tasks[0].task_id}"
-        / "rendered" / "calibre_lvs.qci"
+        _only_run_dir(tmp_path / "project_root") / "rendered" / "calibre_lvs.qci"
     ).read_text(encoding="utf-8")
     assert ".wodio.qcilvs" in rendered
     assert ".widio.qcilvs" not in rendered
@@ -240,8 +271,7 @@ def test_calibre_lvs_knob_overrides_flip_render(
         cli_knobs={"calibre": {"lvs_variant": "widio", "connect_by_name": "true"}},
     )
     rendered = (
-        tmp_path / "project_root" / "runs" / f"task_{tasks[0].task_id}"
-        / "rendered" / "calibre_lvs.qci"
+        _only_run_dir(tmp_path / "project_root") / "rendered" / "calibre_lvs.qci"
     ).read_text(encoding="utf-8")
     assert ".widio.qcilvs" in rendered
     assert ".wodio.qcilvs" not in rendered
@@ -798,21 +828,129 @@ def _phase59_bc_load(config_dir: Path):
         ("jivaro", "default.xml"),
     ],
 )
-def test_phase59_bc_rendered_path_for_each_templated_stage(
-    project_tools_config: Path, tmp_path: Path, stage: str, expected_stem: str
+def test_phase59_bc_rendered_path_for_reads_the_run_record(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    stage: str,
+    expected_stem: str,
 ) -> None:
-    """rendered_path_for returns the same per-stage location the runner
-    writes to: ``<auto_ext_root>/runs/task_<safe_id>/rendered/<template_stem>``.
+    """rendered_path_for reports what the runner recorded, not recomputed math.
+
+    It resolves ``StageRecord.rendered_path`` from the newest run of this
+    DUT, so the returned path is by construction the file the runner wrote.
     """
     from auto_ext.core.runner import rendered_path_for
 
     project, tasks = _phase59_bc_load(project_tools_config)
     ae_root = tmp_path / "ae_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["si", "calibre", "quantus", "jivaro"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        dry_run=True,
+    )
+
     path = rendered_path_for(ae_root, tasks[0], stage, project)
     assert path is not None
-    assert path == (
-        ae_root / "runs" / f"task_{tasks[0].task_id}" / "rendered" / expected_stem
+    assert path == _only_run_dir(ae_root) / "rendered" / expected_stem
+    assert path.is_file()
+
+
+def test_phase59_bc_rendered_path_for_without_a_run_returns_none(
+    project_tools_config: Path, tmp_path: Path
+) -> None:
+    """Nothing has run yet, so there is no recorded rendered file.
+
+    The GUI disables "Open rendered template" on this, which is the honest
+    answer: previously it returned a path that did not exist.
+    """
+    from auto_ext.core.runner import rendered_path_for
+
+    project, tasks = _phase59_bc_load(project_tools_config)
+    assert rendered_path_for(tmp_path / "ae_root", tasks[0], "calibre", project) is None
+
+
+def test_phase59_bc_rendered_path_for_uses_the_newest_run(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """A rerun makes a second directory; the helper must follow the new one."""
+    from auto_ext.core.runner import rendered_path_for
+
+    project, tasks = _phase59_bc_load(project_tools_config)
+    ae_root = tmp_path / "ae_root"
+    for _ in range(2):
+        run_tasks(
+            project,
+            tasks,
+            stages=["calibre"],
+            auto_ext_root=ae_root,
+            workarea=workarea,
+            dry_run=True,
+        )
+
+    dirs = _run_dirs(ae_root)
+    assert len(dirs) == 2, "a rerun must not overwrite the previous run"
+    path = rendered_path_for(ae_root, tasks[0], "calibre", project)
+    assert path is not None
+    # Directory names sort chronologically, so the newest is last.
+    assert path.parent.parent == dirs[-1]
+
+
+def test_phase59_bc_rendered_path_for_accepts_an_explicit_record(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """Passing a record skips the directory scan — the path is read from it."""
+    from auto_ext.core.runner import rendered_path_for
+
+    project, tasks = _phase59_bc_load(project_tools_config)
+    ae_root = tmp_path / "ae_root"
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["calibre"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        dry_run=True,
     )
+    record = summary.runs[0]
+
+    path = rendered_path_for(ae_root, tasks[0], "calibre", project, record=record)
+    assert path == Path(record.run_dir) / "rendered" / "calibre_lvs.qci"
+
+
+def test_phase59_bc_rendered_path_for_skipped_stage_returns_none(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """jivaro is disabled for this task, so it rendered nothing to open."""
+    from auto_ext.core.runner import rendered_path_for
+
+    (project_tools_config / "tasks.yaml").write_text(
+        """\
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout
+  lvs_source_view: schematic
+  jivaro:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    project, tasks = _phase59_bc_load(project_tools_config)
+    ae_root = tmp_path / "ae_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["calibre", "jivaro"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        dry_run=True,
+    )
+
+    assert rendered_path_for(ae_root, tasks[0], "jivaro", project) is None
+    assert rendered_path_for(ae_root, tasks[0], "calibre", project) is not None
 
 
 def test_phase59_bc_rendered_path_for_strmout_returns_none(
@@ -840,7 +978,7 @@ def test_phase59_bc_rendered_path_for_unknown_stage_returns_none(
 
 
 def test_phase59_bc_rendered_path_for_per_task_override_beats_project_default(
-    project_tools_config: Path, tmp_path: Path, templates_root: Path
+    project_tools_config: Path, workarea: Path, tmp_path: Path, templates_root: Path
 ) -> None:
     """If a task overrides ``templates.calibre`` to a non-default path,
     rendered_path_for must follow the override (the runner does too)."""
@@ -855,6 +993,16 @@ def test_phase59_bc_rendered_path_for_per_task_override_beats_project_default(
     custom = override_dir / "my_custom_calibre.qci.j2"
     src = templates_root / "calibre" / "calibre_lvs.qci.j2"
     custom.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    # The manifest sidecar carries the template's knob defaults; without it
+    # the copy renders with an undefined ``lvs_variant``. Its ``template``
+    # field has to name the copy, which the loader cross-checks.
+    manifest_src = src.with_name(src.name + ".manifest.yaml")
+    custom.with_name(custom.name + ".manifest.yaml").write_text(
+        manifest_src.read_text(encoding="utf-8").replace(
+            f"template: {src.name}", f"template: {custom.name}", 1
+        ),
+        encoding="utf-8",
+    )
 
     (project_tools_config / "tasks.yaml").write_text(
         f"""\
@@ -869,7 +1017,16 @@ def test_phase59_bc_rendered_path_for_per_task_override_beats_project_default(
     )
 
     project, tasks = _phase59_bc_load(project_tools_config)
-    path = rendered_path_for(tmp_path / "ae_root", tasks[0], "calibre", project)
+    ae_root = tmp_path / "ae_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["calibre"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        dry_run=True,
+    )
+    path = rendered_path_for(ae_root, tasks[0], "calibre", project)
     assert path is not None
     # Stem follows the override's filename, not the project default.
     assert path.name == "my_custom_calibre.qci"
@@ -899,3 +1056,643 @@ def test_phase59_bc_rendered_path_for_matches_runner_actual_writes(
     for stage in ("si", "calibre", "quantus", "jivaro"):
         path = rendered_path_for(ae_root, tasks[0], stage, project)
         assert path is not None and path.is_file(), f"{stage}: {path}"
+
+
+# ---- S1: the run record ----------------------------------------------------
+#
+# Everything below is about what survives the process. Before the run layer a
+# rerun opened ``logs/task_<id>/<stage>.log`` with "w" and the previous run
+# ceased to exist; ``ToolResult.artifact_paths`` and the parsed LVS report
+# were computed and then dropped on the floor.
+
+
+def test_run_writes_a_record_with_identity_and_snapshots(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """``run.json`` is written, parses back, and names what it ran."""
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["si", "strmout", "calibre", "quantus", "jivaro"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+    )
+
+    run_dir = _only_run_dir(ae_root)
+    assert (run_dir / "run.json").is_file()
+
+    record = read_record(run_dir)
+    assert record.run_id == run_dir.name
+    assert record.overall == "passed"
+    assert record.dut.library == "WB_PLL_DCO"
+    assert record.dut.cell == "inv"
+    assert record.dut_label == tasks[0].task_id
+    # The directory name is <stamp>_<cell>-<recipe_id>; the recipe id comes
+    # from the quantus template stem (ext.cmd.j2).
+    assert record.slug == "inv-ext"
+    assert record.recipe.recipe_id == "ext"
+    assert set(record.recipe.templates) == {"si", "calibre", "quantus", "jivaro"}
+    assert record.workspace_dir.endswith("QCI_PATH_inv")
+    assert record.requested_stages == ["si", "strmout", "calibre", "quantus", "jivaro"]
+    # The summary hands the same record back in memory, so the GUI and the
+    # CLI do not have to re-read the file the runner just wrote.
+    assert [r.run_id for r in summary.runs] == [record.run_id]
+    assert summary.runs[0].overall == record.overall
+    assert summary.run_dirs == [run_dir]
+
+
+def test_run_record_carries_the_effective_configuration(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """The recipe section is a snapshot: knobs, jivaro, paths, dspf expression.
+
+    Editing project.yaml afterwards cannot rewrite it, which is the whole
+    reason it is inlined rather than referenced.
+    """
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["quantus"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        dry_run=True,
+        cli_knobs={"quantus": {"temperature": "85"}},
+    )
+
+    recipe = read_record(_only_run_dir(ae_root)).recipe
+    assert recipe.knobs["quantus"]["temperature"] == 85.0
+    assert recipe.jivaro.enabled is True
+    assert recipe.jivaro.frequency_limit == 14
+    assert recipe.jivaro.error_max == 2
+    # The *expression*, not the resolved path — the resolved one is dspf_path.
+    assert recipe.dspf_out_path == "${WORK_ROOT2}/{cell}.dspf"
+    assert set(recipe.paths) == {"calibre_lvs_dir", "qrc_deck_dir"}
+
+
+def test_run_record_captures_env_context_and_provenance(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """The resolved env and the full Jinja context used to die with the process."""
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["si"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        dry_run=True,
+    )
+
+    record = read_record(_only_run_dir(ae_root))
+    env_by_name = {b.name: b for b in record.env}
+    assert env_by_name["WORK_ROOT"].source == "override"
+    assert env_by_name["WORK_ROOT"].value == workarea.as_posix()
+    assert record.context["cell"] == "inv"
+    assert record.context["employee_id"] == "alice"
+    assert record.context["output_dir"] == record.workspace_dir
+    assert record.python_version
+    assert record.auto_ext_version
+    # Which binary each stage would have invoked, resolved through the same
+    # PATH the subprocess sees.
+    assert set(record.tools) == {"si", "strmout", "calibre", "quantus", "jivaro"}
+
+
+def test_rerun_creates_a_second_run_and_leaves_the_first_untouched(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """A.1: the direct opposite of the old ``open(log, "w")`` behaviour."""
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+
+    run_tasks(
+        project, tasks, stages=["calibre"], auto_ext_root=ae_root,
+        workarea=workarea, dry_run=True,
+    )
+    first = _only_run_dir(ae_root)
+    first_bytes = (first / "run.json").read_bytes()
+    first_rendered = (first / "rendered" / "calibre_lvs.qci").read_bytes()
+
+    run_tasks(
+        project, tasks, stages=["calibre"], auto_ext_root=ae_root,
+        workarea=workarea, dry_run=True,
+    )
+
+    dirs = _run_dirs(ae_root)
+    assert len(dirs) == 2
+    assert first in dirs
+    assert (first / "run.json").read_bytes() == first_bytes
+    assert (first / "rendered" / "calibre_lvs.qci").read_bytes() == first_rendered
+
+
+def test_run_record_stage_rows_carry_timings_paths_and_argv(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """A.5: per-stage structured results, and log_path really points at a log."""
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["si", "strmout", "calibre", "quantus", "jivaro"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+    )
+
+    run_dir = _only_run_dir(ae_root)
+    record = read_record(run_dir)
+    assert [st.key for st in record.stages] == [
+        "si", "strmout", "calibre", "quantus", "jivaro",
+    ]
+    for st in record.stages:
+        assert st.status == "passed", f"{st.key}: {st.error}"
+        assert st.started_at is not None and st.ended_at is not None
+        assert st.ended_at >= st.started_at
+        assert st.duration_s is not None and st.duration_s >= 0
+        assert st.exit_code == 0
+        assert st.argv, f"{st.key}: argv not recorded"
+        assert st.cwd == str(workarea)
+        # Paths are relative to the run dir so the directory can be moved.
+        assert st.log_path == f"logs/{st.key}.log"
+        assert (run_dir / st.log_path).is_file()
+
+    si = record.stage("si")
+    assert si is not None and si.rendered_path == "rendered/default.env"
+    # strmout renders nothing, so it must not claim a rendered file.
+    strmout = record.stage("strmout")
+    assert strmout is not None and strmout.rendered_path is None
+
+
+def test_run_record_promotes_the_lvs_report_and_archives_it(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """A.5: ``results/lvs.report`` is a copy, and the parsed verdict is typed.
+
+    ``core/checks.py`` has always produced banner + discrepancy count; until
+    the run layer it went into ``ToolResult.diagnostics["lvs_report"]`` and
+    was read by nobody.
+    """
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["si", "strmout", "calibre"],
+        auto_ext_root=ae_root, workarea=workarea,
+    )
+
+    run_dir = _only_run_dir(ae_root)
+    record = read_record(run_dir)
+    lvs = record.results.lvs
+    assert lvs is not None
+    assert lvs.passed is True
+    assert lvs.banner == "CORRECT"
+    assert lvs.discrepancies == 0
+    assert lvs.archived_path == "results/lvs.report"
+
+    archived = run_dir / "results" / "lvs.report"
+    assert archived.is_file()
+    # A copy, not a symlink: the source is overwritten by the next LVS run
+    # of this cell.
+    assert not archived.is_symlink()
+    assert archived.read_bytes() == Path(lvs.source_path).read_bytes()
+    # And the derived summary sits next to it.
+    summary_json = json.loads((run_dir / "results" / "lvs_summary.json").read_text("utf-8"))
+    assert summary_json["banner"] == "CORRECT"
+
+    # The workarea paths that are too big to copy are still recorded.
+    calibre = record.stage("calibre")
+    assert calibre is not None
+    assert any(a.endswith(".report") for a in calibre.artifacts)
+    assert "lvs_report" in calibre.details
+
+
+def test_run_record_survives_deleting_the_cadence_workspace(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """A.4: the run directory must stay self-consistent once the workarea goes.
+
+    That is the whole point of archiving: the workspace holds gigabytes of
+    regenerable intermediates and is rewritten by the next run of this cell.
+    """
+    import shutil
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["si", "strmout", "calibre"],
+        auto_ext_root=ae_root, workarea=workarea,
+    )
+    run_dir = _only_run_dir(ae_root)
+
+    shutil.rmtree(workarea / "cds")
+
+    record = read_record(run_dir)
+    assert record.results.lvs is not None
+    assert (run_dir / record.results.lvs.archived_path).is_file()
+    assert (run_dir / "rendered" / "calibre_lvs.qci").is_file()
+    assert (run_dir / "logs" / "calibre.log").is_file()
+
+
+def test_failed_run_is_recorded_in_full_with_skip_reasons(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A.6: a failed run is a run. Skipped stages keep their reason."""
+    monkeypatch.setenv("AUTO_EXT_MOCK_FORCE_FAIL", "calibre")
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["si", "strmout", "calibre", "quantus", "jivaro"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+    )
+
+    record = read_record(_only_run_dir(ae_root))
+    assert record.overall == "failed"
+    by_key = {st.key: st for st in record.stages}
+    assert by_key["calibre"].status == "failed"
+    assert by_key["quantus"].status == "skipped"
+    assert by_key["quantus"].skip_reason == "aborted after earlier stage failure"
+    assert by_key["jivaro"].skip_reason == "aborted after earlier stage failure"
+    # Even the failing LVS verdict is promoted, which is what makes a
+    # "3 discrepancies, same as last time" comparison possible later.
+    assert record.results.lvs is not None
+    assert record.results.lvs.passed is False
+    assert record.results.lvs.discrepancies == 3
+
+
+def test_disabled_jivaro_records_its_own_skip_reason(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """A stage that never ran must say why, or the record is unreadable later."""
+    (project_tools_config / "tasks.yaml").write_text(
+        """\
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout
+  lvs_source_view: schematic
+  jivaro:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["calibre", "jivaro"],
+        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+    )
+
+    record = read_record(_only_run_dir(ae_root))
+    jivaro = record.stage("jivaro")
+    assert jivaro is not None
+    assert jivaro.status == "skipped"
+    assert jivaro.skip_reason == "jivaro disabled for task"
+
+
+def test_cancelled_run_is_recorded_completely(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """A.6: cancelling must not leave half a JSON document behind."""
+    from auto_ext.core.progress import CancelToken
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    token = CancelToken()
+    token.cancel()  # already cancelled before the first stage
+
+    run_tasks(
+        project,
+        tasks,
+        stages=["si", "calibre"],
+        auto_ext_root=ae_root,
+        workarea=workarea,
+        cancel_token=token,
+    )
+
+    run_dir = _only_run_dir(ae_root)
+    # Parses cleanly: the finalize write is atomic (.tmp + os.replace).
+    record = read_record(run_dir)
+    assert record.overall == "cancelled"
+    assert record.cancelled_by == "user"
+    assert record.stage("si").status == "cancelled"
+    assert record.stage("calibre").status == "skipped"
+    assert record.ended_at is not None
+
+
+def test_run_appends_events_while_it_runs(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """``events.jsonl`` is the append-only trail; ``run.json`` lands once."""
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["si", "strmout"],
+        auto_ext_root=ae_root, workarea=workarea,
+    )
+
+    events = read_events(_only_run_dir(ae_root))
+    kinds = [e["event"] for e in events]
+    assert kinds == [
+        "run_start",
+        "stage_start", "stage_end",
+        "stage_start", "stage_end",
+        "run_end",
+    ]
+    assert all("at" in e for e in events)
+    stage_ends = [e for e in events if e["event"] == "stage_end"]
+    assert [e["stage"] for e in stage_ends] == ["si", "strmout"]
+    assert all(e["status"] == "passed" for e in stage_ends)
+    assert all(e["duration_s"] is not None for e in stage_ends)
+    assert events[-1]["overall"] == "passed"
+
+
+def test_multi_task_dispatch_writes_a_batch_index(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """Two tasks in one dispatch: two runs, one batch that lists both."""
+    from auto_ext.core.run_store import read_batch
+
+    (project_tools_config / "tasks.yaml").write_text(
+        """\
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout
+  lvs_source_view: schematic
+  jivaro:
+    enabled: false
+- library: WB_PLL_DCO
+  cell: buf
+  lvs_layout_view: layout
+  lvs_source_view: schematic
+  jivaro:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    summary = run_tasks(
+        project, tasks, stages=["calibre"],
+        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+    )
+
+    assert summary.batch_id is not None
+    assert len(_run_dirs(ae_root)) == 2
+    batch = read_batch(ae_root / "runs", summary.batch_id)
+    assert batch.run_ids == [r.run_id for r in summary.runs]
+    assert all(r.batch_id == summary.batch_id for r in summary.runs)
+
+
+def test_single_task_dispatch_has_no_batch(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """One task is not a batch; the index file would just be noise."""
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    summary = run_tasks(
+        project, tasks, stages=["calibre"],
+        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+    )
+    assert summary.batch_id is None
+    assert summary.runs[0].batch_id is None
+    assert not (ae_root / "runs" / "batches").exists()
+
+
+# ---- S1: extraction_output_dir keys + the workspace lock -------------------
+
+
+def test_output_dir_accepts_run_slug_format_key(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """``{run_slug}`` gives a user hard workspace isolation when they want it."""
+    proj_path = project_tools_config / "project.yaml"
+    proj_path.write_text(
+        proj_path.read_text(encoding="utf-8").replace(
+            '"${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"',
+            '"${WORK_ROOT}/cds/verify/QCI_PATH_{cell}_{run_slug}"',
+        ),
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["si"],
+        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+    )
+
+    record = read_record(_only_run_dir(ae_root))
+    assert record.workspace_dir.endswith("QCI_PATH_inv_inv-ext")
+
+
+def test_output_dir_run_id_key_isolates_every_rerun(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """``{run_id}`` is the strongest form: a fresh workspace per run."""
+    proj_path = project_tools_config / "project.yaml"
+    proj_path.write_text(
+        proj_path.read_text(encoding="utf-8").replace(
+            '"${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"',
+            '"${WORK_ROOT}/cds/verify/QCI_PATH_{run_id}"',
+        ),
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    workspaces = set()
+    for _ in range(2):
+        run_tasks(
+            project, tasks, stages=["si"],
+            auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+        )
+    for run_dir in _run_dirs(ae_root):
+        record = read_record(run_dir)
+        assert record.workspace_dir.endswith(record.run_id)
+        workspaces.add(record.workspace_dir)
+    assert len(workspaces) == 2
+
+
+def test_output_dir_unknown_format_key_lists_the_run_keys(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """The error has to advertise the new keys or nobody will find them."""
+    from auto_ext.core.errors import ConfigError
+
+    proj_path = project_tools_config / "project.yaml"
+    proj_path.write_text(
+        proj_path.read_text(encoding="utf-8").replace(
+            '"${WORK_ROOT}/cds/verify/QCI_PATH_{cell}"',
+            '"${WORK_ROOT}/QCI_PATH_{bogus}"',
+        ),
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+
+    with pytest.raises(ConfigError) as excinfo:
+        run_tasks(
+            project, tasks, stages=["si"],
+            auto_ext_root=tmp_path / "project_root", workarea=workarea, dry_run=True,
+        )
+    message = str(excinfo.value)
+    assert "'bogus'" in message
+    assert "run_slug" in message and "run_id" in message
+
+
+def test_run_takes_and_releases_the_workspace_lock(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """The lock is held for the duration of the run and cleaned up after."""
+    from auto_ext.core.workdir import WORKSPACE_LOCK_NAME
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["si"],
+        auto_ext_root=ae_root, workarea=workarea,
+    )
+
+    workspace = Path(read_record(_only_run_dir(ae_root)).workspace_dir)
+    assert workspace.is_dir()
+    assert not (workspace / WORKSPACE_LOCK_NAME).exists()
+
+
+def test_run_refuses_a_workspace_another_run_holds(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """A live lock is reported as a failed run, not as a silent interleave.
+
+    Failing the task rather than raising out of ``run_tasks`` keeps the rest
+    of a batch going, and the reason lands in ``run.json`` where the user can
+    read it afterwards.
+    """
+    from auto_ext.core.workdir import acquire_workspace_lock
+
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    workspace = workarea / "cds" / "verify" / "QCI_PATH_inv"
+    acquire_workspace_lock(workspace, "20260101T000000Z_someone-else")
+
+    summary = run_tasks(
+        project, tasks, stages=["si", "calibre"],
+        auto_ext_root=ae_root, workarea=workarea,
+    )
+
+    assert summary.failed == 1
+    record = read_record(_only_run_dir(ae_root))
+    assert record.overall == "failed"
+    assert "someone-else" in (record.stages[0].error or "")
+
+
+def test_dry_run_does_not_touch_the_cadence_workspace(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """A dry run renders and records; it must not create or lock a workspace."""
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+    run_tasks(
+        project, tasks, stages=["si", "calibre"],
+        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+    )
+
+    workspace = Path(read_record(_only_run_dir(ae_root)).workspace_dir)
+    assert not workspace.exists()
+
+
+def test_serial_tasks_may_share_one_workspace(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """The downgrade: same cell, two configurations, one workspace, in sequence.
+
+    This used to be a hard ``ConfigError`` because the workspace doubled as
+    the run's identity. It no longer does, so reusing it is the correct and
+    expected behaviour — and each task still gets its own run directory.
+    """
+    (project_tools_config / "tasks.yaml").write_text(
+        """\
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout
+  lvs_source_view: schematic
+  out_file: av_ext_a
+  jivaro:
+    enabled: false
+- library: WB_PLL_DCO
+  cell: inv
+  lvs_layout_view: layout_test
+  lvs_source_view: schematic
+  out_file: av_ext_b
+  jivaro:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+
+    summary = run_tasks(
+        project, tasks, stages=["calibre"],
+        auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+    )
+
+    assert summary.total == 2
+    run_dirs = _run_dirs(ae_root)
+    assert len(run_dirs) == 2, "each task still gets its own run directory"
+    workspaces = {read_record(d).workspace_dir for d in run_dirs}
+    assert len(workspaces) == 1, "and they deliberately share the workspace"
+
+
+def test_config_error_after_allocation_leaves_no_orphan_run(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """A run directory is claimed before the context is built.
+
+    If building it fails there is nothing worth recording, so the empty
+    directory must be handed back rather than sitting in the history list
+    warning "no run.json" forever.
+    """
+    from auto_ext.core.errors import ConfigError
+
+    proj_path = project_tools_config / "project.yaml"
+    proj_path.write_text(
+        proj_path.read_text(encoding="utf-8").replace(
+            'dspf_out_path: "${WORK_ROOT2}/{cell}.dspf"',
+            'dspf_out_path: "${WORK_ROOT2}/{bogus}.dspf"',
+        ),
+        encoding="utf-8",
+    )
+    project, tasks = _load(project_tools_config)
+    ae_root = tmp_path / "project_root"
+
+    with pytest.raises(ConfigError, match="unknown format key"):
+        run_tasks(
+            project, tasks, stages=["si"],
+            auto_ext_root=ae_root, workarea=workarea, dry_run=True,
+        )
+
+    assert _run_dirs(ae_root) == []

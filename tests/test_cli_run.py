@@ -135,7 +135,140 @@ def test_run_stage_filter_restricts_stages(
     # stages column in the summary table should show only si and calibre.
     assert "si:d" in result.stdout  # dry_run -> 'd'
     assert "calibre:d" in result.stdout
-    assert "quantus" not in result.stdout or "quantus:d" not in result.stdout
+    assert "quantus:d" not in result.stdout
+
+
+# ---- run summary: run id, LVS, failure class ------------------------------
+
+
+@pytest.fixture
+def wide_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Rich from wrapping an asserted sentence across two lines."""
+    monkeypatch.setenv("COLUMNS", "200")
+
+
+def test_run_summary_names_the_run_and_where_the_records_went(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    wide_console: None,
+) -> None:
+    """The closing block identifies the run and points at runs/."""
+    root = tmp_path / "pr"
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--config-dir", str(project_tools_config),
+            "--dry-run",
+            "--auto-ext-root", str(root),
+            "--workarea", str(workarea),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+
+    run_dirs = [p for p in (root / "runs").iterdir() if (p / "run.json").is_file()]
+    assert len(run_dirs) == 1
+    run_id = run_dirs[0].name
+
+    assert run_id in result.stdout
+    # The DUT label sits under the run id in the same column.
+    assert "inv · " in result.stdout
+    assert "run records written to" in result.stdout
+    assert f"auto-ext runs show {run_id}" in result.stdout
+
+
+def test_run_summary_reports_lvs_discrepancies_and_a_failure_class(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wide_console: None,
+) -> None:
+    """A failing LVS surfaces its count and its next action, not just 'failed'.
+
+    The mock Calibre writes ``INCORRECT`` / ``DISCREPANCIES = 3``; before the
+    run layer this number was parsed, stashed in ``ToolResult.diagnostics``
+    and then read by nobody.
+    """
+    monkeypatch.setenv("AUTO_EXT_MOCK_FORCE_FAIL", "calibre")
+    root = tmp_path / "pr"
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--config-dir", str(project_tools_config),
+            "--auto-ext-root", str(root),
+            "--workarea", str(workarea),
+        ],
+    )
+    assert result.exit_code == 1, result.stdout
+
+    assert "1 stage failure(s):" in result.stdout
+    assert "lvs-mismatch" in result.stdout
+    assert "3 discrepancy(ies)" in result.stdout
+    assert "next:" in result.stdout
+    # The discrepancy count also reaches the summary table's LVS column.
+    assert "✗ 3" in result.stdout
+
+
+def test_run_summary_reports_a_missing_binary_as_such(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    wide_console: None,
+) -> None:
+    """Without the mocks on PATH every tool exits 127; say why."""
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--config-dir", str(project_tools_config),
+            "--stage", "si",
+            "--auto-ext-root", str(tmp_path / "pr"),
+            "--workarea", str(workarea),
+        ],
+    )
+    assert result.exit_code == 1, result.stdout
+    assert "tool-not-found" in result.stdout
+    assert "run.sh" in result.stdout
+
+
+def test_run_then_runs_show_reads_back_the_same_run(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+    wide_console: None,
+) -> None:
+    """``run`` writes the record; ``runs show`` renders it. One wiring test."""
+    root = tmp_path / "pr"
+    run_result = runner.invoke(
+        app,
+        [
+            "run",
+            "--config-dir", str(project_tools_config),
+            "--auto-ext-root", str(root),
+            "--workarea", str(workarea),
+        ],
+    )
+    assert run_result.exit_code == 0, run_result.stdout
+
+    listed = runner.invoke(app, ["runs", "list", "--auto-ext-root", str(root)])
+    assert listed.exit_code == 0, listed.stdout
+    assert "inv · " in listed.stdout
+
+    shown = runner.invoke(
+        app, ["runs", "show", "latest", "--auto-ext-root", str(root)]
+    )
+    assert shown.exit_code == 0, shown.stdout
+    assert "WB_PLL_DCO / inv / layout vs schematic" in shown.stdout
+    assert "Stages" in shown.stdout
+    assert "logs/calibre.log" in shown.stdout
+    assert "LVS" in shown.stdout
+    assert "CORRECT" in shown.stdout
 
 
 def test_migrate_still_stubbed() -> None:
@@ -275,7 +408,7 @@ def test_run_knob_beats_manifest_default(
     assert tasks_yaml  # sanity
 
     # Find the rendered knobby file and assert it got the CLI value.
-    rendered_roots = list((tmp_path / "pr" / "runs").glob("task_*/rendered/knobby"))
+    rendered_roots = list((tmp_path / "pr" / "runs").glob("*/rendered/knobby"))
     assert len(rendered_roots) == 1
     assert rendered_roots[0].read_text(encoding="utf-8").strip() == "value=60.0"
 
@@ -685,7 +818,7 @@ def test_run_knob_layering_project_task_cli(
     )
     assert res60.exit_code == 0, res60.stdout
     # Task beats project -> 70. (Both project and task are set; task wins.)
-    rendered = list((tmp_path / "pr1" / "runs").glob("task_*/rendered/knobby"))[0]
+    rendered = list((tmp_path / "pr1" / "runs").glob("*/rendered/knobby"))[0]
     assert rendered.read_text(encoding="utf-8").strip() == "value=70.0"
 
     # CLI beats task -> 80.
@@ -700,5 +833,5 @@ def test_run_knob_layering_project_task_cli(
         ],
     )
     assert res80.exit_code == 0, res80.stdout
-    rendered = list((tmp_path / "pr2" / "runs").glob("task_*/rendered/knobby"))[0]
+    rendered = list((tmp_path / "pr2" / "runs").glob("*/rendered/knobby"))[0]
     assert rendered.read_text(encoding="utf-8").strip() == "value=80.0"

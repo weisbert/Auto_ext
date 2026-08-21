@@ -7,6 +7,7 @@ pytest-qt are not installed (e.g. Linux CI without the dev wheel bundle).
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -83,3 +84,48 @@ def test_emission_from_worker_thread_delivered_on_main(qtbot) -> None:
 
     assert len(received_threads) == 1
     assert received_threads[0] == main_tid
+
+
+# ---- RunAwareReporter half -------------------------------------------------
+
+
+def test_on_run_dir_emits_run_dir_ready(qtbot, tmp_path) -> None:
+    """The run directory has to reach the GUI while the run is still going.
+
+    Stage logs live at ``<run_dir>/logs/<stage>.log`` and the run id cannot be
+    derived from a task id, so this signal is the only way a log viewer can
+    find them.
+    """
+    reporter = QtProgressReporter()
+    run_dir = tmp_path / "runs" / "20260821T143205Z_amp2-ext"
+
+    with qtbot.waitSignal(reporter.run_dir_ready, timeout=1000) as blocker:
+        reporter.on_run_dir("t1", run_dir)
+
+    assert blocker.args[0] == "t1"
+    assert isinstance(blocker.args[1], Path)
+    assert blocker.args[1] == run_dir
+
+
+def test_on_task_record_emits_task_record(qtbot) -> None:
+    reporter = QtProgressReporter()
+
+    class FakeRecord:
+        run_id = "20260821T143205Z_amp2-ext"
+        overall = "passed"
+
+    record = FakeRecord()
+    with qtbot.waitSignal(reporter.task_record, timeout=1000) as blocker:
+        reporter.on_task_record("t1", record)
+
+    assert blocker.args[0] == "t1"
+    assert blocker.args[1] is record
+
+
+def test_reporter_satisfies_both_protocols() -> None:
+    """Structural conformance is what the runner duck-types on."""
+    from auto_ext.core.progress import ProgressReporter, RunAwareReporter
+
+    reporter = QtProgressReporter()
+    assert isinstance(reporter, ProgressReporter)
+    assert isinstance(reporter, RunAwareReporter)

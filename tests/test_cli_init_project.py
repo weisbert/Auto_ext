@@ -20,6 +20,23 @@ from typer.testing import CliRunner
 from auto_ext.cli import app
 
 
+def _only_run_dir(auto_ext_root: Path) -> Path:
+    """The run directory a single-task dispatch produced.
+
+    Run directories are named ``<UTC-stamp>_<cell>-<recipe>``, so the test
+    finds the one directory rather than spelling a task id it no longer has.
+    """
+
+    dirs = sorted(
+        d
+        for d in (auto_ext_root / "runs").iterdir()
+        if d.is_dir() and d.name not in ("batches", "latest")
+    )
+    assert len(dirs) == 1, f"expected one run dir, found {[d.name for d in dirs]}"
+    return dirs[0]
+
+
+
 @pytest.fixture
 def raw_projectA_dir() -> Path:
     return Path(__file__).resolve().parent / "fixtures" / "raw"
@@ -182,8 +199,8 @@ def test_init_project_dry_run_passes_end_to_end(
         ],
     )
     assert run_result.exit_code == 0, run_result.output
-    # Every stage rendered.
-    rendered = tmp_path / "run_root" / "runs" / "task_INV_LIB__INV1__layout__schematic" / "rendered"
+    # Every stage rendered, into this run's own directory.
+    rendered = _only_run_dir(tmp_path / "run_root") / "rendered"
     assert (rendered / "imported.qci").is_file()
     assert (rendered / "imported.env").is_file()
     assert (rendered / "imported.cmd").is_file()
@@ -400,9 +417,7 @@ def test_init_project_projectB_dry_run_passes(
         ],
     )
     assert run_result.exit_code == 0, run_result.output
-    rendered = (
-        tmp_path / "run_root" / "runs" / "task_AMP_LIB__AMP2__layout__schematic" / "rendered"
-    )
+    rendered = _only_run_dir(tmp_path / "run_root") / "rendered"
     assert (rendered / "imported.qci").is_file()
 
 

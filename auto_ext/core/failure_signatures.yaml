@@ -1,0 +1,136 @@
+# =============================================================================
+# Auto_ext failure signatures — log-text patterns that identify a failure class
+# =============================================================================
+#
+# WHY THIS FILE IS EMPTY
+# ----------------------
+# Everything auto_ext can decide from a hard fact is decided in code, in
+# auto_ext/core/failure_class.py:
+#
+#   * exit code 127                      -> environment  (executable not on PATH;
+#                                           run_subprocess returns 127 itself)
+#   * LVS banner INCORRECT / non-zero
+#     DISCREPANCIES                      -> lvs_mismatch
+#   * template render failed, or a
+#     declared input file is missing     -> environment
+#   * declared output missing / report
+#     unparsable                         -> tool_crash
+#   * any other non-zero exit            -> tool_crash
+#
+# What is left over needs the tool's own wording in the stage log — above all
+# license failures, which usually exit non-zero with a perfectly ordinary
+# "1" and say nothing else structured. We do not have a single real EDA log
+# in this repository (`grep -r '\.log' .` finds no captured sample), so every
+# pattern below would be invented, and an invented pattern is worse than no
+# pattern: it fires on the wrong run and sends the user down the wrong path.
+#
+# So the table ships empty. With no match, classify_failure() returns
+# `unknown` plus a next_action telling the reader to come here and add the
+# line they just read. That is the intended workflow, not a gap.
+#
+#
+# HOW TO CAPTURE A SAMPLE (office Linux server)
+# ---------------------------------------------
+# 1. Reproduce the failure through auto_ext so the log lands in the run dir:
+#        <run_dir>/logs/<stage>.log            e.g. .../logs/calibre.log
+#    Every such log starts with the argv + cwd header that run_subprocess
+#    writes, so the sample is self-describing.
+# 2. Copy the log out and scrub it before it leaves the server:
+#        - employee id and any /home/<id>/ path
+#        - project / customer / cell names       (replace with CELL_A, LIB_A)
+#        - license server hostnames and ports
+#    Keep the tool's own error wording byte-exact; that is the whole point.
+# 3. Park the scrubbed sample under docs/failure_samples/<stage>_<what>.log and
+#    reference it from the signature's `sample:` key, so the next person can
+#    see what the pattern was written against.
+# 4. Add the signature below, then add a test in
+#    tests/core/test_failure_class.py that feeds the scrubbed text through
+#    classify_failure() and asserts the class. Do not add a signature without
+#    a sample.
+#
+# Good sources of wording when a live reproduction is impractical:
+#   * Cadence   — the tail of qrc / si stdout; `qrc -h` documents nothing useful
+#   * Mentor    — Calibre prints license diagnostics to stdout when
+#                 *cmnSpecifyLicenseWaitTime expires (our runset sets a 10 s
+#                 wait, so the timeout path is reachable)
+#   * FlexLM    — `lmstat -a` output on the license server for the feature name
+#
+#
+# ENTRY FORMAT
+# ------------
+# version: 1                       schema version of this file; the loader
+#                                  rejects anything it does not know.
+# signatures: [ ... ]              ordered list; FIRST match wins, so put the
+#                                  specific patterns above the generic ones.
+#
+# Each entry:
+#
+#   - id: calibre_license_wait_timeout
+#       Required. Unique within the file, [a-z0-9._-]. Ends up verbatim in
+#       run.json as `details.failure.signature_id`, so treat it as an API:
+#       renaming one orphans the history that already quoted it.
+#
+#     failure_class: license_unavailable
+#       Required. One of: license_unavailable | environment | lvs_mismatch |
+#       tool_crash. (`unknown` is not assignable — it is what you get when
+#       nothing matches.)
+#
+#     stages: [calibre]
+#       Optional. Restrict the signature to these runner stages
+#       (si | strmout | calibre | quantus | jivaro). Omit, or use ["*"], to
+#       let it fire on any stage. Prefer restricting: "cannot checkout
+#       feature" means different things for Calibre and for QRC.
+#
+#     any: ["Error: license ...", "..."]
+#       Required, non-empty. At least ONE of these must appear in the log for
+#       the signature to fire. The first one that hits also supplies the
+#       evidence line stored in the run record.
+#
+#     all: ["..."]
+#       Optional. EVERY one of these must also appear. Use it to disambiguate
+#       a generic phrase by pairing it with the tool banner.
+#
+#     regex: false
+#       Optional, default false. false = plain substring search (what you want
+#       for a pasted log line). true = each `any`/`all` entry is a Python
+#       regular expression. Keep regexes anchored and boring; a runaway
+#       backtracking pattern would hang the classifier on a large log.
+#
+#     case_sensitive: false
+#       Optional, default false.
+#
+#     next_action: "Wait for a seat and re-run ..."
+#       Optional. Overrides the failure class's default next_action with
+#       something specific to this message. English, imperative, one or two
+#       sentences, and it must name a concrete thing to DO.
+#
+#     note: "Seen 2026-05 on Calibre v2019.2 when all 4 seats were held."
+#       Optional provenance: where the sample came from and when.
+#
+#     sample: docs/failure_samples/calibre_license_wait_timeout.log
+#       Optional, repo-relative path to the scrubbed sample.
+#
+#
+# WORKED EXAMPLE (commented out on purpose — the strings are made up)
+# ------------------------------------------------------------------
+#   - id: calibre_license_wait_timeout
+#     failure_class: license_unavailable
+#     stages: [calibre]
+#     any:
+#       - "REPLACE ME with the real line from a scrubbed log"
+#     all:
+#       - "REPLACE ME with a second line that pins the tool"
+#     next_action: >-
+#       All Calibre seats are in use. Re-run when one frees up, or raise
+#       *cmnLicenseWaitTime in the runset so the job queues instead of
+#       failing.
+#     note: "PLACEHOLDER — not derived from a real log; do not enable as-is."
+#     sample: docs/failure_samples/calibre_license_wait_timeout.log
+#
+# =============================================================================
+
+version: 1
+
+# Empty on purpose. See the header before adding anything: one entry per
+# observed message, each backed by a scrubbed sample and a test.
+signatures: []

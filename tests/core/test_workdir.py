@@ -10,11 +10,16 @@ import pytest
 
 from auto_ext.core.errors import WorkdirError
 from auto_ext.core.workdir import (
+    WORKSPACE_LOCK_NAME,
+    acquire_workspace_lock,
     cleanup_serial_workdir,
     place_si_env_in_parallel_dir,
     prepare_parallel_workdir,
     prepare_serial_workdir,
+    read_workspace_lock,
+    release_workspace_lock,
     serial_workdir,
+    workspace_lock,
 )
 
 
@@ -130,79 +135,76 @@ def test_serial_workdir_context_cleans_on_success(
 
 
 # ---- prepare_parallel_workdir ---------------------------------------------
+#
+# The work dir moved from ``<auto_ext_root>/runs/task_<id>/`` to
+# ``<run_dir>/work/``: it belongs to one immutable run rather than to a task
+# id that every rerun reuses. The task-id sanitising tests are gone with the
+# task id -- the run directory name is validated by ``validate_run_slug``
+# upstream, so there is no unsafe string left to sanitise here.
 
 
 @symlink_required
-def test_prepare_parallel_creates_task_dir(
-    workarea: Path, auto_ext_root: Path
+def test_prepare_parallel_creates_work_dir_inside_run(
+    workarea: Path, run_dir: Path
 ) -> None:
-    task_dir = prepare_parallel_workdir(auto_ext_root, workarea, 7)
-    assert task_dir == auto_ext_root / "runs" / "task_7"
-    assert task_dir.is_dir()
+    work_dir = prepare_parallel_workdir(run_dir, workarea)
+    assert work_dir == run_dir / "work"
+    assert work_dir.is_dir()
 
 
 @symlink_required
-def test_prepare_parallel_symlinks_cds_lib(
-    workarea: Path, auto_ext_root: Path
-) -> None:
-    task_dir = prepare_parallel_workdir(auto_ext_root, workarea, "demo")
-    link = task_dir / "cds.lib"
+def test_prepare_parallel_symlinks_cds_lib(workarea: Path, run_dir: Path) -> None:
+    work_dir = prepare_parallel_workdir(run_dir, workarea)
+    link = work_dir / "cds.lib"
     assert link.is_symlink()
-    # Symlink target must be absolute so the task dir is relocatable.
+    # Symlink target must be absolute so the work dir is relocatable.
     target = Path(os.readlink(link))
     assert target.is_absolute()
     assert target.resolve() == (workarea / "cds.lib").resolve()
 
 
 @symlink_required
-def test_prepare_parallel_symlinks_cdsinit(
-    workarea: Path, auto_ext_root: Path
-) -> None:
-    task_dir = prepare_parallel_workdir(auto_ext_root, workarea, "demo")
-    link = task_dir / ".cdsinit"
+def test_prepare_parallel_symlinks_cdsinit(workarea: Path, run_dir: Path) -> None:
+    work_dir = prepare_parallel_workdir(run_dir, workarea)
+    link = work_dir / ".cdsinit"
     assert link.is_symlink()
     assert Path(os.readlink(link)).resolve() == (workarea / ".cdsinit").resolve()
 
 
 @symlink_required
-def test_prepare_parallel_sanitizes_task_id(
-    workarea: Path, auto_ext_root: Path
+def test_prepare_parallel_leaves_run_siblings_alone(
+    workarea: Path, run_dir: Path
 ) -> None:
-    # Non-safe characters collapse to underscores; no nested dirs.
-    task_dir = prepare_parallel_workdir(auto_ext_root, workarea, "foo/bar baz")
-    assert task_dir.name == "task_foo_bar_baz"
-    assert task_dir.parent == auto_ext_root / "runs"
+    """``work/`` is created next to rendered/ logs/ results/, not over them."""
+
+    (run_dir / "rendered" / "keep.txt").write_text("x", encoding="utf-8")
+    prepare_parallel_workdir(run_dir, workarea)
+    assert (run_dir / "rendered" / "keep.txt").is_file()
+    assert (run_dir / "logs").is_dir()
+    assert (run_dir / "results").is_dir()
 
 
 @symlink_required
-def test_prepare_parallel_accepts_int_task_id(
-    workarea: Path, auto_ext_root: Path
+def test_prepare_parallel_clears_stale_work_dir(
+    workarea: Path, run_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    task_dir = prepare_parallel_workdir(auto_ext_root, workarea, 42)
-    assert task_dir.name == "task_42"
+    """A crash between allocation and preparation leaves a half-built work/."""
 
-
-@symlink_required
-def test_prepare_parallel_reuses_stale_dir(
-    workarea: Path, auto_ext_root: Path, caplog: pytest.LogCaptureFixture
-) -> None:
     import logging
 
-    stale = auto_ext_root / "runs" / "task_1"
-    stale.mkdir(parents=True)
-    (stale / "leftover.txt").write_text("from previous run", encoding="utf-8")
+    stale = run_dir / "work"
+    stale.mkdir()
+    (stale / "leftover.txt").write_text("from a crashed run", encoding="utf-8")
 
     caplog.set_level(logging.WARNING, logger="auto_ext.core.workdir")
-    task_dir = prepare_parallel_workdir(auto_ext_root, workarea, 1)
+    work_dir = prepare_parallel_workdir(run_dir, workarea)
 
-    assert task_dir == stale
-    assert not (task_dir / "leftover.txt").exists()
+    assert work_dir == stale
+    assert not (work_dir / "leftover.txt").exists()
     assert any("stale" in m.lower() for m in caplog.messages)
 
 
-def test_prepare_parallel_missing_cds_lib(
-    auto_ext_root: Path, tmp_path: Path
-) -> None:
+def test_prepare_parallel_missing_cds_lib(run_dir: Path, tmp_path: Path) -> None:
     # workarea exists but is missing cds.lib.
     broken = tmp_path / "broken_workarea"
     broken.mkdir()
@@ -210,10 +212,10 @@ def test_prepare_parallel_missing_cds_lib(
     # No cds.lib.
 
     with pytest.raises(WorkdirError, match="cds.lib"):
-        prepare_parallel_workdir(auto_ext_root, broken, 1)
+        prepare_parallel_workdir(run_dir, broken)
 
-    # And the task_dir must not be left lying around.
-    assert not (auto_ext_root / "runs" / "task_1").exists()
+    # And the work dir must not be left lying around.
+    assert not (run_dir / "work").exists()
 
 
 # ---- place_si_env_in_parallel_dir -----------------------------------------
@@ -247,7 +249,7 @@ def test_place_si_env_missing_source(tmp_path: Path) -> None:
 
 
 def test_prepare_parallel_symlink_denied_raises_workdir_error(
-    workarea: Path, auto_ext_root: Path, monkeypatch: pytest.MonkeyPatch
+    workarea: Path, run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Simulate Windows winerror 1314 on os.symlink."""
 
@@ -259,7 +261,164 @@ def test_prepare_parallel_symlink_denied_raises_workdir_error(
     monkeypatch.setattr(os, "symlink", _denied)
 
     with pytest.raises(WorkdirError, match="Developer Mode"):
-        prepare_parallel_workdir(auto_ext_root, workarea, 1)
+        prepare_parallel_workdir(run_dir, workarea)
 
-    # Task dir must be cleaned up on failure.
-    assert not (auto_ext_root / "runs" / "task_1").exists()
+    # Work dir must be cleaned up on failure.
+    assert not (run_dir / "work").exists()
+
+
+# ---- workspace lock --------------------------------------------------------
+#
+# The Cadence workspace is shared and reusable: running one cell there twice
+# in sequence is correct. Only concurrent use is a problem, and that is what
+# these tests pin down -- the preflight no longer refuses same-workspace
+# tasks outright.
+
+
+def test_workspace_lock_creates_the_workspace_and_the_file(tmp_path: Path) -> None:
+    workspace = tmp_path / "QCI_PATH_amp2"
+    assert not workspace.exists()
+
+    path = acquire_workspace_lock(workspace, "20260821T143205Z_amp2-ext")
+
+    assert path == workspace / WORKSPACE_LOCK_NAME
+    assert path.is_file()
+    holder = read_workspace_lock(workspace)
+    assert holder is not None
+    assert holder.run_id == "20260821T143205Z_amp2-ext"
+    assert holder.pid == os.getpid()
+
+
+def test_workspace_lock_released_by_its_owner(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    acquire_workspace_lock(workspace, "run-a")
+    release_workspace_lock(workspace, "run-a")
+    assert not (workspace / WORKSPACE_LOCK_NAME).exists()
+    assert read_workspace_lock(workspace) is None
+
+
+def test_workspace_lock_context_manager_releases_on_exception(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    with pytest.raises(RuntimeError):
+        with workspace_lock(workspace, "run-a"):
+            raise RuntimeError("stage blew up")
+    assert not (workspace / WORKSPACE_LOCK_NAME).exists()
+
+
+def test_workspace_lock_sequential_reuse_is_fine(tmp_path: Path) -> None:
+    """Two recipes for one cell, one after the other. This is the case the
+    old ``_validate_task_outputs`` used to reject outright."""
+
+    workspace = tmp_path / "ws"
+    with workspace_lock(workspace, "run-a"):
+        pass
+    with workspace_lock(workspace, "run-b"):
+        holder = read_workspace_lock(workspace)
+        assert holder is not None
+        assert holder.run_id == "run-b"
+
+
+def test_workspace_lock_refuses_when_held_by_a_live_process(tmp_path: Path) -> None:
+    """The holder pid is this very process, so it is unmistakably alive."""
+
+    workspace = tmp_path / "ws"
+    acquire_workspace_lock(workspace, "20260821T143205Z_amp2-ext")
+
+    with pytest.raises(WorkdirError, match="in use by run 20260821T143205Z_amp2-ext"):
+        acquire_workspace_lock(workspace, "20260821T143210Z_amp2-ext")
+
+
+def test_workspace_lock_refusal_names_the_escape_hatch(tmp_path: Path) -> None:
+    """The message has to say how to get unstuck, or the user just deletes
+    the lock file and races anyway."""
+
+    workspace = tmp_path / "ws"
+    acquire_workspace_lock(workspace, "run-a")
+    with pytest.raises(WorkdirError) as excinfo:
+        acquire_workspace_lock(workspace, "run-b")
+    message = str(excinfo.value)
+    assert "{run_slug}" in message
+    assert "extraction_output_dir" in message
+
+
+def test_workspace_lock_steals_a_lock_from_a_dead_process(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A run killed with SIGKILL must not lock its cell out forever."""
+
+    import json
+    import logging
+    import socket
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    # PID 0 can never be a live user process, and _process_alive rejects it
+    # without touching the OS.
+    (workspace / WORKSPACE_LOCK_NAME).write_text(
+        json.dumps({"run_id": "dead-run", "pid": 0, "host": socket.gethostname()}),
+        encoding="utf-8",
+    )
+
+    caplog.set_level(logging.WARNING, logger="auto_ext.core.workdir")
+    acquire_workspace_lock(workspace, "live-run")
+
+    holder = read_workspace_lock(workspace)
+    assert holder is not None
+    assert holder.run_id == "live-run"
+    assert any("dead-run" in m for m in caplog.messages)
+
+
+def test_workspace_lock_refuses_a_lock_from_another_host(tmp_path: Path) -> None:
+    """Liveness is unknowable across hosts, so the conservative answer is no."""
+
+    import json
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / WORKSPACE_LOCK_NAME).write_text(
+        json.dumps({"run_id": "remote-run", "pid": 4321, "host": "some-other-box"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WorkdirError, match="some-other-box"):
+        acquire_workspace_lock(workspace, "local-run")
+
+
+def test_workspace_lock_treats_a_corrupt_lock_as_stale(tmp_path: Path) -> None:
+    """A lock nobody can parse is a lock nobody could ever clear."""
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / WORKSPACE_LOCK_NAME).write_text("{not json", encoding="utf-8")
+
+    assert read_workspace_lock(workspace) is None
+    acquire_workspace_lock(workspace, "run-a")
+    holder = read_workspace_lock(workspace)
+    assert holder is not None
+    assert holder.run_id == "run-a"
+
+
+def test_workspace_lock_release_leaves_someone_elses_lock_alone(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """We were declared dead and another run took over; releasing must not
+    hand the workspace to a third run mid-Calibre."""
+
+    import json
+    import logging
+    import socket
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / WORKSPACE_LOCK_NAME).write_text(
+        json.dumps(
+            {"run_id": "successor", "pid": os.getpid(), "host": socket.gethostname()}
+        ),
+        encoding="utf-8",
+    )
+
+    caplog.set_level(logging.WARNING, logger="auto_ext.core.workdir")
+    release_workspace_lock(workspace, "predecessor")
+
+    assert (workspace / WORKSPACE_LOCK_NAME).is_file()
+    assert any("successor" in m for m in caplog.messages)

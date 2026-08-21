@@ -11,10 +11,18 @@ Does not implement the Protocol via inheritance — PyQt5's QObject
 metaclass clashes with ``typing.Protocol``. Structural conformance is
 enough for the runner, which only does duck-typing on the method
 names.
+
+Implements both halves of the reporter contract: the original
+:class:`~auto_ext.core.progress.ProgressReporter` events and the run-layer
+:class:`~auto_ext.core.progress.RunAwareReporter` ones. The latter are what
+a GUI now needs to find a log file at all: logs live under
+``runs/<run_id>/logs/`` and the run id is not derivable from a task id, so
+the directory has to be handed over rather than recomputed.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from PyQt5.QtCore import QObject, pyqtSignal
@@ -35,6 +43,12 @@ class QtProgressReporter(QObject):
     - ``stage_finished(str task_id, str stage, str status, object error)``
     - ``task_finished(str task_id, str status)``
     - ``run_finished(object summary)``
+    - ``run_dir_ready(str task_id, object run_dir)`` — a :class:`pathlib.Path`,
+      emitted as soon as the run directory is claimed, i.e. before the first
+      stage produces anything. This is the signal a log viewer needs: stage
+      logs are at ``<run_dir>/logs/<stage>.log``.
+    - ``task_record(str task_id, object record)`` — the finalized
+      :class:`~auto_ext.model.run.RunRecord` for that task.
 
     ``status`` is emitted as a plain string (``str(StageStatus.PASSED)``
     etc.) to keep slot signatures Qt-introspectable.
@@ -46,6 +60,8 @@ class QtProgressReporter(QObject):
     stage_finished = pyqtSignal(str, str, str, object)
     task_finished = pyqtSignal(str, str)
     run_finished = pyqtSignal(object)
+    run_dir_ready = pyqtSignal(str, object)
+    task_record = pyqtSignal(str, object)
 
     def on_run_start(self, total_tasks: int, stages: list[str]) -> None:
         self.run_started.emit(total_tasks, list(stages))
@@ -70,3 +86,9 @@ class QtProgressReporter(QObject):
 
     def on_run_end(self, summary: Any) -> None:
         self.run_finished.emit(summary)
+
+    def on_run_dir(self, task_id: str, run_dir: Path) -> None:
+        self.run_dir_ready.emit(task_id, run_dir)
+
+    def on_task_record(self, task_id: str, record: Any) -> None:
+        self.task_record.emit(task_id, record)

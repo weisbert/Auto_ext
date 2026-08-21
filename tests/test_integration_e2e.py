@@ -215,10 +215,14 @@ def test_e2e_dry_run_renders_templates_to_disk(
     assert run_result.exit_code == 0, run_result.output
     assert "1/1 tasks passed" in run_result.output
 
-    rendered = (
-        run_root / "runs"
-        / "task_INV_LIB__INV1__layout__schematic" / "rendered"
+    # One task, one run directory named ``<UTC-stamp>_<cell>-<recipe>``.
+    run_dirs = sorted(
+        d
+        for d in (run_root / "runs").iterdir()
+        if d.is_dir() and d.name not in ("batches", "latest")
     )
+    assert len(run_dirs) == 1, [d.name for d in run_dirs]
+    rendered = run_dirs[0] / "rendered"
     qci = rendered / "imported.qci"
     env_out = rendered / "imported.env"
     cmd = rendered / "imported.cmd"

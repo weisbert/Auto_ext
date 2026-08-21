@@ -17,9 +17,22 @@ Lifecycle per task stage (orchestrated by :mod:`auto_ext.core.runner`):
    subprocess. Default impl tees combined stdout/stderr to ``log_path``
    via :func:`run_subprocess`; tools only override for special invocation
    patterns (license wait, retries, etc.).
-4. ``parse_result(result)`` post-processes outputs. Default returns the
-   result unchanged. ``CalibreTool`` overrides to run the strict LVS
-   check from :mod:`auto_ext.core.checks`.
+4. ``parse_result(result)`` post-processes outputs: it is where each tool
+   records what it produced. Every tool overrides it to fill
+   :attr:`ToolResult.artifact_paths` / :attr:`ToolResult.cellviews`, and
+   ``CalibreTool`` additionally runs the strict LVS check from
+   :mod:`auto_ext.core.checks`.
+
+Two kinds of artifact
+---------------------
+Not every EDA output is a file. Quantus' ``output_db -type extracted_view``
+and Jivaro's ``<outputView>`` write a *cellview* into the DFII library --
+addressed as a ``library / cell / view`` triple, with no path on disk that
+means anything to ``open()``. Conflating the two would put a fabricated
+path into the run record, so :class:`ToolResult` keeps them apart:
+:attr:`~ToolResult.artifact_paths` for real files and
+:attr:`~ToolResult.cellviews` for :class:`CellViewRef` triples. See
+``docs/refactor/05-catalog-critique.md`` item A5.
 """
 
 from __future__ import annotations
@@ -29,7 +42,8 @@ import shutil
 import subprocess
 import threading
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,14 +61,150 @@ CANCEL_GRACE_SECONDS: float = 10.0
 _DRAIN_POLL_SECONDS: float = 0.5
 
 
+#: ``diagnostics`` key under which :meth:`ToolResult.with_artifacts` files
+#: the declared-but-absent outputs. :func:`auto_ext.core.failure_class.
+#: classify_tool_result` reads it as the "tool produced nothing" signal.
+MISSING_ARTIFACTS_KEY = "missing_artifacts"
+
+
+@dataclass(frozen=True)
+class CellViewRef:
+    """A DFII cellview -- ``library / cell / view`` -- which is not a file.
+
+    Quantus' extracted view and Jivaro's reduced view land inside the
+    Cadence library, not on a path. Recording one of these as a filesystem
+    path would invent a location that does not exist; recording it as a
+    triple keeps the run record honest and still lets the GUI say exactly
+    what was written.
+    """
+
+    library: str
+    cell: str
+    view: str
+
+    @property
+    def key(self) -> str:
+        """``"lib/cell/view"`` -- for display and comparison, never for ``open()``."""
+
+        return f"{self.library}/{self.cell}/{self.view}"
+
+    def as_dict(self) -> dict[str, str]:
+        """JSON-safe form, for ``StageRecord.details``."""
+
+        return {"library": self.library, "cell": self.cell, "view": self.view}
+
+
 @dataclass
 class ToolResult:
     """Structured outcome of a single tool invocation."""
 
     success: bool
+    #: Subprocess exit code, or ``None`` when no process ran (dry run,
+    #: render-only, synthetic result). ``127`` is
+    #: :func:`run_subprocess`'s "executable not found" convention.
+    exit_code: int | None = None
     stdout_path: Path | None = None
+    #: Absolute paths of real files this invocation produced. Only paths
+    #: that exist on disk get in here (see :meth:`with_artifacts`).
     artifact_paths: list[Path] = field(default_factory=list)
+    #: DFII cellviews this invocation wrote. Deliberately separate from
+    #: :attr:`artifact_paths` -- these have no filesystem location.
+    cellviews: list[CellViewRef] = field(default_factory=list)
     diagnostics: dict[str, Any] = field(default_factory=dict)
+
+    def with_artifacts(
+        self,
+        paths: Iterable[Path | str] = (),
+        *,
+        cellviews: Iterable[CellViewRef] = (),
+        require_exists: bool = True,
+        missing_key: str = MISSING_ARTIFACTS_KEY,
+    ) -> ToolResult:
+        """Return a copy with ``paths`` / ``cellviews`` recorded.
+
+        Order-preserving and de-duplicating, so calling this twice with
+        overlapping declarations does not double-list anything.
+
+        With ``require_exists`` (the default), a declared path that is not
+        on disk is *not* added to :attr:`artifact_paths` -- it is appended
+        to ``diagnostics[missing_key]`` instead. A run record whose
+        artifact list points at files that were never written is worse than
+        one that admits the output is missing, and the missing list is
+        exactly the evidence
+        :func:`auto_ext.core.failure_class.classify_failure` needs for its
+        "declared output never appeared" rule.
+
+        Uses :func:`dataclasses.replace`, so fields added later are carried
+        over without touching this method.
+        """
+
+        kept = list(self.artifact_paths)
+        seen = {str(p) for p in kept}
+        missing: list[str] = []
+
+        for raw in paths:
+            path = Path(raw)
+            key = str(path)
+            if key in seen:
+                continue
+            if require_exists and not path.exists():
+                if key not in missing:
+                    missing.append(key)
+                continue
+            seen.add(key)
+            kept.append(path)
+
+        views = list(self.cellviews)
+        for ref in cellviews:
+            if ref not in views:
+                views.append(ref)
+
+        diagnostics = dict(self.diagnostics)
+        if missing:
+            previous = diagnostics.get(missing_key)
+            merged = list(previous) if isinstance(previous, list) else []
+            merged.extend(m for m in missing if m not in merged)
+            diagnostics[missing_key] = merged
+
+        return replace(
+            self,
+            artifact_paths=kept,
+            cellviews=views,
+            diagnostics=diagnostics,
+        )
+
+
+def argv_value(argv: Sequence[str], flag: str) -> str | None:
+    """Return the token following ``flag`` in ``argv``, or ``None``.
+
+    Every tool's rendered input file is reachable from its own argv
+    (``-runset`` / ``-cmd`` / ``-xml``), which is how ``parse_result`` --
+    whose only input is the :class:`ToolResult` -- finds the file it needs
+    to read the tool's declared outputs out of.
+    """
+
+    values = list(argv)
+    try:
+        index = values.index(flag)
+    except ValueError:
+        return None
+    if index + 1 >= len(values):
+        return None
+    return values[index + 1]
+
+
+def argv_path(result: ToolResult, flag: str) -> Path | None:
+    """The ``flag`` argument of ``result``'s recorded argv, as a Path.
+
+    Returns ``None`` when the result carries no argv, the flag is absent,
+    or nothing follows it.
+    """
+
+    argv = result.diagnostics.get("argv")
+    if not isinstance(argv, (list, tuple)):
+        return None
+    value = argv_value([str(a) for a in argv], flag)
+    return None if value is None else Path(value)
 
 
 def run_subprocess(
@@ -265,10 +415,23 @@ class Tool(ABC):
         )
         return ToolResult(
             success=(exit_code == 0),
+            exit_code=exit_code,
             stdout_path=log_path,
+            # ``exit_code`` is duplicated into diagnostics on purpose: it
+            # has been read from there since before the field existed, and
+            # ``argv`` next to it is what ``parse_result`` uses to find the
+            # rendered input file.
             diagnostics={"exit_code": exit_code, "argv": list(argv)},
         )
 
     def parse_result(self, result: ToolResult) -> ToolResult:
-        """Post-process ``result``. Default: identity. ``CalibreTool`` overrides."""
+        """Post-process ``result``. Default: identity.
+
+        Every concrete tool overrides this to record what it produced.
+        Note the signature: the runner hands over the :class:`ToolResult`
+        and nothing else, so an override that needs to know where its
+        outputs went reads them out of the rendered input file named in
+        ``result.diagnostics["argv"]`` (see :func:`argv_path`) rather than
+        from the render context.
+        """
         return result

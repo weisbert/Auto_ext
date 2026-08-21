@@ -5,6 +5,12 @@ static fixtures dir, a temp workarea populated with ``cds.lib`` + ``.cdsinit``,
 a temp Auto_ext root, an override dict, a clean-env helper, and a
 session-scoped probe that reports whether this host can create symlinks
 (Linux always can; Windows only with Developer Mode or Admin).
+
+S1 adds the Run fixtures at the bottom of this file: ``runs_root``,
+``frozen_clock``, ``run_dir`` and the ``make_run_record`` factory. A run's
+identity is a UTC timestamp, so without a controllable clock no test can
+assert a directory name; the clock is injected by monkeypatching the
+``utcnow`` module attribute, never :class:`datetime.datetime` itself.
 """
 
 from __future__ import annotations
@@ -12,13 +18,15 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 if TYPE_CHECKING:
     from auto_ext.core.config import ProjectConfig
+    from auto_ext.model.run import RunRecord, StageRecord
 
 
 @pytest.fixture(scope="session")
@@ -225,3 +233,171 @@ def project_config(fixtures_dir: Path) -> "ProjectConfig":
     from auto_ext.core.config import load_project
 
     return load_project(fixtures_dir / "project_minimal.yaml")
+
+
+# ---- Run fixtures (S1) -------------------------------------------------------
+
+#: Default instant for :class:`FrozenClock`. Arbitrary but fixed, and chosen
+#: to render as ``20260821T143205Z`` so expected directory names can be
+#: written out literally in tests.
+FROZEN_START = datetime(2026, 8, 21, 14, 32, 5, tzinfo=timezone.utc)
+
+
+class FrozenClock:
+    """A controllable stand-in for ``auto_ext.model.run.utcnow``.
+
+    Callable, so it can be dropped straight over the ``utcnow`` module
+    attribute. Time only moves when a test moves it::
+
+        run_a = allocate_run_dir(runs_root, "amp2-ext")
+        frozen_clock.tick(1)                 # advance one second
+        run_b = allocate_run_dir(runs_root, "amp2-ext")
+    """
+
+    def __init__(self, start: datetime = FROZEN_START) -> None:
+        self._now = start
+
+    def __call__(self) -> datetime:
+        return self._now
+
+    def now(self) -> datetime:
+        """Current frozen instant (UTC-aware)."""
+
+        return self._now
+
+    def tick(self, seconds: float = 1.0) -> datetime:
+        """Advance the clock and return the new instant."""
+
+        self._now = self._now + timedelta(seconds=seconds)
+        return self._now
+
+    def set(self, moment: datetime) -> datetime:
+        """Jump the clock to ``moment`` and return it."""
+
+        self._now = moment
+        return self._now
+
+    def stamp(self) -> str:
+        """The current instant formatted the way a run directory names it."""
+
+        from auto_ext.model.run import RUN_TIMESTAMP_FORMAT
+
+        return self._now.strftime(RUN_TIMESTAMP_FORMAT)
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> FrozenClock:
+    """Freeze the run layer's clock at :data:`FROZEN_START`.
+
+    Patches the ``utcnow`` attribute of every module that reads it, so both
+    ``allocate_run_dir`` and ``annotations.updated_at`` follow the same
+    controllable time.
+    """
+
+    clock = FrozenClock()
+    monkeypatch.setattr("auto_ext.model.run.utcnow", clock)
+    monkeypatch.setattr("auto_ext.core.run_store.utcnow", clock, raising=False)
+    return clock
+
+
+@pytest.fixture
+def runs_root(tmp_path: Path) -> Path:
+    """An empty ``runs/`` root, the parent of every run directory."""
+
+    root = tmp_path / "runs"
+    root.mkdir()
+    return root
+
+
+@pytest.fixture
+def run_dir(runs_root: Path, frozen_clock: FrozenClock) -> Path:
+    """One allocated run directory (with ``rendered/``, ``logs/``, ``results/``).
+
+    Named ``<FROZEN_START stamp>_amp2-ext``; the clock is not advanced, so a
+    test that allocates another run without ticking exercises the same-second
+    collision path.
+    """
+
+    from auto_ext.model.run import allocate_run_dir
+
+    return allocate_run_dir(runs_root, "amp2-ext")
+
+
+@pytest.fixture
+def make_run_record(frozen_clock: FrozenClock) -> Any:
+    """Factory for a valid :class:`~auto_ext.model.run.RunRecord`.
+
+    Every argument is optional; unnamed extras are forwarded to the model, so
+    a test can set anything the contract exposes::
+
+        rec = make_run_record(cell="amp2", overall=TaskStatus.FAILED)
+        rec = make_run_record(run_dir=some_dir, stages=[stage], results=res)
+
+    ``run_id`` / ``slug`` are derived from ``run_dir`` when given, otherwise
+    from the frozen clock and the DUT + recipe, so the record always satisfies
+    the ``<timestamp>_<slug>`` identity rule.
+    """
+
+    from auto_ext.model.run import (
+        RUN_TIMESTAMP_FORMAT,
+        DutSnapshot,
+        RecipeSnapshot,
+        RunRecord,
+        TaskStatus,
+        make_run_slug,
+        parse_run_id,
+    )
+
+    def _make(
+        *,
+        library: str = "WB_PLL_DCO",
+        cell: str = "amp2",
+        layout_view: str = "layout",
+        source_view: str = "schematic",
+        ground_net: str = "vss",
+        out_file: str | None = "av_extracted",
+        recipe_id: str = "ext",
+        recipe_name: str | None = None,
+        recipe: Any = None,
+        dut: Any = None,
+        created_at: datetime | None = None,
+        run_dir: Path | None = None,
+        run_id: str | None = None,
+        slug: str | None = None,
+        overall: Any = TaskStatus.PASSED,
+        stages: "list[StageRecord] | None" = None,
+        workspace_dir: str | None = None,
+        **fields: Any,
+    ) -> "RunRecord":
+        dut_obj = dut or DutSnapshot(
+            library=library,
+            cell=cell,
+            layout_view=layout_view,
+            source_view=source_view,
+            ground_net=ground_net,
+            out_file=out_file,
+        )
+        recipe_obj = recipe or RecipeSnapshot(recipe_id=recipe_id, name=recipe_name)
+        created = created_at or frozen_clock.now()
+
+        if run_dir is not None:
+            run_id = Path(run_dir).name
+            fields.setdefault("run_dir", str(run_dir))
+        if run_id is None:
+            stamp = created.astimezone(timezone.utc).strftime(RUN_TIMESTAMP_FORMAT)
+            run_id = f"{stamp}_{slug or make_run_slug(dut_obj, recipe_obj)}"
+        _, derived_slug = parse_run_id(run_id)
+
+        return RunRecord(
+            run_id=run_id,
+            slug=derived_slug,
+            created_at=created,
+            overall=overall,
+            dut=dut_obj,
+            recipe=recipe_obj,
+            stages=list(stages or []),
+            workspace_dir=workspace_dir or f"/work/cds/verify/QCI_PATH_{dut_obj.cell}",
+            **fields,
+        )
+
+    return _make

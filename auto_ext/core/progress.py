@@ -13,6 +13,14 @@ Concrete reporter implementations live outside ``core/``:
 - :mod:`auto_ext.ui.qt_reporter` — ``QtProgressReporter`` that fans events
   out as Qt signals onto the GUI event loop.
 
+The run layer added a second, **optional** half of the contract:
+:class:`RunAwareReporter`. It is a separate protocol rather than two more
+methods on :class:`ProgressReporter` on purpose — ``ProgressReporter`` is
+``runtime_checkable``, so growing it would retroactively invalidate every
+existing implementation under ``isinstance``. The runner probes for the
+extra methods and skips them when absent, so a reporter written before the
+run layer keeps working unchanged.
+
 Kept Qt-free and Rich-free on purpose — ``core/`` must stay importable
 on headless boxes with neither installed.
 """
@@ -24,7 +32,10 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from auto_ext.core.runner import RunSummary
+    from auto_ext.model.run import RunRecord
 
 
 class StageStatus(StrEnum):
@@ -80,8 +91,39 @@ class ProgressReporter(Protocol):
     def on_run_end(self, summary: RunSummary) -> None: ...
 
 
+@runtime_checkable
+class RunAwareReporter(Protocol):
+    """Optional extra events carrying the run layer's identity and record.
+
+    Implement this *alongside* :class:`ProgressReporter` to receive the two
+    things the old event stream could not express:
+
+    - where a task's output actually landed (``on_run_dir``) — with runs
+      keyed by ``runs/<run_id>/`` instead of ``logs/task_<id>/``, a task id
+      is no longer enough to locate a log file, and the receiver must be
+      told the directory rather than recomputing it;
+    - the finalized :class:`~auto_ext.model.run.RunRecord` (``on_task_record``),
+      which carries per-stage timings, argv, exit codes, artifacts and the
+      typed LVS outcome.
+
+    The runner calls these only when the reporter defines them, so this
+    protocol is purely additive: a plain :class:`ProgressReporter` still runs.
+    """
+
+    def on_run_dir(self, task_id: str, run_dir: Path) -> None:
+        """Called once per task, right after its run directory is claimed."""
+        ...
+
+    def on_task_record(self, task_id: str, record: RunRecord) -> None:
+        """Called once per task, after ``run.json`` has been finalized."""
+        ...
+
+
 class NullReporter:
-    """No-op :class:`ProgressReporter`. Default when the caller passes nothing."""
+    """No-op reporter implementing both halves of the contract.
+
+    The default when the caller passes nothing.
+    """
 
     def on_run_start(self, total_tasks: int, stages: list[str]) -> None:
         pass
@@ -105,6 +147,12 @@ class NullReporter:
         pass
 
     def on_run_end(self, summary: RunSummary) -> None:
+        pass
+
+    def on_run_dir(self, task_id: str, run_dir: Path) -> None:
+        pass
+
+    def on_task_record(self, task_id: str, record: RunRecord) -> None:
         pass
 
 
