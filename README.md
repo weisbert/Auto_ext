@@ -11,8 +11,10 @@ See `docs/` (future) and the implementation plan for phase-by-phase scope.
 ```
 Auto_ext/
 ├── auto_ext/        # Python package (core/ tools/ ui/ cli.py migrate.py)
-├── config/          # project.yaml + tasks.yaml live here
-├── templates/       # parameterized .j2 + manifest.yaml per template
+├── config/          # workspace.yaml + cells.yaml + profiles/
+├── recipes/         # one portable extraction configuration per file
+├── templates/       # the catalog's .j2 files (see auto_ext/catalog/)
+├── examples/legacy/ # the v1 config pair, kept as migration input
 ├── scripts/         # download_wheels.py (Windows) + install_offline.sh (Linux)
 ├── tests/           # unit + integration tests (with mocks/)
 ├── pyproject.toml
