@@ -131,3 +131,80 @@
 3. 勾选清单 → 对照 `docs/refactor/catalog-*.json` 改默认值
 
 **都是改数据，不需要改代码。** 这是这次重构刻意做的隔离。
+
+---
+
+# 现在怎么跑（老的 OFFICE_QUICKSTART 已作废）
+
+`docs/OFFICE_QUICKSTART.md` 等四份文档描述的是重构前的架构，已加作废横幅。
+下面是当前的命令。
+
+## 0. 分支
+
+```bash
+cd <deploy>/Auto_ext
+git checkout refactor/recipe-and-run     # 全部改动都在这个分支，main 一个字没动
+```
+
+## 1. 先体检 —— 它会告诉你能不能跑
+
+```bash
+./run.sh check-env --config-dir config
+```
+
+每条不通过的会写清楚**怎么修**。这一步替代了以前肉眼看那张环境变量表。
+
+## 2. 一次 dry-run
+
+```bash
+./run.sh run --config-dir config --recipe rc-typical-55c --profile default --dry-run
+```
+
+体检有硬失败会拒绝启动。确实想先跑起来看渲染结果，加 `--no-health-check`。
+
+## 3. 看结果
+
+```bash
+./run.sh runs list
+./run.sh runs show <run_id>
+```
+
+每次运行都在 `runs/<UTC时间戳>_<slug>/` 下，**永不覆盖**：
+`run.json`（含配方快照）、`rendered/`（这次真正喂给工具的文件）、`logs/`、`results/`。
+
+## 4. 抓失败日志样本（本文件第一优先第 1 条要的就是它）
+
+失败后日志就在 `runs/<run_id>/logs/<stage>.log`，开头带 argv 和 cwd，自描述。
+**带出服务器前记得擦掉工号和 cell 名**，填进
+`auto_ext/core/failure_signatures.yaml`（文件头有格式说明）。
+
+## 5. GUI
+
+```bash
+./run.sh gui --config-dir config
+```
+
+左侧三个界面：Cells（主画面）/ Recipes（配方）/ Runs（历史）。
+Setup 不是 tab —— 是标题栏那个 ✓/✗ 徽章，点开是抽屉。
+
+## 6. 想把自己手上的 .cmd / .qci 变成配方
+
+```bash
+./run.sh recipe import <你的文件> --as my-recipe        # 先看报告，不写盘
+./run.sh recipe import <你的文件> --as my-recipe --write
+```
+
+catalog 认识的值进配方字段，不认识的差异存成手工修改（patch）。
+报告第三段会告诉你哪些值没进配方、为什么。
+
+## 7. 老配置怎么办
+
+`examples/legacy/` 里留着重构前的 `project.yaml` + `tasks.yaml`。
+你在办公室那份如果还是老格式，加载会失败并提示跑：
+
+```bash
+./run.sh migrate --config-dir <老config目录> --out-root <目标>          # 先看报告
+./run.sh migrate --config-dir <老config目录> --out-root <目标> --write
+```
+
+老文件原样保留，迁移是新写一套，随时能退回去。

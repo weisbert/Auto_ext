@@ -1,3 +1,16 @@
+> **STALE — describes the pre-2026-08-22 architecture.**
+>
+> This document still assumes `project.yaml` + `tasks.yaml`, per-template
+> `*.manifest.yaml` knobs, and the five-tab GUI. All three were removed on
+> branch `refactor/recipe-and-run`. Nothing below is safe to follow as-is.
+>
+> Current: [`docs/refactor/DECISIONS.md`](refactor/DECISIONS.md) for what changed and why,
+> [`docs/refactor/OFFICE_TODO.md`](refactor/OFFICE_TODO.md) for what to do at the office
+> (it carries the current commands), and `auto-ext --help` for the CLI.
+>
+> Kept unrewritten on purpose: rewriting it before the office visit would mean
+> guessing at the parts only a real Cadence run can settle.
+
 # Office Linux Quickstart
 
 上班后把 Auto_ext 在真 Cadence 环境下跑通的最短路径。从**不熟**开始，一步一步。

@@ -1,3 +1,16 @@
+> **STALE — describes the pre-2026-08-22 architecture.**
+>
+> This document still assumes `project.yaml` + `tasks.yaml`, per-template
+> `*.manifest.yaml` knobs, and the five-tab GUI. All three were removed on
+> branch `refactor/recipe-and-run`. Nothing below is safe to follow as-is.
+>
+> Current: [`docs/refactor/DECISIONS.md`](refactor/DECISIONS.md) for what changed and why,
+> [`docs/refactor/OFFICE_TODO.md`](refactor/OFFICE_TODO.md) for what to do at the office
+> (it carries the current commands), and `auto-ext --help` for the CLI.
+>
+> Kept unrewritten on purpose: rewriting it before the office visit would mean
+> guessing at the parts only a real Cadence run can settle.
+
 # Auto_ext GUI 使用说明
 
 本文档对应当前 main（Phase 5.6.5 + 5.7 + 5.8 + dspf_out_path）的 GUI 状态：5 个 tab（Project / Templates / Tasks / Run / Log）全部可用，外加 5.6 的 Diff-mode 模板编辑器、5.6.2 的 TemplateDiffViewer 只读对比、5.6/5.7 的 PresetPicker / KnobEditor / InitWizard、5.8 的单文件 TemplateGenerator dialog，以及 Project/Tasks 两个 tab 上新增的 DspfOutPathCombo。
