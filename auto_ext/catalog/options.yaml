@@ -328,7 +328,7 @@ options:
     choices: [auCdl, spectre, hspiceD]
     choices_confidence: guess
     default: auCdl
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:4
     lands_in:
@@ -348,7 +348,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:5
     lands_in:
@@ -367,7 +367,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:6
     lands_in:
@@ -385,7 +385,7 @@ options:
     type: list
     choices_confidence: likely
     default: [auCdl, schematic]
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:7
     lands_in:
@@ -401,7 +401,7 @@ options:
     type: list
     choices_confidence: likely
     default: [auCdl]
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:8
     lands_in:
@@ -457,7 +457,7 @@ options:
     choices_confidence: guess
     unit: ohm
     default: 2000.0
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:12
     question: >-
@@ -477,7 +477,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:13
     lands_in:
@@ -491,7 +491,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:14
     lands_in:
@@ -505,7 +505,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:15
     lands_in:
@@ -519,7 +519,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:16
     lands_in:
@@ -533,7 +533,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:17
     lands_in:
@@ -547,7 +547,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:18
     lands_in:
@@ -561,7 +561,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:19
     lands_in:
@@ -575,7 +575,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:20
     lands_in:
@@ -589,7 +589,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:21
     lands_in:
@@ -603,7 +603,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:22
     notes: >-
@@ -622,7 +622,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:23
     lands_in:
@@ -639,7 +639,7 @@ options:
     choices: [meter, micron]
     choices_confidence: guess
     default: meter
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:24
     question: Does your Calibre deck expect meter or micron here?
@@ -660,7 +660,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:25
     lands_in:
@@ -691,7 +691,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:27
     lands_in:
@@ -707,7 +707,7 @@ options:
     type: float
     choices_confidence: guess
     default: 0.0
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:28
     notes: >-
@@ -725,7 +725,7 @@ options:
     type: str
     choices_confidence: likely
     default: ""
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:29
     question: >-
@@ -745,7 +745,7 @@ options:
     type: str
     choices_confidence: likely
     default: ""
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:30
     notes: >-
@@ -762,7 +762,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:31
     lands_in:
@@ -776,7 +776,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:32
     lands_in:
@@ -804,7 +804,7 @@ options:
     type: path
     choices_confidence: certain
     default: $calibre_source_added_place
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/si/default.env.j2:34
     question: >-
@@ -1046,7 +1046,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:14
     question: What do AG / RC / RE / RG mean, and do you want filtering on?
@@ -1061,7 +1061,7 @@ options:
     type: str
     choices_confidence: guess
     default: AG RC RE RG
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:15
     question: What do AG / RC / RE / RG mean?
@@ -1079,7 +1079,7 @@ options:
     type: str
     choices_confidence: guess
     default: AG RC RE RG
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:16
     notes: Same value as the layout side today, but a separate setting in the runset.
@@ -1094,7 +1094,7 @@ options:
     type: list
     choices_confidence: certain
     default: [AHVDD, AHVDDB, AHVDDG, AHVDDR, AHVDDWELL, AVDD, AVDDB, AVDDBG, AVDDG, AVDDR, AVDWELL, DHVDD, DVDD, HVDDWELL, TACVDD, TAVD33, TAVD33PST, TAVDD, TAVDDPST, TVDD, VD33, VDD, VDD5V, VDDESD, VDDG, VDDM, VDDPST, VDDSA, VDWELL]
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:17
     notes: >-
@@ -1112,7 +1112,7 @@ options:
     type: list
     choices_confidence: certain
     default: [AGND, AHVSS, AHVSSB, AHVSSG, AHVSSR, AHVSSUB, AVSS, AVSSB, AVSSBG, AVSSG, AVSSR, AVSSUB, DHVSS, DVSS, GND, HVSSUB, TACVSS, TAVSS, TAVSSPST, TVSS, VS33, VSS, VSSESD, VSSG, VSSM, VSSPST, VSSUB]
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:18
     lands_in:
@@ -1156,7 +1156,7 @@ options:
     choices: [NONE, ALL, GATES]
     choices_confidence: guess
     default: NONE
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:19
     notes: Only NONE observed; ALL and GATES are candidates from Calibre folklore, unverified.
@@ -1226,7 +1226,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:23
     lands_in:
@@ -1243,7 +1243,7 @@ options:
     type: str
     choices_confidence: guess
     default: S
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:24
     question: Which extra report sections do you normally need?
@@ -1300,7 +1300,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:26
     lands_in:
@@ -1316,7 +1316,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:27
     question: >-
@@ -1655,7 +1655,7 @@ options:
     range_verified: false
     choices_confidence: likely
     default: 1.0
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:8
     lands_in:
@@ -1673,7 +1673,7 @@ options:
     choices: [all, specified_nets, selected_nets]
     choices_confidence: guess
     default: all
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:11
     notes: Only "all" observed; the other two spellings are unverified.
@@ -1690,7 +1690,7 @@ options:
     choices: [rc_coupled, rc_decoupled, r_only, c_only]
     choices_confidence: guess
     default: rc_coupled
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:12
     question: Which extraction types do you actually use, and what are the exact spellings your QRC accepts?
@@ -1714,7 +1714,7 @@ options:
     type: str
     choices_confidence: guess
     default: auto
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:14
     question: Can these take a number as well as "auto"?
@@ -1734,7 +1734,7 @@ options:
     type: str
     choices_confidence: guess
     default: infinite
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:15
     question: What do you set this to for long RF transmission lines?
@@ -1753,7 +1753,7 @@ options:
     choices: [MICRONS, MILS, MILLIMETERS, DBU]
     choices_confidence: guess
     default: MICRONS
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:16
     notes: >-
@@ -1771,7 +1771,7 @@ options:
     type: str
     choices_confidence: guess
     default: auto
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:17
     lands_in:
@@ -1787,7 +1787,7 @@ options:
     type: str
     choices_confidence: certain
     default: preserveCellList.txt
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:18
     notes: >-
@@ -1807,7 +1807,7 @@ options:
     type: path
     choices_confidence: certain
     default: null
-    currently: jinja_var
+    currently: config_field
     observed: true
     source_ref: examples/legacy/config/project.yaml:35
     lands_in:
@@ -1819,6 +1819,12 @@ options:
       the LVS deck (an extra QCI_deck) and its version segment can differ, so
       no "|parent" trick derives it -- the reason project.yaml carries that
       apologetic comment about there being no standard env-var convention.
+      The value still reaches all three sites below, but no longer as its own
+      [[var]]: each of them writes one assembled path (pdk.qrc_query_cmd,
+      pdk.qrc_preserve_cell_list), so the directory arrives folded into
+      another row's variable. Same state as layer_map -- bound in the flat
+      context, referenced by no template -- which is what config_field
+      records.
     why: Where this PDK keeps its QRC deck. Pure process fact.
 
   - key: qrc_query_cmd_name
@@ -1828,7 +1834,7 @@ options:
     type: str
     choices_confidence: certain
     default: query_cmd
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/calibre/calibre_lvs.qci.j2:26
     lands_in:
@@ -1846,7 +1852,7 @@ options:
     choices: [SCHEMATIC, LAYOUT]
     choices_confidence: guess
     default: SCHEMATIC
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:19
     lands_in:
@@ -1864,7 +1870,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:21
     lands_in:
@@ -1880,7 +1886,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:22
     lands_in:
@@ -1955,7 +1961,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:28
     lands_in:
@@ -1987,7 +1993,7 @@ options:
     type: bool
     choices_confidence: certain
     default: true
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:30
     lands_in:
@@ -2153,7 +2159,7 @@ options:
     type: str
     choices_confidence: guess
     default: "/"
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:35
     notes: >-
@@ -2173,7 +2179,7 @@ options:
     choices: [none, virtual, actual]
     choices_confidence: guess
     default: virtual
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:39
     question: Should the two flows really treat metal fill differently?
@@ -2219,7 +2225,7 @@ options:
     type: str
     choices_confidence: likely
     default: pcapacitor
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:42
     question: Are these the device names in your PDK? Must both tools agree?
@@ -2242,7 +2248,7 @@ options:
     type: str
     choices_confidence: likely
     default: c
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:43
     lands_in:
@@ -2256,7 +2262,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:44
     lands_in:
@@ -2270,7 +2276,7 @@ options:
     type: str
     choices_confidence: likely
     default: "@"
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:45
     lands_in:
@@ -2308,7 +2314,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:48
     lands_in:
@@ -2324,7 +2330,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:49
     lands_in:
@@ -2339,7 +2345,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:50
     lands_in:
@@ -2355,7 +2361,7 @@ options:
     choices: ["true", "false", comment]
     choices_confidence: guess
     default: comment
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:51
     question: What does "comment" mean in your post-layout sim, and when is each of the three used?
@@ -2375,7 +2381,7 @@ options:
     type: str
     choices_confidence: likely
     default: presistor
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:52
     notes: Half of the parasitic-device contract; see cap_component.
@@ -2390,7 +2396,7 @@ options:
     type: str
     choices_confidence: likely
     default: r
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:53
     lands_in:
@@ -2422,7 +2428,7 @@ options:
     choices: [extended, standard]
     choices_confidence: guess
     default: extended
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:42
     lands_in:
@@ -2436,7 +2442,7 @@ options:
     type: str
     choices_confidence: likely
     default: "[]"
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:44
     lands_in:
@@ -2450,7 +2456,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:45
     lands_in:
@@ -2464,7 +2470,7 @@ options:
     type: str
     choices_confidence: guess
     default: "/"
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:46
     lands_in:
@@ -2479,7 +2485,7 @@ options:
     choices: [CANONICAL_RES, PARASITIC_RES, CANONICAL_CAP, PARASITIC_CAP, DIODE, MOS, BIPOLAR, GENERIC]
     choices_confidence: guess
     default: [CANONICAL_RES, PARASITIC_RES, CANONICAL_CAP, PARASITIC_CAP, DIODE, MOS, BIPOLAR, GENERIC]
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:51
     notes: >-
@@ -2498,7 +2504,7 @@ options:
     choices: [double, single]
     choices_confidence: guess
     default: double
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:60
     lands_in:
@@ -2512,7 +2518,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:61
     lands_in:
@@ -2526,7 +2532,7 @@ options:
     type: str
     choices_confidence: likely
     default: "#"
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:62
     lands_in:
@@ -2553,7 +2559,7 @@ options:
       - {target: quantus.ext.cmd, section: input_db, option: -directory_name, line: 35}
       - {target: quantus.ext.cmd, section: output_setup, option: -directory_name, line: 56}
       - {target: quantus.dspf.cmd, section: input_db, option: -directory_name, line: 34}
-      - {target: quantus.dspf.cmd, section: output_setup, option: -directory_name, line: 64}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -directory_name, line: 57}
     why: Where LVS drops what QRC reads. A derived run path.
 
   - key: query_layer_map_file
@@ -2604,7 +2610,7 @@ options:
       touch it. The pattern itself belongs to WorkspaceConfig; the resolved
       value is a run fact.
     lands_in:
-      - {target: quantus.dspf.cmd, section: output_setup, option: -file_name, line: 65}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -file_name, line: 58}
     why: Where the DSPF lands. Derived from the workspace pattern per run.
 
   - key: output_net_name_space
@@ -2615,12 +2621,12 @@ options:
     choices: [SCHEMATIC, LAYOUT]
     choices_confidence: guess
     default: SCHEMATIC
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:66
     notes: DSPF only. Separate from the extraction_setup one, which both files carry.
     lands_in:
-      - {target: quantus.dspf.cmd, section: output_setup, option: -net_name_space, line: 66}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -net_name_space, line: 59}
     why: Whether DSPF net names follow the schematic or the layout.
 
   - key: output_temporary_directory_name
@@ -2636,7 +2642,7 @@ options:
     notes: The fourth appearance of the query_cmd basename; see input_db_run_name.
     lands_in:
       - {target: quantus.ext.cmd, section: output_setup, option: -temporary_directory_name, line: 57}
-      - {target: quantus.dspf.cmd, section: output_setup, option: -temporary_directory_name, line: 67}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -temporary_directory_name, line: 60}
     why: Determined by the PDK query_cmd, like the other three "Design" rows.
 
   - key: technology_corner
@@ -2646,7 +2652,7 @@ options:
     type: str
     choices_confidence: guess
     default: TYPICAL
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:60
     question: Open this PDK assura_tech.lib and copy out the corner names it actually offers.
@@ -2661,7 +2667,7 @@ options:
       Rendered with the option and the value on SEPARATE lines.
     lands_in:
       - {target: quantus.ext.cmd, section: process_technology, option: -technology_corner, line: 59, layout: value_on_next_line}
-      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_corner, line: 69, layout: value_on_next_line}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_corner, line: 62, layout: value_on_next_line}
     why: The process corner. Its literal spelling is a PDK fact; choosing one is a recipe act.
 
   - key: technology_library_file
@@ -2671,16 +2677,17 @@ options:
     type: path
     choices_confidence: certain
     default: $env(SETUP_ROOT)/assura_tech.lib
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:61
     notes: >-
-      The only env reference left in any template. Rendering substitutes it
-      before Jinja runs, because si and jivaro do not expand env vars inside
-      string values.
+      The profile keeps the expression; pdk.tech_library_file is already
+      env-substituted by the time the render context is built, because si
+      and jivaro do not expand env vars inside string values. A var this run
+      cannot resolve is refused by the final rescan in render_one.
     lands_in:
       - {target: quantus.ext.cmd, section: process_technology, option: -technology_library_file, line: 61}
-      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_library_file, line: 71}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_library_file, line: 64}
     why: The PDK technology library. Pure process fact.
 
   - key: tech_name
@@ -2698,7 +2705,7 @@ options:
       of tech_name_env_vars resolves first.
     lands_in:
       - {target: quantus.ext.cmd, section: process_technology, option: -technology_name, line: 62}
-      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_name, line: 72}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_name, line: 65}
     why: Which technology QRC loads. Pure process fact.
 
   - key: temperature_c
@@ -2724,7 +2731,7 @@ options:
       Rendered with the option and the value on separate lines.
     lands_in:
       - {target: quantus.ext.cmd, section: process_technology, option: -temperature, line: 63, layout: value_on_next_line, quoting: bare}
-      - {target: quantus.dspf.cmd, section: process_technology, option: -temperature, line: 73, layout: value_on_next_line, quoting: bare}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -temperature, line: 66, layout: value_on_next_line, quoting: bare}
     why: Extraction temperature. Already a knob; stays tunable.
 
   - key: quantus_cpu_count
@@ -2790,7 +2797,7 @@ options:
     type: str
     choices_confidence: certain
     default: _red
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:3
     notes: >-
@@ -2810,7 +2817,7 @@ options:
     choices: [error, warning, info, debug, trace]
     choices_confidence: guess
     default: trace
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:4
     lands_in:
@@ -2840,7 +2847,7 @@ options:
     type: str
     choices_confidence: certain
     default: av_extracted
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:6
     question: Should this always equal out_file? (Suspected live bug.)
@@ -2863,7 +2870,7 @@ options:
     type: str
     choices_confidence: likely
     default: analogLib/presistor/symbol
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:9
     question: Are these four device names right for your PDK, and must both tools agree?
@@ -2879,7 +2886,7 @@ options:
     type: str
     choices_confidence: likely
     default: analogLib/pcapacitor/symbol
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:10
     lands_in:
@@ -2893,7 +2900,7 @@ options:
     type: str
     choices_confidence: likely
     default: analogLib/pinductor/symbol
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:11
     notes: >-
@@ -2911,7 +2918,7 @@ options:
     type: str
     choices_confidence: likely
     default: analogLib/pmind/symbol
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:12
     lands_in:
@@ -2926,7 +2933,7 @@ options:
     choices: [standard]
     choices_confidence: guess
     default: standard
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:15
     question: What other criteria does the Jivaro UI offer?
@@ -2982,7 +2989,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:18
     lands_in:
@@ -2996,7 +3003,7 @@ options:
     type: bool
     choices_confidence: certain
     default: false
-    currently: hardcoded_literal
+    currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:19
     lands_in:
@@ -3147,11 +3154,11 @@ options:
       - {target: quantus.ext.cmd, section: input_db, option: -directory_name, line: 35}
       - {target: quantus.ext.cmd, section: input_db, option: -layer_map_file, line: 38}
       - {target: quantus.ext.cmd, section: input_db, option: -device_properties_file, line: 40}
-      - {target: quantus.ext.cmd, section: output_db, option: -cdl_out_map_directory, line: 47, layout: value_on_next_line}
+      - {target: quantus.ext.cmd, section: output_db, option: -cdl_out_map_directory, line: 46, layout: value_on_next_line}
       - {target: quantus.ext.cmd, section: output_setup, option: -directory_name, line: 56}
       - {target: quantus.dspf.cmd, section: input_db, option: -directory_name, line: 34}
       - {target: quantus.dspf.cmd, section: input_db, option: -layer_map_file, line: 37}
-      - {target: quantus.dspf.cmd, section: output_setup, option: -directory_name, line: 64}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -directory_name, line: 57}
     why: >-
       Where the EDA tools work. Reusable and overwritten by the next run, so
       it carries no identity -- the run directory does.

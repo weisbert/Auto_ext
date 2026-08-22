@@ -26,9 +26,12 @@ from auto_ext.catalog import (  # noqa: E402
     Owner,
     builtin_catalog,
 )
+from auto_ext.model.common import RenderTarget  # noqa: E402
 from auto_ext.ui import theme  # noqa: E402
 from auto_ext.ui.widgets.option_editor import (  # noqa: E402
+    FROZEN_GLYPH,
     NEEDS_CONFIRMATION,
+    NOT_SETTABLE,
     QUESTION_GLYPH,
     BoolOptionEditor,
     ChoiceOptionEditor,
@@ -47,6 +50,7 @@ from auto_ext.ui.widgets.option_editor import (  # noqa: E402
     in_advisory_range,
     option_label,
     option_tooltip,
+    template_freezes,
 )
 
 
@@ -498,6 +502,172 @@ def test_a_group_forwards_its_grid_signal(qtbot) -> None:
     group.value_changed.connect(lambda key, _value: seen.append(key))
     group.grid.editor("demo_key").check_box().setChecked(True)
     assert seen == ["demo_key"]
+
+
+# ---- a row the template still freezes -------------------------------------
+#
+# The population is empty in the shipped catalog and
+# ``tests/catalog/test_catalog.py::test_no_owned_row_is_left_hardcoded`` keeps
+# it that way, so these cases build the row themselves. That is the right way
+# round: the display has to exist *before* somebody adds such a row, or the
+# first person to do it ships an editable field that fails at run time.
+
+
+def frozen_spec(**over) -> OptionSpec:
+    """A recipe row whose value the shipped template types in as a literal."""
+
+    fields: dict[str, object] = {
+        "key": "frozen_key",
+        "template_var": "frozen_var",
+        "context_path": "recipe.extraction.frozen",
+        "currently": Currently.HARDCODED_LITERAL,
+        "default": "TYPICAL",
+        "lands_in": [
+            LandingSite(
+                target=RenderTarget.QUANTUS_EXT,
+                section="process_technology",
+                option="-technology_corner",
+            )
+        ],
+    }
+    fields.update(over)
+    return spec(**fields)
+
+
+def test_a_row_the_template_freezes_is_recognised_from_the_catalog() -> None:
+    assert template_freezes(frozen_spec()) is True
+    assert template_freezes(spec()) is False
+
+
+def test_a_frozen_row_disables_its_control_instead_of_hiding_the_row(qtbot) -> None:
+    """The whole point: the refusal happens on the page, not mid-run.
+
+    ``check_representable`` still refuses this value at render time and must
+    -- that is the last line of defence. It is a bad first one, because it
+    arrives after the form is filled, the recipe saved and the run started.
+    """
+
+    editor = _make(qtbot, frozen_spec())
+    assert editor.is_frozen is True
+    assert editor.control().isEnabled() is False
+    assert editor.line_edit().isReadOnly() is True
+    # ...showing the literal the run will actually write.
+    assert editor.value() == "TYPICAL"
+
+
+def test_a_frozen_row_says_so_in_the_hint_and_the_tooltip(qtbot) -> None:
+    one = frozen_spec()
+    assert hint_text(one).startswith(NOT_SETTABLE.lower())
+    assert NOT_SETTABLE in option_tooltip(one)
+    # The tooltip names the file, so the user knows where the literal lives.
+    assert "quantus.ext.cmd" in option_tooltip(one)
+    editor = _make(qtbot, one)
+    assert NOT_SETTABLE in editor.control().toolTip()
+
+
+def test_a_frozen_row_is_marked_grey_not_amber(qtbot) -> None:
+    """A different mark from the ``?``, because it is a different sentence.
+
+    ``?`` means "nobody has confirmed this value against a real tool". ``=``
+    means "the tool cannot be told anything else yet". Borrowing the amber
+    would put a caution mark on a row whose value is correct.
+    """
+
+    label = OptionLabel(frozen_spec())
+    qtbot.addWidget(label)
+    marker = label.frozen_marker()
+    assert marker is not None
+    assert marker.text() == FROZEN_GLYPH
+    assert NOT_SETTABLE in marker.toolTip()
+    assert theme.TEXT_DISABLED in marker.styleSheet()
+    assert theme.WARNING_TEXT_ON_WHITE not in marker.styleSheet()
+    assert label.is_frozen is True
+    assert OptionLabel(spec()).frozen_marker() is None
+
+
+def test_a_frozen_row_carrying_both_marks_keeps_them_apart(qtbot) -> None:
+    label = OptionLabel(frozen_spec(question="is TYPICAL really the name?"))
+    qtbot.addWidget(label)
+    assert label.frozen_marker() is not None
+    assert label.marker() is not None
+    assert label.frozen_marker().text() != label.marker().text()
+
+
+def test_a_frozen_field_shows_the_literal_not_what_the_recipe_holds(qtbot) -> None:
+    """Otherwise the disabled control lies as loudly as the editable one did.
+
+    A recipe carrying ``RCWORST`` for a row the template freezes to
+    ``TYPICAL`` renders ``TYPICAL``. A field reading ``RCWORST`` -- disabled
+    or not -- tells the user the run will use RCWORST, which is the original
+    bug wearing a grey border.
+    """
+
+    editor = _make(qtbot, frozen_spec())
+    seen: list[tuple] = []
+    editor.value_changed.connect(lambda *args: seen.append(args))
+
+    editor.set_value("RCWORST")
+    assert editor.value() == "TYPICAL"
+    assert editor.frozen_override() == "RCWORST"
+    assert "RCWORST" in editor.control().toolTip()
+    assert "RCWORST" in editor.hint_label().full_text()
+    assert seen == [], "pushing state in from the model is not a user edit"
+
+    # ...and it clears again when the recipe agrees with the literal.
+    editor.set_value("TYPICAL")
+    assert editor.frozen_override() is None
+    assert NOT_SETTABLE.lower() in editor.hint_label().full_text()
+
+
+def test_a_settable_row_keeps_taking_values_from_the_model(qtbot) -> None:
+    """The guard above must not have swallowed the normal path."""
+
+    editor = _make(qtbot, spec(default="rc_coupled"))
+    editor.set_value("r_only")
+    assert editor.value() == "r_only"
+    assert editor.frozen_override() is None
+
+
+def test_the_grid_reports_which_rows_are_frozen_and_which_diverge(qtbot) -> None:
+    grid = OptionGrid()
+    qtbot.addWidget(grid)
+    grid.add_option(spec(key="live", template_var="live_var", default="a"))
+    grid.add_option(frozen_spec(key="frozen", template_var="frozen_var"))
+
+    assert grid.frozen_keys() == ["frozen"]
+    assert grid.frozen_overrides() == {}
+    grid.set_value("frozen", "RCWORST")
+    assert grid.frozen_overrides() == {"frozen": "RCWORST"}
+    assert grid.values()["frozen"] == "TYPICAL"
+
+
+def test_every_editor_kind_honours_the_freeze(qtbot) -> None:
+    """One test rather than five, because the guard lives in the base class and
+    a subclass that re-implements ``set_value`` would slip past it."""
+
+    rows = [
+        frozen_spec(key="b", template_var="b_var", type=OptionType.BOOL, default=True),
+        frozen_spec(
+            key="c",
+            template_var="c_var",
+            type=OptionType.ENUM,
+            choices=["TYPICAL", "RCWORST"],
+            choices_confidence=Confidence.CERTAIN,
+            default="TYPICAL",
+        ),
+        frozen_spec(key="n", template_var="n_var", type=OptionType.FLOAT, default=1.0),
+        frozen_spec(key="l", template_var="l_var", type=OptionType.LIST, default=["vdd"]),
+        frozen_spec(key="t", template_var="t_var"),
+    ]
+    others = {"b": False, "c": "RCWORST", "n": 2.5, "l": ["vss"], "t": "OTHER"}
+    for one in rows:
+        editor = _make(qtbot, one)
+        assert editor.is_frozen is True
+        assert editor.control().isEnabled() is False
+        before = editor.value()
+        editor.set_value(others[one.key])
+        assert editor.value() == before, one.key
+        assert editor.frozen_override() == others[one.key], one.key
 
 
 # ---- against the real catalog --------------------------------------------

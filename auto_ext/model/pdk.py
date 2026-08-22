@@ -51,7 +51,7 @@ from pathlib import PurePosixPath
 
 from pydantic import Field, field_validator, model_validator
 
-from auto_ext.model.common import Base, Frozen, PathExpr, Slug, utcnow
+from auto_ext.model.common import AsWritten, Base, Frozen, PathExpr, Slug, utcnow
 
 __all__ = [
     "DEFAULT_CDL_INCLUDE_FILE",
@@ -123,7 +123,7 @@ class CornerSpec(Base):
     #: Literal handed to Quantus as ``-technology_corner``.
     technology_corner: str = Field(min_length=1)
     #: Suggested temperature for this corner; used when a Recipe leaves it unset.
-    default_temperature_c: float | None = None
+    default_temperature_c: AsWritten | None = None
     #: Older spellings kept so a migrated Recipe still resolves.
     aliases: list[str] = Field(default_factory=list)
     description: str | None = None

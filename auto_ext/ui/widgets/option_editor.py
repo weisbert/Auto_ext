@@ -36,6 +36,27 @@ cannot be typed into a float) but never the *bounds*: an out-of-range value is
 accepted, marked amber and explained, because a guard rail somebody invented
 must not be able to stop a real extraction.
 
+Rows the template freezes
+-------------------------
+A row whose ``currently`` is ``hardcoded_literal`` has its value typed into
+the ``.j2``. Binding the Recipe field changes nothing, and
+:func:`auto_ext.core.render.check_representable` refuses the render rather
+than write the old value and report success. That refusal is the last line of
+defence and stays where it is; it is a bad *first* one, because it arrives
+after the user has filled the form, saved the recipe and started a run.
+
+So :func:`template_freezes` marks the row here instead: the control is
+disabled at the catalog default, the label carries a grey ``=``, the hint line
+says :data:`NOT_SETTABLE`, and the tooltip names the file the literal lives
+in. Grey and not amber on purpose -- nothing is wrong with the value or with
+the row, the tool simply cannot write anything else yet, and borrowing the
+warning colour would put a caution mark on ninety correct fields the day
+someone adds a catalog row before its template hole.
+
+The set is empty in the shipped catalog and the point is to keep it that way:
+this is the display for a row that is added before its template is
+parameterised, and ``tests/catalog/test_catalog.py`` fails the moment one is.
+
 Assumptions
 -----------
 Collected here rather than scattered through the module:
@@ -77,12 +98,15 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from auto_ext.catalog import OptionSpec, OptionType
+from auto_ext.catalog import Currently, OptionSpec, OptionType
 from auto_ext.ui import theme
 
 __all__ = [
+    "FROZEN_GLYPH",
     "LABEL_COLUMN_WIDTH",
     "NEEDS_CONFIRMATION",
+    "NOT_SETTABLE",
+    "OBJ_FROZEN_MARKER",
     "OBJ_GROUP_HEADER",
     "OBJ_OPTION_HINT",
     "OBJ_OPTION_LABEL",
@@ -106,7 +130,9 @@ __all__ = [
     "hint_text",
     "in_advisory_range",
     "option_label",
+    "frozen_reason",
     "option_tooltip",
+    "template_freezes",
 ]
 
 #: Maximum width of a label column. Artboard ``1f`` draws 196px; it is a cap
@@ -119,10 +145,21 @@ QUESTION_GLYPH = "?"
 #: Tooltip prefix for such a row. Tests and screens match on this string.
 NEEDS_CONFIRMATION = "NEEDS CONFIRMATION"
 
+#: Marker on a row the shipped template writes as a literal. ``=`` reads as
+#: "held at one value", is ASCII like :data:`QUESTION_GLYPH` and present in
+#: every fallback font, and is a different glyph in a different colour from
+#: the ``?`` it may sit beside -- the two say different things and must not
+#: look like one mark.
+FROZEN_GLYPH = "="
+
+#: Hint and tooltip prefix for such a row. Tests and screens match on it.
+NOT_SETTABLE = "NOT SETTABLE YET"
+
 OBJ_OPTION_LABEL = "optionLabel"
 OBJ_OPTION_HINT = "optionHint"
 OBJ_OPTION_UNIT = "optionUnit"
 OBJ_QUESTION_MARKER = "optionQuestionMarker"
+OBJ_FROZEN_MARKER = "optionFrozenMarker"
 OBJ_GROUP_HEADER = "optionGroupHeader"
 
 #: Separator between hint parts. U+00B7, in DejaVu and in the agreed glyph set.
@@ -187,6 +224,35 @@ def editor_kind(spec: OptionSpec) -> EditorKind:
     if spec.type is OptionType.LIST:
         return EditorKind.LIST
     return EditorKind.TEXT
+
+
+def template_freezes(spec: OptionSpec) -> bool:
+    """True when the shipped template types this value in as a literal.
+
+    Asks the catalog rather than re-deriving, so the form and
+    :func:`auto_ext.core.render.check_representable` can never disagree about
+    which rows those are -- the two used to be the same list only by
+    coincidence, and the coincidence is what let a field be editable in the
+    GUI and refused at render time.
+    """
+
+    return spec.currently is Currently.HARDCODED_LITERAL
+
+
+def frozen_reason(spec: OptionSpec) -> str:
+    """One sentence naming where the literal lives, for hint and tooltip."""
+
+    files = [_site_file(site) for site in spec.lands_in]
+    seen: list[str] = []
+    for name in files:
+        if name not in seen:
+            seen.append(name)
+    where = ", ".join(seen) if seen else "the shipped templates"
+    return (
+        f"{NOT_SETTABLE}: {where} writes this value as a literal, so changing "
+        "it here would be ignored. Use a manual edit on the generated file "
+        "until the template is parameterised."
+    )
 
 
 def option_label(spec: OptionSpec) -> str:
@@ -275,13 +341,20 @@ def hint_text(spec: OptionSpec) -> str:
         shown = [str(choice) for choice in spec.choices[:3]]
         more = "" if len(spec.choices) <= 3 else ", ..."
         parts.append("guessed: " + ", ".join(shown) + more)
+    if template_freezes(spec):
+        # First, not last: this line elides, and the one part of it the user
+        # has to read is the part that says the field does nothing.
+        parts.insert(0, NOT_SETTABLE.lower())
     return _DOT.join(parts)
 
 
 def option_tooltip(spec: OptionSpec) -> str:
     """Full explanation of one row: why it exists, where it lands, what is unknown."""
 
-    lines = [f"{spec.key}  ({spec.type.value})", "", spec.why]
+    lines = [f"{spec.key}  ({spec.type.value})", ""]
+    if template_freezes(spec):
+        lines += [frozen_reason(spec), ""]
+    lines.append(spec.why)
     if spec.choices:
         confidence = spec.choices_confidence.value
         lines.append(f"choices ({confidence}): " + ", ".join(str(c) for c in spec.choices))
@@ -418,6 +491,24 @@ class OptionLabel(QWidget):
         self._text.setToolTip(option_tooltip(spec))
         row.addWidget(self._text, 1)
 
+        self._frozen_marker: QLabel | None = None
+        if template_freezes(spec):
+            frozen = QLabel(FROZEN_GLYPH, self)
+            frozen.setObjectName(OBJ_FROZEN_MARKER)
+            frozen.setAlignment(Qt.AlignCenter)
+            frozen.setToolTip(frozen_reason(spec))
+            frozen.setStyleSheet(
+                f"font-family: {theme.FONT_MONO};"
+                f" font-size: {theme.FONT_SIZE_META}px;"
+                f" font-weight: {theme.FONT_WEIGHT_BOLD};"
+                f" color: {theme.TEXT_DISABLED};"
+                f" border: 1px solid {theme.LINE_PANEL};"
+                f" background: {theme.SURFACE_TABLE_HEADER};"
+                f" padding: 0px {theme.SPACE_XXS}px;"
+            )
+            row.addWidget(frozen, 0)
+            self._frozen_marker = frozen
+
         self._marker: QLabel | None = None
         if spec.question:
             marker = QLabel(QUESTION_GLYPH, self)
@@ -448,10 +539,21 @@ class OptionLabel(QWidget):
 
         return bool(self._spec.question)
 
+    @property
+    def is_frozen(self) -> bool:
+        """True when the shipped template writes this value as a literal."""
+
+        return template_freezes(self._spec)
+
     def marker(self) -> QLabel | None:
         """The ``?`` marker widget, or ``None`` on a confirmed row."""
 
         return self._marker
+
+    def frozen_marker(self) -> QLabel | None:
+        """The ``=`` marker widget, or ``None`` on a settable row."""
+
+        return self._frozen_marker
 
     def text_label(self) -> ElidedLabel:
         return self._text
@@ -501,6 +603,7 @@ class OptionEditor(QWidget):
         self._control: QWidget | None = None
         self._unit: QLabel | None = None
         self._hint: ElidedLabel | None = None
+        self._frozen_override: Any = None
 
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(
@@ -512,6 +615,14 @@ class OptionEditor(QWidget):
 
     def _add_control(self, control: QWidget, *, stretch: int = 0) -> None:
         control.setToolTip(option_tooltip(self._spec))
+        if self.is_frozen:
+            # Disabled rather than hidden. The value is still what the run will
+            # write, and a row that vanishes from the form reads as a setting
+            # this tool does not have -- which is the misunderstanding the
+            # whole catalog exists to end.
+            control.setEnabled(False)
+            if isinstance(control, QLineEdit):
+                control.setReadOnly(True)
         self._layout.addWidget(control, stretch)
         self._control = control
 
@@ -550,14 +661,71 @@ class OptionEditor(QWidget):
     def key(self) -> str:
         return self._spec.key
 
+    @property
+    def is_frozen(self) -> bool:
+        """True when the shipped template writes this value as a literal.
+
+        The control is disabled in that case and shows the catalog default,
+        which is what the run will actually write.
+        """
+
+        return template_freezes(self._spec)
+
     def kind(self) -> EditorKind:
         return editor_kind(self._spec)
 
     def value(self) -> Any:  # pragma: no cover - abstract
         raise NotImplementedError
 
-    def set_value(self, value: Any) -> None:  # pragma: no cover - abstract
+    def set_value(self, value: Any) -> None:
+        """Push a value in from the model. Never emits :attr:`value_changed`.
+
+        A frozen row is the exception and has to be: its control shows what
+        the *run will write*, which is the template's literal, not what the
+        recipe happens to hold. Showing the recipe's value there would be the
+        original bug wearing a disabled control -- the field would read
+        ``RCWORST`` while the generated file said ``TYPICAL``. The stored value
+        is not swallowed either; :meth:`frozen_override` keeps it and the row
+        says so.
+        """
+
+        if self.is_frozen:
+            self._note_frozen_override(value)
+            return
+        self._apply_value(value)
+
+    def _apply_value(self, value: Any) -> None:  # pragma: no cover - abstract
         raise NotImplementedError
+
+    def frozen_override(self) -> Any:
+        """A stored value this frozen row will not write, or ``None``.
+
+        ``None`` also when the row is not frozen, and when the stored value is
+        the literal anyway -- in both cases there is nothing to warn about.
+        """
+
+        return self._frozen_override
+
+    def _note_frozen_override(self, value: Any) -> None:
+        default = self._spec.default
+        same = value == default or (value is None and default is None)
+        self._frozen_override = None if same else value
+        reason = frozen_reason(self._spec)
+        if self._frozen_override is not None:
+            reason += (
+                f"\n\nThis recipe holds {_format_value(self._frozen_override)!r}. "
+                f"The run will write {_format_value(default)!r} and refuse the "
+                "stage rather than write the wrong value silently."
+            )
+        if self._control is not None:
+            self._control.setToolTip(reason + "\n\n" + option_tooltip(self._spec))
+        if self._hint is not None:
+            self._hint.set_full_text(
+                hint_text(self._spec)
+                if self._frozen_override is None
+                else f"{NOT_SETTABLE.lower()}{_DOT}recipe holds "
+                f"{_format_value(self._frozen_override)}"
+            )
 
     def unit_label(self) -> QLabel | None:
         return self._unit
@@ -590,6 +758,8 @@ class OptionEditor(QWidget):
         if not self._invalid:
             self._control.setStyleSheet("")
             self._control.setToolTip(option_tooltip(self._spec))
+            return
+        if self.is_frozen:  # pragma: no cover - the model is never asked
             return
         self._control.setStyleSheet(f"border: 1px solid {theme.STATUS_FAILED};")
         self._control.setToolTip(
@@ -633,7 +803,7 @@ class BoolOptionEditor(OptionEditor):
     def value(self) -> bool:
         return self._box.isChecked()
 
-    def set_value(self, value: Any) -> None:
+    def _apply_value(self, value: Any) -> None:
         self._quietly(lambda: self._box.setChecked(bool(value)))
 
 
@@ -670,7 +840,7 @@ class ChoiceOptionEditor(OptionEditor):
     def value(self) -> str:
         return self._combo.currentText()
 
-    def set_value(self, value: Any) -> None:
+    def _apply_value(self, value: Any) -> None:
         text = "" if value is None else str(value)
 
         def apply() -> None:
@@ -711,7 +881,7 @@ class TextOptionEditor(OptionEditor):
     def value(self) -> str:
         return self._edit.text()
 
-    def set_value(self, value: Any) -> None:
+    def _apply_value(self, value: Any) -> None:
         text = "" if value is None else str(value)
         self._quietly(lambda: _set_text_from_start(self._edit, text))
 
@@ -745,7 +915,7 @@ class ListOptionEditor(OptionEditor):
     def value(self) -> list[str]:
         return [part.strip() for part in self._edit.text().split(",") if part.strip()]
 
-    def set_value(self, value: Any) -> None:
+    def _apply_value(self, value: Any) -> None:
         if value is None:
             items: list[str] = []
         elif isinstance(value, (list, tuple)):
@@ -809,7 +979,7 @@ class NumberOptionEditor(OptionEditor):
         except ValueError:
             return None
 
-    def set_value(self, value: Any) -> None:
+    def _apply_value(self, value: Any) -> None:
         text = _number_text(self._spec, value)
         self._quietly(lambda: _set_text_from_start(self._edit, text))
         self._refresh_advisory()
@@ -931,6 +1101,28 @@ class OptionGrid(QWidget):
 
     def needs_confirmation_keys(self) -> list[str]:
         return [key for key in self._order if self._labels[key].needs_confirmation]
+
+    def frozen_keys(self) -> list[str]:
+        """Rows the shipped templates write as a literal, in form order.
+
+        Empty in the shipped catalog. A screen shows the count so a build that
+        grows one says so on the page rather than only in a tooltip.
+        """
+
+        return [key for key in self._order if self._editors[key].is_frozen]
+
+    def frozen_overrides(self) -> dict[str, Any]:
+        """``{key: stored value}`` for frozen rows the recipe disagrees with.
+
+        These are exactly what ``check_representable`` will refuse, named
+        before the user starts a run instead of after.
+        """
+
+        return {
+            key: self._editors[key].frozen_override()
+            for key in self._order
+            if self._editors[key].frozen_override() is not None
+        }
 
     def option_count(self) -> int:
         return len(self._order)

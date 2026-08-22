@@ -92,6 +92,7 @@ from auto_ext.core.patch_models import (
 )
 from auto_ext.model.common import (
     STAGE_ORDER,
+    AsWritten,
     Base,
     Frozen,
     Slug,
@@ -233,7 +234,7 @@ class NetlistSettings(Base):
     not_incremental: bool = True
     #: ``simReNetlistAll``.
     renetlist_all: bool = False
-    short_res_ohm: float = 2000.0
+    short_res_ohm: AsWritten = 2000.0
     preserve_res: bool = True
     check_res_val: bool = True
     check_res_size: bool = False
@@ -249,7 +250,7 @@ class NetlistSettings(Base):
     #: deck dictates it is an open office question, and if it does this field
     #: moves to the PdkProfile.
     check_scale: str = "meter"
-    shrink_factor: float = 0.0
+    shrink_factor: AsWritten = 0.0
     print_inherited_conn: bool = False
     preserve_bang: bool = False
     #: ``globalPowerSig`` / ``globalGndSig``: written into the CDL ``.GLOBAL``
@@ -308,11 +309,11 @@ class ExtractionSettings(Base):
     #: never written here; that is what makes a Recipe portable across PDKs.
     corner: Slug | None = None
     #: ``None`` uses ``CornerSpec.default_temperature_c``.
-    temperature_c: float | None = None
+    temperature_c: AsWritten | None = None
 
     extract_type: ExtractType = ExtractType.RC_COUPLED
     selection: str = "all"
-    decoupling_factor: float = 1.0
+    decoupling_factor: AsWritten = 1.0
     net_name_space: str = "SCHEMATIC"
 
     exclude_self_cap: bool = True
@@ -323,9 +324,9 @@ class ExtractionSettings(Base):
     #: Unit and magnitude disagree with physics: 0.01 F is a 10 mF threshold.
     #: Carried over unchanged so behaviour does not silently shift, but it is
     #: NOT a verified fact -- the manifest it came from was written by hand.
-    coupling_cap_threshold_absolute: float = 0.01
-    coupling_cap_threshold_relative: float = 0.001
-    min_res_ohm: float = 0.001
+    coupling_cap_threshold_absolute: AsWritten = 0.01
+    coupling_cap_threshold_relative: AsWritten = 0.001
+    min_res_ohm: AsWritten = 0.001
     merge_parallel_res: bool = True
     remove_dangling_res: bool = True
 
@@ -440,8 +441,8 @@ class ReductionSettings(Base):
     enabled: bool = False
     #: The template carried ``| default(14)`` / ``| default(2)`` fallbacks;
     #: those go away and these defaults take the job.
-    frequency_limit_ghz: float = 14.0
-    error_max_pct: float = 2.0
+    frequency_limit_ghz: AsWritten = 14.0
+    error_max_pct: AsWritten = 2.0
     criterion: str = "standard"
     reduce_floating_nets: bool = False
     decoupling_auto_threshold: bool = False

@@ -529,20 +529,27 @@ def test_run_recipe_refuses_a_value_the_template_hardcodes(
     workarea: Path,
     migrated_v2: Path,
 ) -> None:
-    """A recipe value with nowhere to land fails the stage, loudly.
+    """A setting with nowhere to land fails the run, loudly.
 
-    ``netlist.short_res_ohm`` is still a literal in ``default.env.j2``, so
-    honouring the recipe is impossible; writing the old value anyway and
+    ``netlist.short_res_ohm`` used to be the example; it is ``[[short_res]]``
+    in ``default.env.j2`` now, so the subject moved to the one value the
+    shipped templates still freeze. ``calibre_lvs.qci.j2`` line 1 writes
+    ``.qcilvs`` between its three holes, so a PDK that assembles its rules-file
+    name differently cannot be honoured -- and writing ``.qcilvs`` anyway and
     reporting success is the exact failure mode this refactor exists to kill.
     """
 
     recipe_id = _only_recipe_id(migrated_v2)
-    edit = runner.invoke(
-        app,
-        ["recipe", "set", recipe_id, "netlist.short_res_ohm=1500.0",
-         "--auto-ext-root", str(migrated_v2)],
+    profile_yaml = migrated_v2 / "config" / "profiles" / "hn001.yaml"
+    text = profile_yaml.read_text(encoding="utf-8")
+    assert "filename_pattern: '{basename}.{suffix}.qcilvs'" in text, text
+    profile_yaml.write_text(
+        text.replace(
+            "filename_pattern: '{basename}.{suffix}.qcilvs'",
+            "filename_pattern: '{basename}_{suffix}.rules'",
+        ),
+        encoding="utf-8",
     )
-    assert edit.exit_code == 0, edit.output
 
     result = runner.invoke(
         app,
@@ -560,6 +567,7 @@ def test_run_recipe_refuses_a_value_the_template_hardcodes(
     )
     assert result.exit_code == 1, result.output
     assert "hardcode" in result.output
+    assert "lvs_rules_filename_pattern" in result.output
     assert "0/1 tasks passed" in result.output
 
 

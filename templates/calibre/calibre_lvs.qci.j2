@@ -11,20 +11,20 @@
 *lvsSourceView: [[lvs_source_view]]
 *lvsSourceGetFromViewer: 1
 *lvsSpiceFile: [[cell]].sp
-*lvsDeviceFilterOptionsEnabled: 0
-*lvsLayoutDeviceFilterOptions: AG RC RE RG
-*lvsSourceDeviceFilterOptions: AG RC RE RG
-*lvsPowerNames: AHVDD AHVDDB AHVDDG AHVDDR AHVDDWELL AVDD AVDDB AVDDBG AVDDG AVDDR AVDWELL DHVDD DVDD HVDDWELL TACVDD TAVD33 TAVD33PST TAVDD TAVDDPST TVDD VD33 VDD VDD5V VDDESD VDDG VDDM VDDPST VDDSA VDWELL
-*lvsGroundNames: AGND AHVSS AHVSSB AHVSSG AHVSSR AHVSSUB AVSS AVSSB AVSSBG AVSSG AVSSR AVSSUB DHVSS DVSS GND HVSSUB TACVSS TAVSS TAVSSPST TVSS VS33 VSS VSSESD VSSG VSSM VSSPST VSSUB
-*lvsRecognizeGates: NONE
+*lvsDeviceFilterOptionsEnabled: [[ "1" if lvs_device_filter_options_enabled else "0" ]]
+*lvsLayoutDeviceFilterOptions: [[lvs_layout_device_filter_options]]
+*lvsSourceDeviceFilterOptions: [[lvs_source_device_filter_options]]
+*lvsPowerNames: [[ lvs_power_names | join(' ') ]]
+*lvsGroundNames: [[ lvs_ground_names | join(' ') ]]
+*lvsRecognizeGates: [[lvs_recognize_gates]]
 *lvsERCDatabase: [[cell]].erc.results
 *lvsERCSummaryFile: [[cell]].erc.summary
 *lvsReportFile: [[cell]].lvs.report
-*lvsSVDBcci: 1
-*lvsReportOptions: S
+*lvsSVDBcci: [[ "1" if lvs_svdb_cci else "0" ]]
+*lvsReportOptions: [[lvs_report_options]]
 *lvsPreTriggers: {{rm -rf %d/svdb} process 1}
-*lvsPostTriggers: {{rm -rf %d/query_output} process 1} {{mkdir %d/query_output} process 1} {{calibre -query_input [[qrc_deck_dir]]/query_cmd -query svdb } process 1}
-*lvsAbortOnSupplyError: 0
+*lvsPostTriggers: {{rm -rf %d/query_output} process 1} {{mkdir %d/query_output} process 1}[% if run_qrc_query %] {{calibre -query_input [[qrc_query_cmd_name]] -query svdb } process 1}[% endif %]
+*lvsAbortOnSupplyError: [[ "1" if lvs_abort_on_supply_error else "0" ]]
 *cmnWarnLayoutOverwrite: 0
 *cmnWarnSourceOverwrite: 0
 *cmnShowOptions: 1

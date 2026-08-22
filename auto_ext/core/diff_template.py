@@ -19,6 +19,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from jinja2 import TemplateSyntaxError, UndefinedError, meta
+
 from auto_ext.core.template import _make_jinja_env
 
 # Names a toggle is not allowed to take. Keeps the name out of Jinja
@@ -299,7 +301,15 @@ def detect_existing_toggle_blocks(text: str) -> list[tuple[int, int, str]]:
 
 def render_byte_equivalence_check(toggle: ToggleResult) -> tuple[str, str]:
     """Render ``toggle.merged_text`` once with the toggle True and once
-    False, with all other ``[[ ]]`` placeholders bound to a sentinel.
+    False, with every other Jinja name bound to a sentinel.
+
+    "Every other name" and not "every other ``[[name]]``": a shipped
+    template may spell a value as an expression — ``[[ "1" if svdb_cci
+    else "0" ]]``, ``[[ power_names | join(' ') ]]`` — and a name that
+    appears only inside one of those still has to be bound before the
+    text renders at all. Both sides of the comparison go through the
+    same substitution, so what the sentinel turns into does not matter;
+    only that it is the same on both sides.
 
     Returns ``(rendered_on, rendered_off)``. Raises ``AssertionError``
     if either side fails to round-trip to the corresponding raw —
@@ -495,19 +505,45 @@ def _anchor_hunk_in_template(
     return matches[0], matches[0] + n
 
 
+_BARE_PLACEHOLDER_RE = re.compile(r"\[\[\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\]\]")
+
+
 def _collect_jinja_vars(text: str) -> set[str]:
-    """Best-effort scrape of ``[[name]]`` placeholders. Mirrors what
-    :func:`auto_ext.core.template.scan_placeholders` would do but lives
-    here to keep this module independent of the manifest layer."""
-    return set(re.findall(r"\[\[\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\]\]", text))
+    """Every Jinja name ``text`` references, expressions included.
+
+    The parser rather than a ``[[name]]`` regex, because the shipped
+    templates spell some values as expressions (``[[ "1" if svdb_cci
+    else "0" ]]``, ``[[ names | join(' ') ]]``) and a name that lives
+    only inside one of those still has to be bound for the text to
+    render. Falls back to the regex for text that does not parse — this
+    module is also handed raw EDA exports, which are not templates.
+    """
+    try:
+        ast = _make_jinja_env().parse(text)
+    except TemplateSyntaxError:
+        return set(_BARE_PLACEHOLDER_RE.findall(text))
+    return set(meta.find_undeclared_variables(ast))
 
 
 def _render_with_sentinels(text: str, sentinel_ctx: dict[str, str]) -> str:
-    """Substitute ``[[name]]`` with sentinel values without a full Jinja
-    parse — used to mirror sentinel substitution across raw text that
-    isn't itself a Jinja template (so unbalanced literals like Tcl
-    braces don't trip the parser)."""
+    """Bind ``sentinel_ctx`` into ``text`` the way a real render would.
+
+    Rendering rather than substituting, so that an expression
+    placeholder collapses to the same string here as it does on the
+    rendered side of the equivalence check; a regex leaves it standing
+    and the two sides then differ for a reason that has nothing to do
+    with the toggle. Text that does not parse, or that references a
+    name outside ``sentinel_ctx``, falls back to the plain ``[[name]]``
+    substitution -- raw exports are not templates and must still pass
+    through.
+    """
+    try:
+        return _make_jinja_env().from_string(text).render(**sentinel_ctx)
+    except (TemplateSyntaxError, UndefinedError):
+        pass
+
     def repl(match: re.Match[str]) -> str:
         name = match.group(1)
         return sentinel_ctx.get(name, match.group(0))
-    return re.sub(r"\[\[\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\]\]", repl, text)
+
+    return _BARE_PLACEHOLDER_RE.sub(repl, text)

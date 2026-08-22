@@ -5,29 +5,29 @@
 #--------------------------------------------------------------------------------------
 
 capacitance \
-              -decoupling_factor 1.0 \
+              -decoupling_factor [[decoupling_factor]] \
               -ground_net "[[ground_net]]"
 extract \
-              -selection "all" \
-              -type "rc_coupled"
+              -selection "[[extract_selection]]" \
+              -type "[[extract_type]]"
 extraction_setup \
-              -array_vias_spacing auto \
-              -max_fracture_length infinite \
-              -max_fracture_length_unit "MICRONS" \
-              -max_via_array_size "auto" \
-              -parasitic_blocking_device_cells_file "[[qrc_deck_dir]]/preserveCellList.txt" \
-              -net_name_space "SCHEMATIC"
+              -array_vias_spacing [[array_vias_spacing]] \
+              -max_fracture_length [[max_fracture_length]] \
+              -max_fracture_length_unit "[[max_fracture_length_unit]]" \
+              -max_via_array_size "[[max_via_array_size]]" \
+              -parasitic_blocking_device_cells_file "[[preserve_cell_list_name]]" \
+              -net_name_space "[[extraction_net_name_space]]"
 filter_cap \
-              -exclude_self_cap true \
-              -exclude_floating_nets true \
+              -exclude_self_cap [[ "true" if exclude_self_cap else "false" ]] \
+              -exclude_floating_nets [[ "true" if exclude_floating_nets else "false" ]] \
               -exclude_floating_nets_limit [[exclude_floating_nets_limit]]
 filter_coupling_cap \
               -coupling_cap_threshold_absolute [[coupling_cap_threshold_absolute]] \
               -coupling_cap_threshold_relative [[coupling_cap_threshold_relative]]
 filter_res \
-              -merge_parallel_res true \
+              -merge_parallel_res [[ "true" if merge_parallel_res else "false" ]] \
               -min_res [[min_res]] \
-              -remove_dangling_res true
+              -remove_dangling_res [[ "true" if remove_dangling_res else "false" ]]
 input_db -type calibre \
               -design_cell_name "[[cell]] [[lvs_layout_view]] [[library]]" \
               -device_property_value 7 \
@@ -39,26 +39,26 @@ input_db -type calibre \
               -net_property_value 5 \
               -device_properties_file "[[output_dir]]/query_output/Design.props"
 output_db -type extracted_view \
-              -cap_component "pcapacitor" \
-              -cap_property_name "c" \
-              -enable_cellview_check false \
-              -device_finger_delimiter "@" \
+              -cap_component "[[cap_component]]" \
+              -cap_property_name "[[cap_property_name]]" \
+              -enable_cellview_check [[ "true" if enable_cellview_check else "false" ]] \
+              -device_finger_delimiter "[[device_finger_delimiter]]" \
               -cdl_out_map_directory \
               "[[output_dir]]/" \
-              -include_cap_model "false" \
-              -include_parasitic_cap_model "false" \
-              -include_res_model "false" \
-              -include_parasitic_res_model "comment" \
-              -res_component "presistor" \
-              -res_property_name "r" \
+              -include_cap_model "[[ 'true' if include_cap_model else 'false' ]]" \
+              -include_parasitic_cap_model "[[ 'true' if include_parasitic_cap_model else 'false' ]]" \
+              -include_res_model "[[ 'true' if include_res_model else 'false' ]]" \
+              -include_parasitic_res_model "[[include_parasitic_res_model]]" \
+              -res_component "[[res_component]]" \
+              -res_property_name "[[res_property_name]]" \
               -view_name "[[out_file]]"
 output_setup \
               -directory_name "[[output_dir]]/query_output" \
               -temporary_directory_name "Design"
 process_technology \
               -technology_corner \
-              "TYPICAL" \
-              -technology_library_file "$env(SETUP_ROOT)/assura_tech.lib" \
+              "[[technology_corner]]" \
+              -technology_library_file "[[technology_library_file]]" \
               -technology_name "[[tech_name]]" \
               -temperature \
               [[temperature]]

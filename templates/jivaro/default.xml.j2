@@ -1,21 +1,21 @@
 <?xml version="1.0" ?> <reductionParameters version="2024.1"> <options> <!-- General Options -->
 <inputView value="[[library]]/[[cell]]/[[out_file]]"/>
-<outputView value="[[out_file]]_red"/>
-<logVerboseLevel value="trace"/>
+<outputView value="[[ (out_file ~ jivaro_output_view_suffix) ]]"/>[# one expression, not two touching holes: an import cannot split a slot whose holes have no separator between them #]
+<logVerboseLevel value="[[jivaro_log_verbose_level]]"/>
 <cpu value="1"/>
-<viewsToReduce value="av_extracted"/>
+<viewsToReduce value="[[jivaro_views_to_reduce]]"/>
 
 <!-- Parsing options -->
-<rModel value="analogLib/presistor/symbol"/>
-<cModel value="analogLib/pcapacitor/symbol"/>
-<lModel value="analogLib/pinductor/symbol"/>
-<kModel value="analogLib/pmind/symbol"/>
+<rModel value="[[jivaro_r_model]]"/>
+<cModel value="[[jivaro_c_model]]"/>
+<lModel value="[[jivaro_l_model]]"/>
+<kModel value="[[jivaro_k_model]]"/>
 
 <!-- Reduction settings -->
-<criterion value="standard"/>
+<criterion value="[[jivaro_criterion]]"/>
 <frequencyLimit value="[[jivaro_frequency_limit | default(14)]]"/>
 <errorMax value="[[jivaro_error_max | default(2)]]"/>
-<reduceFloatingNets value="false"/>
-<decouplingAutoThreshold value="false"/>
+<reduceFloatingNets value="[[ 'true' if jivaro_reduce_floating_nets else 'false' ]]"/>
+<decouplingAutoThreshold value="[[ 'true' if jivaro_decoupling_auto_threshold else 'false' ]]"/>
 
 <!-- Selectivity settings --> </options> </reductionParameters>

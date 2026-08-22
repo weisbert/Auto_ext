@@ -75,7 +75,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import ValidationError
@@ -85,18 +85,23 @@ from ruamel.yaml.comments import CommentedMap
 from auto_ext.catalog import (
     Catalog,
     Currently,
-    LandingSite,
-    OptionSpec,
-    OptionType,
     Owner,
-    Quoting,
-    RenderTargetSpec,
     builtin_catalog,
     default_templates_root,
     load_catalog,
 )
 from auto_ext.core.env import discover_required_vars
 from auto_ext.core.errors import AutoExtError, ConfigError
+from auto_ext.core.readback import (
+    DEFAULT_READBACK_OWNERS,
+    ReadBackError,
+    TemplateReadBack,
+    parse_calibre,
+    parse_quantus,
+    parse_skill,
+    parse_xml,
+)
+from auto_ext.core.readback import read_back_from_templates as _read_back
 from auto_ext.legacy_v1 import (
     ProjectConfigV1,
     TaskConfigV1,
@@ -187,11 +192,6 @@ _TARGET_STAGE: dict[RenderTarget, str] = {
     RenderTarget.QUANTUS_DSPF: Stage.QUANTUS.value,
     RenderTarget.JIVARO_XML: Stage.JIVARO.value,
 }
-
-_JINJA_MARKERS = ("[[", "[%", "[#")
-
-_TRUE_TOKENS = frozenset({"t", "'t", "true", "1", "yes", "on"})
-_FALSE_TOKENS = frozenset({"nil", "'nil", "false", "0", "no", "off"})
 
 
 class MigrationError(AutoExtError):
@@ -298,340 +298,36 @@ class MigrationReport:
 
 
 # ---- template read-back ------------------------------------------------------
+# The parsers and the read-back rules live in auto_ext.core.readback: the
+# recipe importer needs the same answer against a *rendered* file, and a
+# neutral module is what stops that import from pulling the whole v1 migration
+# in behind it. The private spellings below are kept because they are this
+# module's own history and its tests' entry points.
 
-
-@dataclass(frozen=True)
-class _Raw:
-    """One option's raw value as it appears in a template file."""
-
-    values: tuple[str, ...]
-    text: str
-
-
-class _NotALiteral(Exception):
-    """The site holds a Jinja expression or a value this parser cannot read."""
-
-
-@dataclass(frozen=True)
-class TemplateReadBack:
-    """Literals recovered from one set of template files.
-
-    ``values`` is keyed by catalog key, so the caller writes them wherever the
-    catalog says that key lives (``recipe_field_path`` / ``context_path``).
-    ``unread`` records, per catalog key, why nothing was recovered -- that
-    string is what the report shows the user.
-    """
-
-    values: dict[str, Any]
-    unread: dict[str, str]
-    #: Catalog keys whose recovered value differs from the catalog default,
-    #: i.e. places where the user's template says something else.
-    diverged: dict[str, tuple[Any, Any]]
-    #: Which render targets were actually available.
-    targets: tuple[RenderTarget, ...]
-
-    def get(self, key: str, fallback: Any = None) -> Any:
-        return self.values.get(key, fallback)
-
-
-def _has_jinja(text: str) -> bool:
-    return any(marker in text for marker in _JINJA_MARKERS)
-
-
-def _tokenize(text: str) -> list[str]:
-    """Split on whitespace, keeping double-quoted runs as one token.
-
-    Quotes are removed; a quoted empty string survives as ``""`` the value,
-    which is what ``globalPowerSig = ""`` needs.
-    """
-
-    tokens: list[str] = []
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if char.isspace():
-            index += 1
-            continue
-        if char == '"':
-            end = text.find('"', index + 1)
-            if end == -1:
-                tokens.append(text[index + 1 :])
-                break
-            tokens.append(text[index + 1 : end])
-            index = end + 1
-            continue
-        end = index
-        while end < len(text) and not text[end].isspace():
-            end += 1
-        tokens.append(text[index:end])
-        index = end
-    return tokens
-
-
-def _unquote(text: str) -> str:
-    stripped = text.strip()
-    if len(stripped) >= 2 and stripped[0] == '"' and stripped[-1] == '"':
-        return stripped[1:-1]
-    return stripped
-
-
-_SI_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$")
-_CALIBRE_LINE = re.compile(r"^\s*(\*[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$")
-_XML_ELEMENT = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)\s+value=\"([^\"]*)\"\s*/>")
-_QUANTUS_OPTION = re.compile(r"^-[A-Za-z_]")
-
-
-def _parse_skill(text: str) -> dict[tuple[str, str], _Raw]:
-    """``si.env``: ``key = value``, one per line. Section is not encoded."""
-
-    out: dict[tuple[str, str], _Raw] = {}
-    for line in text.splitlines():
-        match = _SI_LINE.match(line)
-        if not match:
-            continue
-        key, value = match.group(1), match.group(2)
-        out[("", key)] = _Raw(values=(_unquote(value),), text=value)
-    return out
-
-
-def _parse_calibre(text: str) -> dict[tuple[str, str], _Raw]:
-    """``lvs.qci``: ``*Key: value``, one per line."""
-
-    out: dict[tuple[str, str], _Raw] = {}
-    for line in text.splitlines():
-        match = _CALIBRE_LINE.match(line)
-        if not match:
-            continue
-        key, value = match.group(1), match.group(2)
-        out[("", key)] = _Raw(values=(_unquote(value),), text=value)
-    return out
-
-
-def _parse_xml(text: str) -> dict[tuple[str, str], _Raw]:
-    """``jivaro.xml``: ``<tag value="..."/>``, packed onto few lines."""
-
-    out: dict[tuple[str, str], _Raw] = {}
-    for tag, value in _XML_ELEMENT.findall(text):
-        out[("", tag)] = _Raw(values=(value,), text=value)
-    return out
-
-
-def _parse_quantus(text: str) -> dict[tuple[str, str], _Raw]:
-    """Quantus command file: sections at column 0, ``-option value...`` inside.
-
-    The whole file is tokenized rather than matched line by line, which is
-    what makes the four layouts one case instead of four: ``-option value``
-    (inline), ``-option \\`` + value on the next line, ``-output_xy`` followed
-    by eight quoted values one per line, and a section header that carries its
-    first option on the same line (``input_db -type calibre``).
-    """
-
-    out: dict[tuple[str, str], _Raw] = {}
-    section = ""
-    option: str | None = None
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        starts_section = not line[:1].isspace()
-        body = stripped[:-1].rstrip() if stripped.endswith("\\") else stripped
-        tokens = _tokenize(body)
-        if not tokens:
-            continue
-        if starts_section:
-            section = tokens[0]
-            tokens = tokens[1:]
-            option = None
-        for token in tokens:
-            if _QUANTUS_OPTION.match(token):
-                option = token
-                out[(section, option)] = _Raw(values=(), text="")
-                continue
-            if option is None:
-                continue
-            previous = out[(section, option)]
-            joined = f"{previous.text} {token}".strip() if previous.text else token
-            out[(section, option)] = _Raw(values=(*previous.values, token), text=joined)
-    return out
-
-
-_PARSERS: dict[str, Callable[[str], dict[tuple[str, str], _Raw]]] = {
-    "skill": _parse_skill,
-    "calibre_runset": _parse_calibre,
-    "quantus_cmd": _parse_quantus,
-    "xml": _parse_xml,
-}
-
-
-def _special_run_qrc_query(raw: _Raw) -> Any:
-    return "-query_input" in raw.text
-
-
-def _special_query_cmd_name(raw: _Raw) -> Any:
-    match = re.search(r"-query_input\s+(\S+)", raw.text)
-    if not match:
-        raise _NotALiteral("no -query_input clause in the post-trigger line")
-    name = PurePosixPath(match.group(1)).name
-    if _has_jinja(name):
-        raise _NotALiteral("the query_cmd file name is itself a variable")
-    return name
-
-
-def _special_basename(raw: _Raw) -> Any:
-    name = PurePosixPath(raw.text.strip()).name
-    if _has_jinja(name):
-        raise _NotALiteral("the file name is itself a variable")
-    return name
-
-
-def _special_rules_pattern(raw: _Raw) -> Any:
-    name = PurePosixPath(raw.text.strip()).name
-    name = name.replace("[[calibre_lvs_basename]]", "{basename}")
-    name = name.replace("[[lvs_variant]]", "{suffix}")
-    if _has_jinja(name):
-        raise _NotALiteral("the rules-file name carries variables we do not model")
-    return name
-
-
-#: Catalog keys whose value shares a line with something else, so the generic
-#: "the option's value is the value" rule does not apply.
-_SPECIAL_READBACK: dict[str, Callable[[_Raw], Any]] = {
-    "run_qrc_query": _special_run_qrc_query,
-    "qrc_query_cmd_name": _special_query_cmd_name,
-    "qrc_preserve_cell_list_name": _special_basename,
-    "lvs_rules_filename_pattern": _special_rules_pattern,
-}
-
-
-def _coerce_bool(token: str) -> bool:
-    lowered = token.strip().lower()
-    if lowered in _TRUE_TOKENS:
-        return True
-    if lowered in _FALSE_TOKENS:
-        return False
-    raise _NotALiteral(f"{token!r} is not a boolean this parser recognises")
-
-
-def _coerce(option: OptionSpec, quoting: Quoting, raw: _Raw) -> Any:
-    """Turn a raw site value into the type the catalog says the option has."""
-
-    if _has_jinja(raw.text):
-        raise _NotALiteral("the value is a Jinja expression, not a literal")
-    if option.type is OptionType.LIST:
-        if quoting is Quoting.SKILL_LIST:
-            return re.findall(r'"([^"]*)"', raw.text)
-        if len(raw.values) > 1:
-            return list(raw.values)
-        return raw.text.split()
-    if not raw.values:
-        raise _NotALiteral("the option is present but carries no value")
-    token = raw.values[0]
-    if option.type is OptionType.BOOL:
-        return _coerce_bool(token)
-    if option.type is OptionType.INT:
-        try:
-            return int(float(token))
-        except ValueError as exc:
-            raise _NotALiteral(f"{token!r} is not an integer") from exc
-    if option.type is OptionType.FLOAT:
-        try:
-            return float(token)
-        except ValueError as exc:
-            raise _NotALiteral(f"{token!r} is not a number") from exc
-    return token
-
-
-def _site_key(site: LandingSite, target_spec: RenderTargetSpec) -> tuple[str, str]:
-    """Where to look this site up in the parsed file.
-
-    Section is part of the key only for Quantus command files: ``-type`` means
-    three different things in three sections there, while ``si.env``,
-    ``lvs.qci`` and ``jivaro.xml`` all have globally unique option names and
-    carry logical (not textual) section labels in the catalog.
-    """
-
-    if target_spec.syntax == "quantus_cmd":
-        return (site.section, site.option)
-    return ("", site.option)
+_parse_skill = parse_skill
+_parse_calibre = parse_calibre
+_parse_quantus = parse_quantus
+_parse_xml = parse_xml
 
 
 def read_back_from_templates(
     texts: Mapping[RenderTarget, str],
     *,
     catalog: Catalog | None = None,
-    owners: Sequence[Owner] = (Owner.RECIPE, Owner.PROFILE, Owner.RESOURCES),
+    owners: Sequence[Owner] = DEFAULT_READBACK_OWNERS,
 ) -> TemplateReadBack:
     """Recover every catalog-known literal from a set of template texts.
 
-    ``texts`` maps render target to the *user's* template source. Rows whose
-    landing site holds a Jinja expression are skipped on purpose: those values
-    arrive through the knob / config layer instead, and reading ``[[cell]]``
-    as a literal is exactly the silent corruption this whole exercise exists
-    to prevent.
+    Thin wrapper over :func:`auto_ext.core.readback.read_back_from_templates`
+    that restates the failure in this module's own error type, so a caller
+    catching :class:`MigrationError` around a migration still catches
+    everything the migration can fail with.
     """
 
-    cat = catalog if catalog is not None else builtin_catalog()
-    parsed: dict[RenderTarget, dict[tuple[str, str], _Raw]] = {}
-    for target, text in texts.items():
-        spec = cat.target(target)
-        parser = _PARSERS.get(spec.syntax)
-        if parser is None:
-            raise MigrationError(
-                f"no read-back parser for target {target} (syntax {spec.syntax!r})"
-            )
-        parsed[target] = parser(text)
-
-    values: dict[str, Any] = {}
-    unread: dict[str, str] = {}
-    diverged: dict[str, tuple[Any, Any]] = {}
-
-    for option in cat.options:
-        if option.owner not in owners:
-            continue
-        if not option.lands_in:
-            unread[option.key] = f"not written to any file (currently: {option.currently})"
-            continue
-        reasons: list[str] = []
-        recovered: list[tuple[RenderTarget | None, Any]] = []
-        for site in option.lands_in:
-            if site.target is None or site.target not in parsed:
-                reasons.append(f"{site.target or site.stage}: file not part of this project")
-                continue
-            spec = cat.target(site.target)
-            raw = parsed[site.target].get(_site_key(site, spec))
-            if raw is None:
-                reasons.append(f"{site.target}: {site.option} not found in the file")
-                continue
-            try:
-                handler = _SPECIAL_READBACK.get(option.key)
-                if handler is not None:
-                    recovered.append((site.target, handler(raw)))
-                else:
-                    recovered.append((site.target, _coerce(option, site.render(spec).quoting, raw)))
-            except _NotALiteral as exc:
-                reasons.append(f"{site.target}: {exc}")
-        if not recovered:
-            unread[option.key] = "; ".join(reasons) or "no readable landing site"
-            continue
-        first = recovered[0][1]
-        disagreeing = [f"{tgt}={val!r}" for tgt, val in recovered[1:] if val != first]
-        if disagreeing:
-            unread[option.key] = (
-                f"the same value is spelled differently per file "
-                f"({recovered[0][0]}={first!r}, {', '.join(disagreeing)}); "
-                "one Recipe field cannot hold both"
-            )
-            continue
-        values[option.key] = first
-        if option.default is not None and first != option.default:
-            diverged[option.key] = (option.default, first)
-
-    return TemplateReadBack(
-        values=values,
-        unread=unread,
-        diverged=diverged,
-        targets=tuple(texts),
-    )
+    try:
+        return _read_back(texts, catalog=catalog, owners=owners)
+    except ReadBackError as exc:
+        raise MigrationError(str(exc)) from exc
 
 
 # ---- template resolution -----------------------------------------------------

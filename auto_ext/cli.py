@@ -18,6 +18,13 @@ Live subcommands:
   (:mod:`auto_ext.model.recipe`): one portable extraction configuration
   per YAML file, found on the search path documented in
   :func:`recipe_search_path`.
+- ``recipe import`` — the user's own EDA files (a ``.cmd`` saved out of the
+  Quantus GUI, a colleague's ``.qci``, a hand-kept ``si.env``) become one
+  recipe, via :func:`auto_ext.core.recipe_import.import_recipe`. A dry run
+  until ``--write``; the four-section report is the product.
+- ``recipe export`` — one recipe plus its manual edits as a single file to
+  send to a colleague, with the catalog version its hunks were captured
+  against recorded in the header.
 - ``profile list / show / discover / health`` — the PdkProfile
   (:mod:`auto_ext.model.pdk`) under ``<root>/config/profiles/``, the
   machine scan that drafts one (:mod:`auto_ext.core.profile_discover`)
@@ -2402,6 +2409,788 @@ def recipe_set(
 
     save_recipe(updated, loaded.path, raw=raw)
     typer.echo(f"wrote {loaded.path}")
+
+
+# ---- recipe import / export -------------------------------------------------
+
+_TARGET_FLAG_HELP = (
+    "Name the render target of one input file, for a file whose content "
+    "cannot decide. `--target quantus.dspf.cmd` when exactly one file is "
+    "being imported, `--target <file>=<target>` otherwise. Repeatable."
+)
+
+_IMPORT_FILE_HELP = (
+    "An EDA file to import. Repeatable, and interchangeable with the "
+    "positional form."
+)
+
+
+def _match_inputs(where: str, files: list[Path]) -> list[Path]:
+    """Every input file ``where`` could mean: full path, or bare file name."""
+    candidate = Path(where).expanduser()
+    try:
+        resolved = candidate.resolve()
+    except OSError:  # pragma: no cover - only a malformed path reaches this
+        resolved = candidate
+    hits: list[Path] = []
+    for path in files:
+        if path in hits:
+            continue
+        if path == resolved or str(path) == where or path.name == candidate.name:
+            hits.append(path)
+    return hits
+
+
+def _parse_target_flags(values: list[str], files: list[Path], valid) -> dict[Path, str]:
+    """Bind every ``--target`` to one input file, or exit 2 explaining why not.
+
+    Split on the *last* ``=``: the left side is a path, and on Windows it
+    starts with a drive letter, so splitting on the first separator would tear
+    ``C:\\pdk\\ext.cmd=quantus.ext.cmd`` in the wrong place.
+    """
+    forced: dict[Path, str] = {}
+    for raw in values:
+        if "=" in raw:
+            where, _, name = raw.rpartition("=")
+        elif len(files) == 1:
+            where, name = str(files[0]), raw
+        else:
+            typer.secho(
+                f"--target {raw!r}: with more than one file, say which file it "
+                f"is about: --target <file>={raw}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        name = name.strip()
+        if name not in valid:
+            typer.secho(
+                f"unknown --target {name!r}; valid: {sorted(valid)}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        hits = _match_inputs(where.strip(), files)
+        if not hits:
+            typer.secho(
+                f"--target {raw!r}: no input file matches {where!r}. Files:",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            for path in files:
+                typer.secho(f"  {path}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+        if len(hits) > 1:
+            typer.secho(
+                f"--target {raw!r}: {where!r} matches {len(hits)} input files; "
+                f"give the full path. Matches: {[str(p) for p in hits]}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        chosen = hits[0]
+        if chosen in forced and forced[chosen] != name:
+            typer.secho(
+                f"--target names {chosen} twice, as {forced[chosen]} and {name}",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        forced[chosen] = name
+    return forced
+
+
+def _read_import_source(path: Path, target):
+    """One input file, newlines untouched.
+
+    ``ImportSource.from_path`` reads through Python's universal-newline
+    translation, which turns a CRLF file into an LF string before anything can
+    notice -- and then the report's newline column says LF about a file that
+    came off a Windows share. ``import_recipe`` normalises CRLF itself, so
+    handing it the bytes as they are costs nothing and keeps that column true.
+    """
+    from auto_ext.core.recipe_import import ImportSource, RecipeImportError
+
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            text = handle.read()
+    except UnicodeDecodeError as exc:
+        raise RecipeImportError(f"{path} is not UTF-8 text: {exc}") from exc
+    except OSError as exc:
+        raise RecipeImportError(f"cannot read {path}: {exc}") from exc
+    return ImportSource(label=str(path), text=text, target=target)
+
+
+def _parse_env_flags(values: list[str]) -> dict[str, str]:
+    """``NAME=VALUE`` pairs for ``--env``, or exit 2."""
+    overrides: dict[str, str] = {}
+    for item in values:
+        name, sep, value = item.partition("=")
+        if not sep or not name.strip():
+            typer.secho(
+                f"--env {item!r}: expected NAME=VALUE",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        overrides[name.strip()] = value
+    return overrides
+
+
+def _import_env(profile, catalog, overrides: dict[str, str]) -> dict[str, str]:
+    """Env values the *profile* needs that the imported files cannot supply.
+
+    A var the importer can solve out of the user's own file is never taken from
+    this shell: doing so would put this machine's paths into the baseline, and
+    from there into a stored hunk that travels with the recipe. Two shapes
+    count as solvable and :func:`env_vars_solvable_from_files` knows both -- a
+    reference the template still spells out, and a reference in a profile path
+    expression whose rendered value a template now writes as a ``[[var]]``. A
+    var only the profile mentions and no file shows has no such source, so the
+    shell is the only place left to read it. ``--env`` overrides both.
+    """
+    import os
+
+    from auto_ext.core.recipe_import import env_vars_solvable_from_files
+    from auto_ext.core.render import required_env_vars
+
+    env: dict[str, str] = {}
+    if profile is not None:
+        solvable = env_vars_solvable_from_files(profile, catalog=catalog)
+        for var in sorted(required_env_vars(profile, catalog=catalog) - solvable):
+            if var in os.environ:
+                env[var] = os.environ[var]
+    env.update(overrides)
+    return env
+
+
+def _derived_recipe_id(sources, catalog) -> str:
+    """A recipe_id read out of the files, for an import without ``--as``.
+
+    The cell name is what a user calls these files in their head, so that is
+    what the recipe is named after. It comes from the same variable solver the
+    import itself uses: the shipped template's text at a landing site, matched
+    against the user's. When no file carries a cell -- a lone ``dspf.cmd`` does
+    not -- the targets name the recipe instead, which is at least true.
+    """
+    from auto_ext.core.recipe_import import detect_target, solve_template_vars
+    from auto_ext.core.render import template_path_for
+    from auto_ext.model.common import slugify
+
+    cell: Optional[str] = None
+    seen: list[str] = []
+    for source in sources:
+        # ``import_recipe`` normalises CRLF before it looks at anything; this
+        # has to see the same text or it would recognise a Windows file less
+        # well than the import that follows it does.
+        text = source.text.replace("\r\n", "\n")
+        target = source.target or detect_target(text, label=source.label, catalog=catalog)
+        if target.value not in seen:
+            seen.append(target.value)
+        if cell is not None:
+            continue
+        spec = catalog.target(target)
+        try:
+            pattern = template_path_for(spec).read_text(encoding="utf-8")
+        except OSError:  # pragma: no cover - import_recipe reports this properly
+            continue
+        solved = solve_template_vars(pattern, text, target=target, catalog=catalog)
+        cell = solved.values.get("var:cell")
+    if cell:
+        return slugify(f"imported-{cell}", max_len=64)
+    return slugify("imported-" + "-".join(seen), max_len=64)
+
+
+def _same_value(mine, theirs) -> bool:
+    """Is a value read from a file the catalog default, spelling aside?"""
+    if isinstance(mine, bool) != isinstance(theirs, bool):
+        return False
+    if isinstance(mine, (list, tuple)) and isinstance(theirs, (list, tuple)):
+        return list(mine) == list(theirs)
+    if isinstance(mine, float) or isinstance(theirs, float):
+        try:
+            return float(mine) == float(theirs)
+        except (TypeError, ValueError):
+            return False
+    return mine == theirs
+
+
+def _print_import_report(
+    console,
+    result,
+    *,
+    catalog,
+    write: bool,
+    target_dir: Path,
+    written: Optional[Path],
+    show_defaults: bool,
+) -> None:
+    """Render a :class:`auto_ext.core.recipe_import.RecipeImportResult`.
+
+    Four sections, and the order is the argument: what the recipe now holds,
+    what had to become a manual edit, what stayed at the catalog default, and
+    what a human should look at. A value that appears in none of the four has
+    been lost, which is the same contract ``migrate``'s disposition table
+    carries.
+    """
+    from rich import box
+    from rich.table import Table
+
+    dut = result.dut
+    if result.clean_roundtrip:
+        trip = "every target re-renders byte for byte"
+    else:
+        differ = [
+            target.value for target, hop in result.roundtrip.items() if not hop.identical
+        ]
+        trip = f"NOT clean: {', '.join(differ)}"
+    _print_kv_block(
+        console,
+        "Recipe import",
+        [
+            ("recipe id", result.recipe.recipe_id),
+            ("name", result.recipe.name),
+            ("files", len(result.sources)),
+            ("targets", ", ".join(t.value for t in result.targets)),
+            ("stages", ", ".join(s.value for s in result.recipe.stages)),
+            ("emits", ", ".join(k.value for k in result.recipe.output.emit)),
+            ("catalog", result.catalog_version),
+            (
+                "profile",
+                f"derived from the files ({result.profile.profile_id})"
+                if result.derived_profile
+                else f"{result.profile.profile_id} ({result.profile.display_name})",
+            ),
+            (
+                "dut",
+                f"{dut.library}/{dut.cell} "
+                f"({dut.layout_view} vs {dut.source_view}, ground {dut.ground_net})",
+            ),
+            # Names only. An env value is a machine path, and printing it in a
+            # report somebody pastes into a ticket is how one leaks.
+            ("env bound", ", ".join(sorted(result.resolved_env)) or "-"),
+            ("into recipe", f"{result.applied_count} value(s)"),
+            (
+                "manual edits",
+                f"{result.hunk_count} hunk(s), "
+                f"{result.unmodelled_ratio:.0%} of the imported lines",
+            ),
+            ("round trip", trip),
+            ("mode", "write" if write else "report only"),
+        ],
+    )
+
+    table = Table(title="Files", box=box.SIMPLE_HEAD, pad_edge=False, expand=True)
+    table.add_column("file", style="cyan", overflow="fold", ratio=3)
+    table.add_column("target", no_wrap=True)
+    table.add_column("lines", justify="right", no_wrap=True)
+    table.add_column("target from", no_wrap=True)
+    table.add_column("newline", no_wrap=True)
+    for imported in result.sources:
+        table.add_row(
+            imported.label,
+            imported.target.value,
+            str(imported.line_count),
+            "--target" if imported.forced else "content",
+            "CRLF, read as LF" if imported.crlf else "LF",
+        )
+    console.print()
+    console.print(table)
+
+    # 1. what the recipe and the profile now hold -----------------------------
+    applied = [row for row in result.mapped if row.applied_to]
+    table = Table(
+        title=f"Read into the recipe or the profile ({len(applied)})",
+        box=box.SIMPLE_HEAD,
+        pad_edge=False,
+        expand=True,
+    )
+    table.add_column("key", style="cyan", overflow="fold", ratio=2)
+    table.add_column("value", overflow="fold", ratio=3)
+    table.add_column("owner", no_wrap=True)
+    table.add_column("landed in", overflow="fold", ratio=3)
+    table.add_column("read from", overflow="fold", ratio=3)
+    for row in sorted(applied, key=lambda item: item.key):
+        table.add_row(
+            row.key,
+            _fmt_value(row.value),
+            _fmt_value(row.owner),
+            row.landed_in,
+            f"{row.site.describe()} [{row.origin}]",
+        )
+    console.print()
+    if applied:
+        console.print(table)
+    else:
+        console.print("[bold]Read into the recipe or the profile (0)[/]")
+        console.print(
+            "[yellow]nothing the catalog models could be read; the whole input "
+            "is below as manual edits.[/]"
+        )
+
+    # 2. what the catalog does not model -------------------------------------
+    table = Table(
+        title=f"Kept as manual edits ({result.hunk_count} hunk(s))",
+        box=box.SIMPLE_HEAD,
+        pad_edge=False,
+        expand=True,
+    )
+    table.add_column("target", style="cyan", no_wrap=True)
+    table.add_column("at line", justify="right", no_wrap=True)
+    table.add_column("-/+", justify="right", no_wrap=True)
+    table.add_column("stored as (masked)", overflow="fold", ratio=4)
+    for hunk in result.as_patch:
+        table.add_row(
+            hunk.target.value,
+            str(hunk.at_line),
+            f"-{hunk.removed}/+{hunk.added}",
+            hunk.summary,
+        )
+    console.print()
+    if not result.as_patch:
+        console.print("[bold]Kept as manual edits (0 hunk(s))[/]")
+        console.print("[dim]nothing: the catalog explains every line of every file.[/]")
+    else:
+        console.print(table)
+        console.print(
+            "[dim]masked at every landing site the catalog models, so a cell "
+            "name inside a hunk follows the next DUT; the rest of the line is "
+            "kept verbatim. `auto-ext patch show` prints one in full.[/]"
+        )
+
+    # 3. what stayed at the catalog default ----------------------------------
+    landed = {row.key for row in result.mapped if row.applied_to}
+    rows: list[tuple[str, str, str, str]] = []
+    agreed = 0
+    for row in sorted(result.mapped, key=lambda item: item.key):
+        if row.applied_to:
+            continue
+        default = catalog.option(row.key).default
+        if _same_value(row.value, default) and not show_defaults:
+            agreed += 1
+            continue
+        rows.append((row.key, _fmt_value(row.value), _fmt_value(default), row.note))
+    for key, reason in sorted(result.unread.items()):
+        # A key the literal reader could not read but something else did --
+        # ``lvs_connect_by_name`` comes from whether its line exists at all --
+        # is in the recipe, and listing it here as well would contradict the
+        # section above it.
+        if key in landed:
+            continue
+        rows.append(
+            (key, "(not readable)", _fmt_value(catalog.option(key).default), reason)
+        )
+    table = Table(
+        title=f"Left at the catalog default ({len(rows)} shown)",
+        box=box.SIMPLE_HEAD,
+        pad_edge=False,
+        expand=True,
+    )
+    table.add_column("key", style="cyan", overflow="fold", ratio=2)
+    table.add_column("in your file", overflow="fold", ratio=3)
+    table.add_column("catalog default", overflow="fold", ratio=3)
+    table.add_column("why not in the recipe", overflow="fold", ratio=4)
+    for key, mine, theirs, why in rows:
+        table.add_row(key, mine, theirs, why)
+    console.print()
+    if rows:
+        console.print(table)
+    else:
+        console.print("[bold]Left at the catalog default (0 shown)[/]")
+    if agreed:
+        console.print(
+            f"[dim]{agreed} further value(s) were read and already match the "
+            f"catalog default; --show-defaults lists them.[/]"
+        )
+    if rows:
+        console.print(
+            "[dim]a value here that differs from the default is not lost: the "
+            "difference is one of the hunks above.[/]"
+        )
+
+    # 4. what a human has to look at -----------------------------------------
+    if result.warnings:
+        console.print()
+        console.print("[bold yellow]Warnings[/]")
+        for warning in result.warnings:
+            console.print(f"  [yellow]{warning}[/]")
+
+    console.print()
+    if written is not None:
+        console.print(f"wrote {written}")
+        console.print(
+            f"[dim]inspect with: auto-ext recipe show {result.recipe.recipe_id}[/]"
+        )
+    else:
+        from auto_ext.model.recipe import recipe_filename
+
+        console.print(
+            f"[yellow]nothing written; re-run with --write to save "
+            f"{target_dir / recipe_filename(result.recipe)}.[/]"
+        )
+    if result.derived_profile:
+        console.print(
+            "[dim]the baseline profile was derived from these files, not "
+            "discovered: it exists so the import had something to render "
+            "against. Pass --profile <id> to import against a real one.[/]"
+        )
+
+
+@recipe_app.command("import")
+def recipe_import(
+    files: Optional[list[Path]] = typer.Argument(
+        None,
+        metavar="[FILE]...",
+        help="EDA files to import: any subset of the five render targets.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    extra_files: Optional[list[Path]] = typer.Option(
+        None,
+        "--file",
+        "-f",
+        help=_IMPORT_FILE_HELP,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    as_name: Optional[str] = typer.Option(
+        None,
+        "--as",
+        metavar="NAME",
+        help="recipe_id for the imported recipe. Without it, a name is derived "
+        "from the cell the files are about.",
+    ),
+    display_name: Optional[str] = typer.Option(
+        None, "--name", help="Display name. Defaults to `Imported <recipe_id>`."
+    ),
+    target: Optional[list[str]] = typer.Option(None, "--target", help=_TARGET_FLAG_HELP),
+    profile_id: Optional[str] = typer.Option(
+        None,
+        "--profile",
+        help="Import against this PdkProfile instead of one derived from the "
+        "files. The profile decides the baseline the manual edits are a diff "
+        "against, so a real one produces fewer of them.",
+    ),
+    profiles_dir: Optional[Path] = typer.Option(
+        None, "--profiles-dir", help=_PROFILES_DIR_HELP
+    ),
+    env: Optional[list[str]] = typer.Option(
+        None,
+        "--env",
+        metavar="NAME=VALUE",
+        help="Bind an environment variable for the baseline render, "
+        "overriding both the shell and anything read out of the files. "
+        "Repeatable.",
+    ),
+    auto_ext_root: Optional[Path] = typer.Option(
+        None, "--auto-ext-root", help=_PROFILE_ROOT_HELP
+    ),
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        help=_RUNS_CONFIG_HELP,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    recipes_dir: Optional[Path] = typer.Option(
+        None, "--recipes-dir", help=_RECIPES_DIR_HELP
+    ),
+    warn_ratio: float = typer.Option(
+        0.25,
+        "--warn-ratio",
+        min=0.0,
+        max=1.0,
+        help="Warn when more than this fraction of the imported lines had to "
+        "become manual edits. Default 0.25.",
+    ),
+    show_defaults: bool = typer.Option(
+        False,
+        "--show-defaults",
+        help="List every value that matched the catalog default too, not just "
+        "the count of them.",
+    ),
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Actually write the recipe. Without it, nothing is saved.",
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing recipe file."),
+) -> None:
+    """Turn EDA files you already have into one recipe.
+
+    A ``.cmd`` saved out of the Quantus GUI, a ``.qci`` a colleague sent, an
+    ``si.env`` carried between projects: name any subset of the five render
+    targets and they become a Recipe this tool can run. Each file's target is
+    decided by its content, never by its name; ``--target`` is for the file
+    whose content cannot decide.
+
+    Nothing is written without ``--write``, because the report is the point. It
+    has four sections and every value the files contain appears in exactly one
+    of them: read into the recipe, kept as a manual edit, left at the catalog
+    default, or in the warnings. A value in none of them would be a lost value,
+    which is the bug this listing exists to make impossible.
+
+    Exits 1 when there are warnings (a human should look), 0 otherwise, and 2
+    when the files cannot become a recipe at all.
+    """
+    from rich.console import Console
+
+    from auto_ext.core.errors import AutoExtError
+    from auto_ext.core.recipe_import import import_recipe, write_imported_recipe
+    from auto_ext.model.common import RenderTarget
+
+    inputs = [*(files or []), *(extra_files or [])]
+    if not inputs:
+        typer.secho(
+            "name at least one file to import, positionally or with --file.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    catalog = _catalog_or_exit()
+    forced = _parse_target_flags(list(target or []), inputs, {t.value for t in RenderTarget})
+    overrides = _parse_env_flags(list(env or []))
+
+    profile = None
+    if profile_id is not None:
+        profile = _load_profile(
+            _profiles_dir(auto_ext_root, config_dir, profiles_dir), profile_id
+        ).profile
+
+    try:
+        sources = [
+            _read_import_source(
+                path, RenderTarget(forced[path]) if path in forced else None
+            )
+            for path in inputs
+        ]
+        recipe_id = as_name or _derived_recipe_id(sources, catalog)
+        result = import_recipe(
+            sources,
+            recipe_id=recipe_id,
+            name=display_name,
+            catalog=catalog,
+            profile=profile,
+            resolved_env=_import_env(profile, catalog, overrides),
+            warn_ratio=warn_ratio,
+        )
+    except AutoExtError as exc:
+        typer.secho(f"import failed: {exc}", fg=typer.colors.RED, err=True)
+        if "env var" in str(exc):
+            typer.secho(
+                "bind it with --env NAME=VALUE, or import without --profile so "
+                "the baseline comes from the files themselves.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+        raise typer.Exit(code=2)
+
+    dirs = recipe_search_path(auto_ext_root, config_dir, recipes_dir)
+    target_dir = recipes_dir.expanduser().resolve() if recipes_dir else dirs[-1]
+    written: Optional[Path] = None
+    if write:
+        try:
+            written = write_imported_recipe(result, target_dir, overwrite=force)
+        except AutoExtError as exc:
+            typer.secho(
+                f"{exc}" if force else f"{exc}, or pass --force",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+    _print_import_report(
+        Console(),
+        result,
+        catalog=catalog,
+        write=write,
+        target_dir=target_dir,
+        written=written,
+        show_defaults=show_defaults,
+    )
+    raise typer.Exit(code=1 if result.warnings else 0)
+
+
+#: Sentinels around the provenance block ``recipe export`` writes. They are
+#: what lets a re-export replace the old header instead of stacking a second
+#: one on top of it.
+_EXPORT_BEGIN = "# --- auto-ext recipe export"
+_EXPORT_END = "# --- end auto-ext recipe export"
+
+
+def _strip_export_header(text: str) -> str:
+    """Drop a leading export header, so re-exporting does not stack them."""
+    lines = text.splitlines(keepends=True)
+    if not lines or not lines[0].startswith(_EXPORT_BEGIN):
+        return text
+    for index, line in enumerate(lines):
+        if line.startswith(_EXPORT_END):
+            return "".join(lines[index + 1 :]).lstrip("\n")
+    return text
+
+
+def _export_header(recipe, *, source: Path, catalog_version: str) -> str:
+    """The comment block that makes an exported recipe self-describing.
+
+    A recipe is PDK-independent by construction, so the export really is the
+    file itself -- there is nothing to inline. What the file does not carry is
+    which parameter catalog its stored hunks were captured against, and that is
+    the one thing the receiving side needs: a hunk anchored to a line the local
+    catalog no longer renders will not apply, and the version is how somebody
+    finds that out before a run instead of during one.
+    """
+    from datetime import datetime, timezone
+
+    from auto_ext import __version__
+
+    patch_versions = sorted({patch.base.catalog_version for patch in recipe.patches})
+    rule = "-" * max(4, 79 - len(_EXPORT_BEGIN))
+    end_rule = "-" * max(4, 79 - len(_EXPORT_END))
+    lines = [
+        f"{_EXPORT_BEGIN} {rule}",
+        "# format: auto-ext/recipe-export/1",
+        f"# recipe: {recipe.recipe_id}",
+        f"# name: {recipe.name}",
+        f"# version: {recipe.version}",
+        f"# catalog-version: {catalog_version}",
+        f"# auto-ext-version: {__version__}",
+        f"# manual-edits: {recipe.manual_edit_count} hunk(s) in "
+        f"{len(recipe.patches)} patch(es)",
+        f"# patch-catalog-versions: {', '.join(patch_versions) or '(none)'}",
+        f"# content-sha256: {recipe.content_sha256()}",
+        f"# exported-at: {datetime.now(timezone.utc).isoformat()}",
+        f"# exported-from: {source}",
+        "#",
+        "# A recipe is PDK-independent, so this file is the whole thing, manual",
+        "# edits included: drop it into your recipes/ directory, or hand the path",
+        "# straight to `auto-ext recipe show`.",
+        "#",
+        "# The stored hunks are masked at every landing site the catalog models,",
+        "# so the cell and library names inside them follow whatever DUT you run",
+        "# against. A hunk captured from a line the catalog does NOT model keeps",
+        "# that line verbatim, absolute paths and all: run `auto-ext patch show`",
+        "# and read them before sending this outside your project.",
+        "#",
+        "# If `auto-ext catalog list` on your machine reports a catalog version",
+        "# other than the one above, these hunks were captured against a",
+        "# different parameter catalog: review them with `auto-ext patch list`",
+        "# before the first run.",
+        f"{_EXPORT_END} {end_rule}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+@recipe_app.command("export")
+def recipe_export(
+    name: str = typer.Argument(..., metavar="NAME", help="recipe_id, or a path to a .yaml."),
+    out: Optional[Path] = typer.Option(
+        None,
+        "--out",
+        help="Write here instead of to stdout. An existing directory means "
+        "<recipe_id>.yaml inside it.",
+    ),
+    auto_ext_root: Optional[Path] = typer.Option(
+        None, "--auto-ext-root", help=_PROFILE_ROOT_HELP
+    ),
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        help=_RUNS_CONFIG_HELP,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    recipes_dir: Optional[Path] = typer.Option(
+        None, "--recipes-dir", help=_RECIPES_DIR_HELP
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing --out file."),
+) -> None:
+    """Export one recipe, manual edits and all, as a single file to send on.
+
+    The export *is* a recipe file: the receiving side drops it into their
+    ``recipes/`` directory and it loads. What the export adds is a provenance
+    header naming the parameter catalog the stored hunks were captured against,
+    so a mismatch surfaces on their machine before a run rather than during one.
+
+    Without ``--out`` the document goes to stdout and every note goes to stderr,
+    so ``auto-ext recipe export foo > foo.yaml`` produces a clean file.
+    """
+    from auto_ext.model.recipe import dump_recipe_yaml, load_recipe_with_raw, recipe_filename
+
+    loaded = _load_recipe(recipe_search_path(auto_ext_root, config_dir, recipes_dir), name)
+    recipe, raw = load_recipe_with_raw(loaded.path)
+    catalog = _catalog_or_exit()
+
+    body = _strip_export_header(dump_recipe_yaml(recipe, raw=raw))
+    document = (
+        _export_header(recipe, source=loaded.path, catalog_version=catalog.catalog_version)
+        + body
+    )
+    stale = sorted(
+        {
+            patch.base.catalog_version
+            for patch in recipe.patches
+            if patch.base.catalog_version != catalog.catalog_version
+        }
+    )
+
+    if out is None:
+        typer.echo(document.rstrip("\n"))
+        typer.secho(
+            f"exported {recipe.recipe_id} from {loaded.path}: "
+            f"{recipe.manual_edit_count} manual edit(s), "
+            f"catalog {catalog.catalog_version}",
+            err=True,
+        )
+        if stale:
+            typer.secho(
+                f"note: the stored hunks were captured against catalog "
+                f"{', '.join(stale)}, not {catalog.catalog_version}; the header "
+                f"records both.",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+        raise typer.Exit(code=0)
+
+    destination = out.expanduser()
+    if destination.is_dir():
+        destination = destination / recipe_filename(recipe)
+    destination = destination.resolve()
+    if destination.exists() and not force:
+        typer.secho(
+            f"{destination} already exists; pass --force to overwrite it.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(document, encoding="utf-8")
+
+    typer.echo(f"wrote {destination}")
+    typer.echo(f"  recipe_id:       {recipe.recipe_id}")
+    typer.echo(f"  name:            {recipe.name}")
+    typer.echo(
+        f"  manual edits:    {recipe.manual_edit_count} hunk(s) in "
+        f"{len(recipe.patches)} patch(es)"
+    )
+    typer.echo(f"  catalog version: {catalog.catalog_version}")
+    typer.echo(f"  content sha256:  {recipe.content_sha256()[:16]}")
+    if stale:
+        typer.secho(
+            f"note: the stored hunks were captured against catalog "
+            f"{', '.join(stale)}, not {catalog.catalog_version}; the header "
+            f"records both.",
+            fg=typer.colors.YELLOW,
+        )
+    typer.echo("  the receiving side drops this into their recipes/ directory.")
 
 
 # ---- profile ----------------------------------------------------------------

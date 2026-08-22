@@ -249,7 +249,11 @@ def resolve_corner(recipe: Recipe, profile: PdkProfile) -> ResolvedCorner:
     return ResolvedCorner(
         name=spec.name,
         technology_corner=spec.technology_corner,
-        temperature_c=float(temperature),
+        # Passed on, never rebuilt: both sources are already model-validated
+        # floats, and ``float()`` on a
+        # :class:`~auto_ext.model.common.WrittenFloat` would throw away the
+        # spelling the file it came from used.
+        temperature_c=temperature,
         temperature_source=source,
     )
 

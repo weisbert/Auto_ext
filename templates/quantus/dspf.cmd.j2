@@ -5,70 +5,63 @@
 #--------------------------------------------------------------------------------------
 
 capacitance \
-              -decoupling_factor 1.0 \
+              -decoupling_factor [[decoupling_factor]] \
               -ground_net "[[ground_net]]"
 extract \
-              -selection "all" \
-              -type "rc_coupled"
+              -selection "[[extract_selection]]" \
+              -type "[[extract_type]]"
 extraction_setup \
-              -array_vias_spacing auto \
-              -max_fracture_length infinite \
-              -max_fracture_length_unit "MICRONS" \
-              -max_via_array_size "auto" \
-              -parasitic_blocking_device_cells_file "[[qrc_deck_dir]]/preserveCellList.txt" \
-              -net_name_space "SCHEMATIC"
+              -array_vias_spacing [[array_vias_spacing]] \
+              -max_fracture_length [[max_fracture_length]] \
+              -max_fracture_length_unit "[[max_fracture_length_unit]]" \
+              -max_via_array_size "[[max_via_array_size]]" \
+              -parasitic_blocking_device_cells_file "[[preserve_cell_list_name]]" \
+              -net_name_space "[[extraction_net_name_space]]"
 filter_cap \
-              -exclude_self_cap true \
-              -exclude_floating_nets true \
+              -exclude_self_cap [[ "true" if exclude_self_cap else "false" ]] \
+              -exclude_floating_nets [[ "true" if exclude_floating_nets else "false" ]] \
               -exclude_floating_nets_limit [[exclude_floating_nets_limit]]
 filter_coupling_cap \
               -coupling_cap_threshold_absolute [[coupling_cap_threshold_absolute]] \
               -coupling_cap_threshold_relative [[coupling_cap_threshold_relative]]
 filter_res \
-              -merge_parallel_res true \
+              -merge_parallel_res [[ "true" if merge_parallel_res else "false" ]] \
               -min_res [[min_res]] \
-              -remove_dangling_res true
+              -remove_dangling_res [[ "true" if remove_dangling_res else "false" ]]
 input_db -type calibre \
               -device_property_value 7 \
               -run_name "Design" \
               -directory_name "[[output_dir]]/query_output" \
-              -hierarchy_delimiter "/" \
+              -hierarchy_delimiter "[[input_db_hierarchy_delimiter]]" \
               -instance_property_value 6 \
               -layer_map_file "[[output_dir]]/query_output/Design.gds.map" \
               -net_property_value 5
 metal_fill \
-              -type virtual
+              -type [[metal_fill_type]]
 output_db -type dspf \
-              -subtype extended \
-              -device_finger_delimiter "@" \
-              -busbit_delimiter "[]" \
-              -disable_instances false \
-              -hierarchy_delimiter "/" \
-              -include_cap_model "false" \
-              -include_parasitic_cap_model "false" \
-              -include_res_model "false" \
-              -include_parasitic_res_model "comment" \
+              -subtype [[dspf_subtype]] \
+              -device_finger_delimiter "[[device_finger_delimiter]]" \
+              -busbit_delimiter "[[busbit_delimiter]]" \
+              -disable_instances [[ "true" if disable_instances else "false" ]] \
+              -hierarchy_delimiter "[[output_hierarchy_delimiter]]" \
+              -include_cap_model "[[ 'true' if include_cap_model else 'false' ]]" \
+              -include_parasitic_cap_model "[[ 'true' if include_parasitic_cap_model else 'false' ]]" \
+              -include_res_model "[[ 'true' if include_res_model else 'false' ]]" \
+              -include_parasitic_res_model "[[include_parasitic_res_model]]" \
               -output_xy \
-              "CANONICAL_RES" \
-              "PARASITIC_RES" \
-              "CANONICAL_CAP" \
-              "PARASITIC_CAP" \
-              "DIODE" \
-              "MOS" \
-              "BIPOLAR" \
-              "GENERIC" \
-              -netlist_coupling_values "double" \
-              -add_bulk_terminal false \
-              -sub_node_char "#"
+[% for _item in output_xy %]              "[[ _item ]]" \
+[% endfor %]              -netlist_coupling_values "[[netlist_coupling_values]]" \
+              -add_bulk_terminal [[ "true" if add_bulk_terminal else "false" ]] \
+              -sub_node_char "[[sub_node_char]]"
 output_setup \
               -directory_name "[[output_dir]]/query_output" \
               -file_name "[[dspf_out_path]]" \
-              -net_name_space "SCHEMATIC" \
+              -net_name_space "[[output_net_name_space]]" \
               -temporary_directory_name "Design"
 process_technology \
               -technology_corner \
-              "TYPICAL" \
-              -technology_library_file "$env(SETUP_ROOT)/assura_tech.lib" \
+              "[[technology_corner]]" \
+              -technology_library_file "[[technology_library_file]]" \
               -technology_name "[[tech_name]]" \
               -temperature \
               [[temperature]]

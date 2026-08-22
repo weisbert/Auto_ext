@@ -48,8 +48,9 @@ from auto_ext.model.workspace import WorkspaceConfig, load_workspace
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: The shipped catalog templates. Only :func:`shipped_texts` reads these: it
-#: cross-checks the catalog against what Auto_ext renders *today*.
+#: The shipped catalog templates. Only the path-resolution tests read these,
+#: and only for their paths: their *contents* are being parameterised round by
+#: round, so nothing here asserts what literal a shipped template carries.
 TEMPLATES = REPO_ROOT / "templates"
 
 #: The archived v1 tree -- ``.j2`` bodies *and* their ``*.j2.manifest.yaml``
@@ -714,26 +715,38 @@ def test_employee_id_is_flagged_rather_than_written_to_the_home_dir(
 # ---- template read-back ------------------------------------------------------
 
 
-def shipped_texts() -> dict[RenderTarget, str]:
+def v1_texts() -> dict[RenderTarget, str]:
+    """The five frozen v1 template bodies -- the migration's actual input.
+
+    The v1 tree and not ``templates/``: the shipped tree is being
+    parameterised row by row, so its literals are moving into the catalog
+    *by design* and a read-back of it gets thinner with every round. What
+    the catalog's defaults were transcribed from, and what a user's disk
+    still holds when they migrate, is this frozen copy -- which is where
+    a divergence between catalog and reality is worth failing over.
+    """
+
     return {
-        RenderTarget.SI_ENV: (TEMPLATES / "si/default.env.j2").read_text(encoding="utf-8"),
-        RenderTarget.LVS_QCI: (TEMPLATES / "calibre/calibre_lvs.qci.j2").read_text(
+        RenderTarget.SI_ENV: (V1_TEMPLATES / "si/default.env.j2").read_text(encoding="utf-8"),
+        RenderTarget.LVS_QCI: (V1_TEMPLATES / "calibre/calibre_lvs.qci.j2").read_text(
             encoding="utf-8"
         ),
-        RenderTarget.QUANTUS_EXT: (TEMPLATES / "quantus/ext.cmd.j2").read_text(encoding="utf-8"),
-        RenderTarget.QUANTUS_DSPF: (TEMPLATES / "quantus/dspf.cmd.j2").read_text(
+        RenderTarget.QUANTUS_EXT: (V1_TEMPLATES / "quantus/ext.cmd.j2").read_text(
             encoding="utf-8"
         ),
-        RenderTarget.JIVARO_XML: (TEMPLATES / "jivaro/default.xml.j2").read_text(
+        RenderTarget.QUANTUS_DSPF: (V1_TEMPLATES / "quantus/dspf.cmd.j2").read_text(
+            encoding="utf-8"
+        ),
+        RenderTarget.JIVARO_XML: (V1_TEMPLATES / "jivaro/default.xml.j2").read_text(
             encoding="utf-8"
         ),
     }
 
 
-def test_shipped_templates_agree_with_every_catalog_default() -> None:
+def test_the_v1_templates_agree_with_every_catalog_default() -> None:
     """The strongest available cross-check of the catalog against reality."""
 
-    readback = read_back_from_templates(shipped_texts())
+    readback = read_back_from_templates(v1_texts())
     assert readback.diverged == {}
     # 88 of the 120 recipe/profile/resource rows are literals in a shipped
     # template; the rest are knobs, jinja vars or not emitted at all.
@@ -741,7 +754,7 @@ def test_shipped_templates_agree_with_every_catalog_default() -> None:
 
 
 def test_every_unread_row_carries_a_reason() -> None:
-    readback = read_back_from_templates(shipped_texts())
+    readback = read_back_from_templates(v1_texts())
     assert all(reason for reason in readback.unread.values())
     catalog = builtin_catalog()
     for key, reason in readback.unread.items():
@@ -754,7 +767,7 @@ def test_every_unread_row_carries_a_reason() -> None:
 
 
 def test_read_back_covers_every_owner_it_claims_to() -> None:
-    readback = read_back_from_templates(shipped_texts())
+    readback = read_back_from_templates(v1_texts())
     catalog = builtin_catalog()
     owners = {catalog.option(key).owner for key in readback.values}
     assert owners <= {Owner.RECIPE, Owner.PROFILE, Owner.RESOURCES}
@@ -762,14 +775,14 @@ def test_read_back_covers_every_owner_it_claims_to() -> None:
 
 
 def test_read_back_ignores_jinja_sites() -> None:
-    readback = read_back_from_templates(shipped_texts())
+    readback = read_back_from_templates(v1_texts())
     for key in ("lvs_deck_variant", "temperature_c", "reduction_frequency_limit_ghz"):
         assert key not in readback.values
         assert "Jinja expression" in readback.unread[key]
 
 
 def test_quantus_parser_handles_all_four_layouts() -> None:
-    parsed = _parse_quantus(shipped_texts()[RenderTarget.QUANTUS_DSPF])
+    parsed = _parse_quantus(v1_texts()[RenderTarget.QUANTUS_DSPF])
     # inline
     assert parsed[("extract", "-type")].values == ("rc_coupled",)
     # value on the next line
@@ -783,14 +796,14 @@ def test_quantus_parser_handles_all_four_layouts() -> None:
 
 
 def test_quantus_parser_keeps_sections_apart() -> None:
-    parsed = _parse_quantus(shipped_texts()[RenderTarget.QUANTUS_DSPF])
+    parsed = _parse_quantus(v1_texts()[RenderTarget.QUANTUS_DSPF])
     assert parsed[("extract", "-type")].values == ("rc_coupled",)
     assert parsed[("metal_fill", "-type")].values == ("virtual",)
     assert parsed[("output_db", "-type")].values == ("dspf",)
 
 
 def test_skill_parser_reads_values_and_lists() -> None:
-    parsed = _parse_skill(shipped_texts()[RenderTarget.SI_ENV])
+    parsed = _parse_skill(v1_texts()[RenderTarget.SI_ENV])
     assert parsed[("", "shortRES")].values == ("2000.0",)
     assert parsed[("", "preserveRES")].values == ("'t",)
     assert parsed[("", "checkRESSIZE")].values == ("'nil",)
@@ -799,20 +812,20 @@ def test_skill_parser_reads_values_and_lists() -> None:
 
 
 def test_calibre_parser_reads_the_supply_lists() -> None:
-    parsed = _parse_calibre(shipped_texts()[RenderTarget.LVS_QCI])
+    parsed = _parse_calibre(v1_texts()[RenderTarget.LVS_QCI])
     assert parsed[("", "*lvsReportOptions")].values == ("S",)
     assert "VDD" in parsed[("", "*lvsPowerNames")].text.split()
     assert parsed[("", "*cmnNumTurbo")].values == ("2",)
 
 
 def test_xml_parser_reads_the_jivaro_elements() -> None:
-    parsed = _parse_xml(shipped_texts()[RenderTarget.JIVARO_XML])
+    parsed = _parse_xml(v1_texts()[RenderTarget.JIVARO_XML])
     assert parsed[("", "criterion")].values == ("standard",)
     assert parsed[("", "rModel")].values == ("analogLib/presistor/symbol",)
 
 
 def test_typed_read_back_values() -> None:
-    values = read_back_from_templates(shipped_texts()).values
+    values = read_back_from_templates(v1_texts()).values
     assert values["netlist_short_res"] == 2000.0
     assert values["netlist_preserve_res"] is True
     assert values["netlist_check_res_size"] is False

@@ -272,9 +272,9 @@ def test_e2e_one_recipe_two_pdks_differ_only_where_the_pdk_binds(
     because that is what "portable recipe" means.
 
     The two trees differ in every path, in the tech name and in the deck
-    version; the Recipe is copied, not re-authored. (The corner *literal* is
-    held equal here on purpose -- see the next test for why that one axis
-    cannot move yet.)
+    version; the Recipe is copied, not re-authored. The corner *literal* is
+    held equal between the two profiles here so that a difference in it would
+    be a bug; that it is now *able* to differ is the next test's subject.
     """
 
     from auto_ext.core.profile_discover import write_profile_yaml
@@ -333,23 +333,26 @@ def test_e2e_one_recipe_two_pdks_differ_only_where_the_pdk_binds(
     assert "-technology_corner" in first["ext.cmd"]
 
 
-def test_e2e_a_corner_the_template_freezes_is_refused_not_mis_rendered(
+def test_e2e_the_pdk_names_the_corner_and_the_command_file_says_so(
     _e2e_runner: CliRunner,
     _e2e_pdk: dict[str, Path],
     _e2e_workarea: Path,
     tmp_path: Path,
 ) -> None:
-    """The one axis portability does not reach yet, pinned as a fact.
+    """The axis portability could not reach, now reached, through the CLI.
 
-    ``templates/quantus/ext.cmd.j2`` still writes ``-technology_corner
-    "TYPICAL"`` as a literal, so a PDK that calls its typical corner anything
-    else cannot be rendered for. The design's answer is not to guess: the
-    render refuses, names the row and the file, and writes nothing -- because
-    the alternative is an extraction run against the wrong corner that looks
-    exactly like a successful one.
+    This test used to assert the opposite. ``ext.cmd.j2`` typed
+    ``-technology_corner "TYPICAL"``, so a PDK calling its typical corner
+    ``NOM_28`` could not be rendered for at all and the honest answer was to
+    refuse -- the alternative being an extraction run against the wrong corner
+    that looks exactly like a successful one. Its own docstring said "when the
+    catalog parameterises that row, this test fails"; it did, and this is what
+    replaced it.
 
-    When the catalog parameterises that row, this test fails and the previous
-    one grows the corner back into its difference list.
+    One unchanged Recipe, one profile whose corner table says ``NOM_28``, and
+    the generated command file has to carry the PDK's word, not the
+    template's. The recipe still says ``typical`` -- that is the semantic name
+    and it never reaches the tool.
     """
 
     from auto_ext.core.profile_discover import write_profile_yaml
@@ -383,16 +386,13 @@ def test_e2e_a_corner_the_template_freezes_is_refused_not_mis_rendered(
             "--dry-run",
         ],
     )
-    assert result.exit_code != 0, result.output
-    assert "hardcode" in result.output
-    assert "NOM_28" in result.output
-    assert "TYPICAL" in result.output
-    # The stage that would have carried the wrong corner wrote nothing. The
-    # stages before it did render -- refusal is per target, and a file that
-    # never mentions the corner is not made wrong by one that does.
-    names = {p.name for p in (root / "runs").glob("*/rendered/*")}
-    assert "ext.cmd" not in names
-    assert names <= {"si.env", "lvs.qci"}
+    assert result.exit_code == 0, result.output
+
+    rendered = {p.name: p.read_text(encoding="utf-8") for p in (root / "runs").glob("*/rendered/*")}
+    assert "ext.cmd" in rendered, sorted(rendered)
+    lines = [line.strip().rstrip("\\").strip() for line in rendered["ext.cmd"].splitlines()]
+    assert lines[lines.index("-technology_corner") + 1] == '"NOM_28"'
+    assert "TYPICAL" not in rendered["ext.cmd"]
 
 
 # ---- seam 4: the dspf path the run records vs. the one the GUI previews ------

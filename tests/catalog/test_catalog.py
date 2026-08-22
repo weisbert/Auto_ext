@@ -36,6 +36,8 @@ from auto_ext.catalog.spec import (
     default_templates_root,
     load_catalog,
 )
+from auto_ext.core.readback import parse_by_syntax
+from auto_ext.core.template import scan_placeholders
 from auto_ext.model.common import RenderTarget, Stage
 
 
@@ -519,6 +521,183 @@ def test_catalog_and_templates_agree(catalog: Catalog) -> None:
     assert audit.ok, "\n" + audit.describe()
 
 
+# ---- the gap audit: a row nobody can set ------------------------------------
+#
+# ``owner`` says who holds the value; ``currently`` says how it reaches the
+# file. A row that is recipe- or profile-owned *and* ``hardcoded_literal`` is
+# the combination that cannot work: the object has a field, the GUI draws a
+# control, and the template writes its own literal regardless. Eighty-four
+# rows were in that state before the parameterisation round.
+#
+# The number below is the whole point of this test. It is not a summary of
+# what the catalog happens to say -- it is a budget, and adding a row without
+# a template hole spends it.
+
+#: Rows whose value a user owns but which the shipped templates still write as
+#: a literal. One entry, with the reason it is still here.
+STILL_HARDCODED: dict[str, str] = {
+    "lvs_rules_filename_pattern": (
+        "calibre_lvs.qci.j2 line 1 is "
+        "'*lvsRulesFile: [[calibre_lvs_dir]]/[[calibre_lvs_basename]]"
+        ".[[lvs_variant]].qcilvs' -- the '.' and the '.qcilvs' between the "
+        "three holes ARE the pattern, so parameterising it means turning "
+        "four values into one expression rather than dropping a [[var]] into "
+        "a slot. Doing that naively collapses the line to a single hole and "
+        "breaks the importer, which needs all three to recover deck dir, "
+        "basename and variant from a user's own .qci. The shape that works "
+        "keeps all four: "
+        "'[[calibre_lvs_dir]]/[[ lvs_rules_filename_pattern.format("
+        "basename=calibre_lvs_basename, suffix=lvs_variant) ]]', which needs "
+        "render.py to expose pdk.lvs_decks.filename_pattern in the context."
+    ),
+}
+
+
+def test_no_owned_row_is_left_hardcoded(catalog: Catalog) -> None:
+    """A row the user owns must be a hole in the template, not a literal.
+
+    This is the tripwire for the next person who adds a catalog row: declaring
+    it recipe- or profile-owned without parameterising its landing site gives
+    the GUI a field that does nothing and the renderer a value it has to
+    refuse. Both halves are real behaviour --
+    :func:`auto_ext.ui.widgets.option_editor.template_freezes` disables the
+    field and ``check_representable`` refuses the stage -- so nothing is
+    silently wrong; it is just a promise the tool cannot keep, and the honest
+    place to notice is here.
+
+    Ideally this dict is empty. Every entry has to say what specifically
+    blocks it, because "not done yet" is how the previous eighty-four got
+    there.
+    """
+
+    stuck = {
+        opt.key
+        for opt in catalog.options
+        if opt.currently is Currently.HARDCODED_LITERAL
+        and opt.owner in (Owner.RECIPE, Owner.PROFILE)
+    }
+    assert stuck == set(STILL_HARDCODED), (
+        "the set of unsettable rows moved. Parameterised one? Delete its entry "
+        "from STILL_HARDCODED. Added one? Parameterise its landing site, or "
+        "add it here with the reason it cannot be."
+    )
+    assert len(stuck) == 1
+    for key, reason in STILL_HARDCODED.items():
+        assert len(reason) > 80, f"{key}: give the actual blocker, not a label"
+        assert catalog.option(key).lands_in, f"{key}: a frozen row must say where"
+
+
+def test_no_recipe_owned_row_is_hardcoded_at_all(catalog: Catalog) -> None:
+    """The stricter half, stated separately because it is separately true.
+
+    Nothing on the Recipes form is unsettable. The one row left is
+    profile-owned and reaches a user through a PDK profile file, not through
+    the form, so a user editing a recipe cannot meet a dead field at all.
+    """
+
+    assert [
+        opt.key
+        for opt in catalog.by_owner(Owner.RECIPE)
+        if opt.currently is Currently.HARDCODED_LITERAL
+    ] == []
+
+
+def test_the_rows_that_stay_literal_are_owned_by_something_else(catalog: Catalog) -> None:
+    """The rest of the ``hardcoded_literal`` population, and why it is fine.
+
+    ``fixed`` rows are literals by definition -- ``auCdlDefNetlistProc`` is not
+    a setting. ``run`` rows are per-run values the runner computes. ``resources``
+    rows are the machine's, not the recipe's (DECISIONS.md #21), and they are
+    the population ``check_representable`` still has real work to do on: a
+    ``ResourceProfile`` naming sixteen turbo cores against a template that
+    writes two is refused rather than quietly ignored.
+    """
+
+    by_owner: dict[Owner, list[str]] = {}
+    for opt in catalog.options:
+        if opt.currently is Currently.HARDCODED_LITERAL:
+            by_owner.setdefault(opt.owner, []).append(opt.key)
+
+    assert set(by_owner) == {Owner.FIXED, Owner.RUN, Owner.RESOURCES, Owner.PROFILE}
+    assert sorted(by_owner[Owner.RESOURCES]) == [
+        "lvs_license_wait_time",
+        "lvs_num_turbo",
+        "lvs_run_hyper",
+        "lvs_run_mt",
+        "reduction_cpu",
+    ]
+    assert by_owner[Owner.PROFILE] == list(STILL_HARDCODED)
+
+
+def test_every_parameterised_row_really_has_its_hole(catalog: Catalog) -> None:
+    """The other direction, and the one that makes the flip meaningful.
+
+    Flipping ``currently`` to ``jinja_var`` without putting the placeholder in
+    the ``.j2`` would empty ``STILL_HARDCODED`` and change nothing about what
+    the tool writes. ``audit_template_vars`` reads the templates, so a row
+    claiming a hole it does not have is caught here rather than at a render.
+    """
+
+    claimed = [opt for opt in catalog.options if opt.expected_in_templates]
+    assert len(claimed) > 90, len(claimed)
+    audit = audit_template_vars(catalog)
+    assert audit.missing_in_template == [], "\n" + audit.describe()
+
+
+def test_no_landing_site_points_past_the_end_of_its_template(catalog: Catalog) -> None:
+    """A ``line`` hint is a hint, and a hint that is out of range is a lie.
+
+    Cheap, universal, and it catches the class that actually happened: folding
+    ``-output_xy`` from seven lines into a loop shortened ``dspf.cmd.j2`` by
+    seven, and four hints ended up naming lines the file does not have.
+    """
+
+    lengths = {
+        spec.id: len(spec.template_path.read_text(encoding="utf-8").splitlines())
+        for spec in catalog.targets
+    }
+    for opt in catalog.options:
+        for site in opt.lands_in:
+            if site.target is None or site.line is None:
+                continue
+            assert 1 <= site.line <= lengths[site.target], (
+                f"{opt.key}: {site.target.value} line {site.line}, but the "
+                f"template has {lengths[site.target]} lines"
+            )
+
+
+def test_every_line_hint_the_parser_can_check_is_right(catalog: Catalog) -> None:
+    """The exact version, for the sites where the parser and the catalog agree
+    on how to name a line.
+
+    Only the Quantus family qualifies: its ``section`` is the command name the
+    parser also keys on, so ``(section, option)`` is the same tuple on both
+    sides. The other three targets group their rows into catalog-logical
+    sections (``identity``, ``lvs_layout``) that the parser does not know
+    about, and inventing a mapping here would be a second source of truth --
+    which is the thing this file exists to prevent. Those are covered by the
+    range check above and by ``audit_template_vars``.
+    """
+
+    checked = 0
+    for spec in catalog.targets:
+        text = spec.template_path.read_text(encoding="utf-8")
+        parsed = {key: raw.line for key, raw in parse_by_syntax(spec.syntax, text).items()}
+        for opt in catalog.options:
+            for site in opt.lands_in:
+                if site.target is not spec.id or site.line is None:
+                    continue
+                actual = parsed.get((site.section, site.option))
+                if actual is None:
+                    continue
+                assert actual == site.line, (
+                    f"{opt.key}: catalog says {spec.id.value} line {site.line}, "
+                    f"the template has {site.option} on line {actual}"
+                )
+                checked += 1
+    assert checked > 50, f"only {checked} sites were comparable; the test is thin"
+
+
 def test_the_audit_catches_a_row_the_template_does_not_back() -> None:
     payload = _catalog_payload(
         _minimal_option(
@@ -534,17 +713,22 @@ def test_the_audit_catches_a_row_the_template_does_not_back() -> None:
     assert "does not reference it" in audit.describe()
 
 
-def test_the_audit_catches_a_template_variable_nobody_declared() -> None:
-    # The direction that matters for the future: si.env really does use
-    # [[library]], [[cell]], [[lvs_source_view]] and [[output_dir]], and a
-    # catalog that declares none of them must fail.
+def test_the_audit_catches_a_template_variable_nobody_declared(repo_root: Path) -> None:
+    # The direction that matters for the future: a catalog that declares none of
+    # si.env's variables must report every single one. [[library]], [[cell]],
+    # [[lvs_source_view]] and [[output_dir]] have always been there; the rest
+    # arrived as catalog rows were parameterised out of their literals, so the
+    # expectation is read off the template instead of being a list that goes
+    # stale the next time a row moves.
     audit = audit_template_vars(Catalog.model_validate(_catalog_payload()))
-    assert sorted(var for _target, var in audit.missing_in_catalog) == [
-        "cell",
-        "library",
-        "lvs_source_view",
-        "output_dir",
-    ]
+    reported = {var for _target, var in audit.missing_in_catalog}
+    assert {"cell", "library", "lvs_source_view", "output_dir"} <= reported
+    # Two references that are not a bare [[var]]: a SKILL boolean expression and
+    # a list joined by a filter. Both still count as a variable this catalog
+    # fails to claim.
+    assert {"preserve_res", "sim_view_list"} <= reported
+    si_env = repo_root / "templates" / "si" / "default.env.j2"
+    assert reported == set(scan_placeholders(si_env).jinja_variables)
     assert "no catalog row claims that variable" in audit.describe()
 
 

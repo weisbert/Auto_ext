@@ -1668,21 +1668,37 @@ def test_a_setting_the_template_hardcodes_fails_its_stage_with_a_reason(
     mocks_on_path: Path,
     tmp_path: Path,
 ) -> None:
+    """The refusal is per stage and writes nothing.
+
+    The subject used to be ``extraction.decoupling_factor`` against the quantus
+    stage; that row is a ``[[var]]`` now, so the example moved to the one
+    setting the shipped templates genuinely still freeze --
+    ``calibre_lvs.qci.j2`` line 1 spells ``.qcilvs`` out between its three
+    holes, so a PDK that names its decks anything else cannot be rendered for.
+    Writing ``.qcilvs`` anyway and reporting success is the failure mode this
+    check exists to kill.
+    """
+
     project, tasks = _load(project_tools_config)
     ae_root = tmp_path / "project_root"
 
+    base = _profile(workarea)
+    other_decks = base.lvs_decks.model_copy(
+        update={"filename_pattern": "{basename}_{suffix}.rules"}
+    )
+
     summary = run_tasks(
-        project, tasks, stages=["quantus"],
+        project, tasks, stages=["calibre"],
         auto_ext_root=ae_root, workarea=workarea,
-        recipe=_recipe(extraction={"decoupling_factor": 0.5}),
-        profile=_profile(workarea),
+        recipe=_recipe(),
+        profile=base.model_copy(update={"lvs_decks": other_decks}),
     )
 
     stage = summary.tasks[0].stages[0]
     assert stage.status == "failed"
-    assert "decoupling_factor" in stage.error
+    assert "lvs_rules_filename_pattern" in stage.error
     assert "Recipe.patches" in stage.error
-    assert not (_only_run_dir(ae_root) / "rendered" / "ext.cmd").exists()
+    assert not (_only_run_dir(ae_root) / "rendered" / "lvs.qci").exists()
 
 
 def test_recipe_patches_land_in_the_rendered_file_and_in_run_json(

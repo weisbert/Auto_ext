@@ -11,6 +11,10 @@ The three claims worth defending:
 * **it fits.** Artboard ``1j`` fixes the window floor at 940x560. The old
   Project tab alone demanded 1001px of height; this screen is asserted well
   under both halves of the budget so the floor is actually reachable.
+* **the import entry hands over, it does not write.** ``Import...`` opens
+  :class:`~auto_ext.ui.widgets.recipe_import_dialog.RecipeImportDialog` and
+  confirming emits ``recipe_imported``; the screen's own library is asserted
+  unchanged, because the host is still the only thing that touches disk.
 """
 
 from __future__ import annotations
@@ -23,9 +27,9 @@ pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
 from PyQt5.QtCore import QPoint, Qt  # noqa: E402
-from PyQt5.QtWidgets import QMenu  # noqa: E402
+from PyQt5.QtWidgets import QDialog, QMenu  # noqa: E402
 
-from auto_ext.catalog import Owner, builtin_catalog  # noqa: E402
+from auto_ext.catalog import Currently, Owner, builtin_catalog  # noqa: E402
 from auto_ext.core.patch_models import (  # noqa: E402
     BaseFingerprint,
     HunkOutcome,
@@ -38,8 +42,11 @@ from auto_ext.core.patch_models import (  # noqa: E402
 from auto_ext.model.recipe import Recipe, recipe_from_catalog  # noqa: E402
 from auto_ext.ui.screens.recipes_screen import (  # noqa: E402
     GROUP_ORDER,
+    RECIPE_LIST_WIDTH,
     RecipesScreen,
+    frozen_specs,
     grouped_specs,
+    import_status_text,
     recipe_specs,
 )
 from auto_ext.ui.widgets.option_editor import (  # noqa: E402
@@ -49,6 +56,7 @@ from auto_ext.ui.widgets.option_editor import (  # noqa: E402
     TextOptionEditor,
 )
 from auto_ext.ui.widgets.patch_strip import HunkState  # noqa: E402
+from auto_ext.ui.widgets.recipe_import_dialog import RecipeImportDialog  # noqa: E402
 
 _SHA = "0" * 64
 _CAPTURED = datetime(2026, 8, 14, 9, 30, tzinfo=timezone.utc)
@@ -211,6 +219,92 @@ def test_unconfirmed_rows_are_marked(qtbot) -> None:
     expected = {spec.key for spec in recipe_specs() if spec.question}
     assert marked == expected
     assert marked, "the catalog claims every value has been confirmed"
+
+
+# ---- rows the template still freezes -------------------------------------
+
+
+def test_the_shipped_catalog_leaves_no_form_row_unsettable() -> None:
+    """The state the parameterisation round was for, asserted on the form.
+
+    Every row on this page is a row the user can actually change. The count is
+    pinned catalog-wide in
+    ``tests/catalog/test_catalog.py::test_no_owned_row_is_left_hardcoded``;
+    this is the same fact stated where a user meets it.
+    """
+
+    assert frozen_specs() == []
+
+
+def test_a_frozen_row_reaches_the_form_disabled_rather_than_missing(qtbot) -> None:
+    """What the page does the day a row is added before its template hole.
+
+    Not hidden: a field that vanishes reads as "this tool has no such
+    setting", which is false and is the misunderstanding the catalog exists to
+    end. Not editable either: the user would fill it in and find out at run
+    time. Shown, disabled, and marked.
+    """
+
+    full = builtin_catalog()
+    options = [
+        opt.model_copy(update={"currently": Currently.HARDCODED_LITERAL})
+        if opt.key == "decoupling_factor"
+        else opt
+        for opt in full.options
+    ]
+    screen = _screen(qtbot, full.model_copy(update={"options": options}))
+    screen.set_recipes([make_recipe()])
+
+    assert screen.frozen_option_keys() == ["decoupling_factor"]
+    editor = screen.editor("decoupling_factor")
+    assert editor is not None, "the row must still be on the page"
+    assert editor.is_frozen is True
+    assert editor.control().isEnabled() is False
+
+
+def test_a_recipe_that_sets_a_frozen_row_is_named_on_the_status_line(qtbot) -> None:
+    """The refusal, said on the page instead of by the runner.
+
+    ``check_representable`` would fail this recipe's quantus stage. The screen
+    knows the same thing from the same catalog column, so it says so while the
+    user is still looking at the form.
+    """
+
+    full = builtin_catalog()
+    options = [
+        opt.model_copy(update={"currently": Currently.HARDCODED_LITERAL})
+        if opt.key == "decoupling_factor"
+        else opt
+        for opt in full.options
+    ]
+    screen = _screen(qtbot, full.model_copy(update={"options": options}))
+
+    recipe = make_recipe()
+    recipe.extraction.decoupling_factor = 0.5
+    screen.set_recipes([recipe])
+
+    assert screen.frozen_overrides() == {"decoupling_factor": 0.5}
+    status = screen.status_text()
+    assert "decoupling_factor" in status
+    assert "hardcode" in status
+    # ...and the field still shows the literal the run would write.
+    assert screen.editor("decoupling_factor").value() == 1.0
+
+
+def test_a_recipe_that_agrees_with_the_literal_is_not_flagged(qtbot) -> None:
+    full = builtin_catalog()
+    options = [
+        opt.model_copy(update={"currently": Currently.HARDCODED_LITERAL})
+        if opt.key == "decoupling_factor"
+        else opt
+        for opt in full.options
+    ]
+    screen = _screen(qtbot, full.model_copy(update={"options": options}))
+    screen.set_recipes([make_recipe()])
+
+    assert screen.frozen_option_keys() == ["decoupling_factor"]
+    assert screen.frozen_overrides() == {}
+    assert "hardcode" not in screen.status_text()
 
 
 # ---- selection and loading -----------------------------------------------
@@ -546,3 +640,129 @@ def test_the_selected_recipe_is_reachable_from_the_list_widget(qtbot) -> None:
     screen.recipe_list.setCurrentItem(screen.recipe_list.topLevelItem(1))
     assert screen.current_recipe_id() == "b"
     assert screen.recipe_list.currentItem().data(0, Qt.UserRole) == "b"
+
+
+# ---- the import entry ----------------------------------------------------
+#
+# The button is on the screen; what the dialog *shows* is asserted in
+# tests/ui/test_recipe_import_dialog.py. What is asserted here is the seam:
+# the entry exists, it opens a dialog that knows the library it is joining,
+# and confirming hands the result out instead of writing it.
+
+
+def _import_dialog(qtbot, screen, monkeypatch) -> RecipeImportDialog:
+    """Click Import and return the dialog, without entering a modal loop."""
+
+    monkeypatch.setattr(RecipeImportDialog, "exec_", lambda self: QDialog.Rejected)
+    screen.import_button().click()
+    dialog = screen.import_dialog()
+    assert dialog is not None
+    qtbot.addWidget(dialog)
+    return dialog
+
+
+def test_the_recipe_toolbar_offers_an_import_entry(qtbot) -> None:
+    screen = _screen(qtbot)
+    button = screen.import_button()
+    assert button.text() == "Import…"
+    assert button.isEnabled() is True, "importing needs no selection"
+
+    screen.set_recipes([])
+    assert screen.import_button().isEnabled() is True
+
+
+def test_the_import_entry_does_not_squeeze_the_artboard_row(qtbot) -> None:
+    """Artboard ``1f`` draws three buttons in a 214px panel and they fill it.
+
+    A fourth on the same row would be clipped, so the new action sits on a
+    second row: the drawn row is untouched and nothing loses its label.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    drawn = (screen.new_button(), screen.duplicate_button(), screen.delete_button())
+    assert len({button.y() for button in drawn}) == 1, "the drawn row broke apart"
+    assert screen.import_button().y() > drawn[0].y()
+    assert screen.import_button().sizeHint().width() <= RECIPE_LIST_WIDTH
+
+
+def test_the_import_button_opens_a_dialog_that_knows_the_library(
+    qtbot, monkeypatch
+) -> None:
+    """The id it proposes may not collide with a recipe already on disk."""
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe("rc-typical-55c", "RC typical 55C")])
+
+    dialog = _import_dialog(qtbot, screen, monkeypatch)
+    assert isinstance(dialog, RecipeImportDialog)
+    assert dialog.page() == "files"
+    dialog.name_edit().setText("RC typical 55C")
+    assert dialog.recipe_id() == "rc-typical-55c-2"
+
+
+def test_reopening_the_import_starts_from_an_empty_dialog(
+    qtbot, monkeypatch, fixtures_dir
+) -> None:
+    """A dialog that reopens holding the last file is how one gets imported twice."""
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+
+    first = _import_dialog(qtbot, screen, monkeypatch)
+    first.add_paths([fixtures_dir / "raw" / "gui_export.ext.cmd"])
+    assert len(first.file_rows()) == 1
+
+    second = _import_dialog(qtbot, screen, monkeypatch)
+    assert second is not first
+    assert second.file_rows() == []
+
+
+def test_confirming_the_import_hands_the_result_to_the_host(
+    qtbot, monkeypatch, fixtures_dir, tmp_path
+) -> None:
+    """The screen writes no files -- it says what happened and hands it over."""
+
+    screen = _screen(qtbot)
+    library = [make_recipe()]
+    screen.set_recipes(library)
+    dialog = _import_dialog(qtbot, screen, monkeypatch)
+    assert dialog.add_paths([fixtures_dir / "raw" / "gui_export.ext.cmd"]) == 1
+    assert dialog.analyse() is True
+
+    with qtbot.waitSignal(screen.recipe_imported, timeout=2000) as blocker:
+        dialog.import_button().click()
+
+    result = blocker.args[0]
+    assert result is dialog.result_object()
+    assert result.recipe.recipe_id != "rc-typical-55c"
+    assert [recipe.recipe_id for recipe in screen.recipes()] == ["rc-typical-55c"], (
+        "the screen adopted the imported recipe instead of handing it out"
+    )
+    assert list(tmp_path.rglob("*.yaml")) == []
+
+
+def test_the_status_line_carries_all_three_import_numbers(
+    qtbot, monkeypatch, fixtures_dir
+) -> None:
+    """Including the one the user will not remember being told: the defaults."""
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    dialog = _import_dialog(qtbot, screen, monkeypatch)
+    dialog.add_paths([fixtures_dir / "raw" / "gui_export.ext.cmd"])
+    assert dialog.analyse() is True
+
+    seen: list[str] = []
+    screen.status_changed.connect(seen.append)
+    dialog.import_button().click()
+
+    line = seen[-1]
+    result = dialog.result_object()
+    assert f"{result.applied_count} values" in line
+    assert f"{result.hunk_count} manual edit" in line
+    assert "left at the catalog default" in line
+    assert import_status_text(result) == line

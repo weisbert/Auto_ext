@@ -27,6 +27,10 @@ the caller's object. It reads and writes no files: ``save_requested`` hands
 the working copy out and the host persists it. Reverting a hunk is applied to
 the working copy *and* announced, so the widget is usable on its own while
 the host stays the only thing that touches disk.
+:class:`~auto_ext.ui.widgets.recipe_import_dialog.RecipeImportDialog` follows
+the same rule -- it reads the user's files and produces a
+:class:`~auto_ext.core.recipe_import.RecipeImportResult`, and
+``recipe_imported`` hands that out for the host to write.
 
 Assumptions
 -----------
@@ -45,6 +49,20 @@ Assumptions
 * The six recipe-owned rows whose ``currently`` is ``absent`` have no
   ``context_path`` and therefore no field to bind to. They are proposals, not
   settings, and are skipped.
+* A row whose ``currently`` is ``hardcoded_literal`` *is* shown, disabled and
+  marked -- see :func:`~auto_ext.ui.widgets.option_editor.template_freezes`.
+  Hiding it would say "this tool has no such setting", which is false and is
+  the misunderstanding the catalog exists to end; leaving it editable would
+  let the user fill in a value that ``check_representable`` refuses only once
+  a run has started. There are none in the shipped catalog and
+  :func:`frozen_option_keys` is how a build that grows one says so.
+* The list toolbar is two rows. Artboard ``1f`` draws one row of three
+  buttons inside a 214px panel, and at the design's own metrics those three
+  already fill it (New 43px, Duplicate 78px, Delete 56px, plus gaps and
+  padding: 197 of 214). ``Import...`` does not fit beside them at any label
+  short enough to still say what it does, and a clipped button is worse than
+  a second row. The artboard's row is kept exactly as drawn and the new
+  action sits under it.
 """
 
 from __future__ import annotations
@@ -80,8 +98,10 @@ from auto_ext.ui.widgets.option_editor import (
     OptionEditor,
     OptionGroup,
     group_label,
+    template_freezes,
 )
 from auto_ext.ui.widgets.patch_strip import PatchStrip
+from auto_ext.ui.widgets.recipe_import_dialog import RecipeImportDialog
 
 __all__ = [
     "GROUP_ORDER",
@@ -92,7 +112,9 @@ __all__ = [
     "OBJ_RECIPE_LIST",
     "RECIPE_LIST_WIDTH",
     "RecipesScreen",
+    "frozen_specs",
     "grouped_specs",
+    "import_status_text",
     "recipe_specs",
 ]
 
@@ -116,6 +138,8 @@ RECIPE_LIST_WIDTH = 214
 RECIPE_ROW_HEIGHT = theme.STAGE_CHIP_ROW_HEIGHT
 LIST_HEADER_HEIGHT = theme.ROW_HEIGHT
 LIST_TOOLBAR_HEIGHT = theme.NAV_ITEM_HEIGHT
+#: The toolbar is two of those rows. See the module Assumptions.
+LIST_TOOLBAR_ROWS = 2
 
 OBJ_RECIPE_LIST = "recipeList"
 OBJ_LIST_HEADER = "recipeListHeader"
@@ -147,6 +171,17 @@ def recipe_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
     cat = catalog if catalog is not None else builtin_catalog()
     rows = [opt for opt in cat.by_owner(Owner.RECIPE) if opt.recipe_field_path]
     return sorted(rows, key=lambda opt: opt.recipe_field_path or "")
+
+
+def frozen_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
+    """Form rows the shipped templates still write as a literal.
+
+    Empty in the shipped catalog, and keeping it empty is the point: a row
+    here is a field the user can see, cannot set, and would otherwise only
+    discover was frozen when a run refused the stage.
+    """
+
+    return [spec for spec in recipe_specs(catalog) if template_freezes(spec)]
 
 
 def grouped_specs(catalog: Catalog | None = None) -> list[tuple[str, list[OptionSpec]]]:
@@ -285,6 +320,11 @@ class RecipesScreen(QWidget):
     new_requested = pyqtSignal()
     duplicate_requested = pyqtSignal(str)
     delete_requested = pyqtSignal(str)
+    #: The import dialog was confirmed. Carries the
+    #: :class:`~auto_ext.core.recipe_import.RecipeImportResult`; the host
+    #: persists it with ``recipe_import.write_imported_recipe`` and pushes the
+    #: library back in, exactly as it does for ``save_requested``.
+    recipe_imported = pyqtSignal(object)
     #: ``(stage, template_id, hunk_id)``, already applied to the working copy.
     patch_revert_requested = pyqtSignal(str, str, str)
     patch_delete_requested = pyqtSignal(str, str, str)
@@ -308,6 +348,7 @@ class RecipesScreen(QWidget):
         self._usage: dict[str, int] = {}
         self._dirty = False
         self._loading = False
+        self._import_dialog: RecipeImportDialog | None = None
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -360,13 +401,17 @@ class RecipesScreen(QWidget):
 
         toolbar = QFrame(panel)
         toolbar.setObjectName(OBJ_LIST_TOOLBAR)
-        toolbar.setFixedHeight(LIST_TOOLBAR_HEIGHT)
+        toolbar.setFixedHeight(LIST_TOOLBAR_HEIGHT * LIST_TOOLBAR_ROWS)
         toolbar.setStyleSheet(
             f"QFrame#{OBJ_LIST_TOOLBAR} {{ background: {theme.SURFACE_TOOLBAR};"
             f" border-top: 1px solid {theme.LINE_STRUCTURAL}; }}"
         )
-        row = QHBoxLayout(toolbar)
-        row.setContentsMargins(theme.SPACE_XS, 0, theme.SPACE_XS, 0)
+        rows = QVBoxLayout(toolbar)
+        rows.setContentsMargins(theme.SPACE_XS, 0, theme.SPACE_XS, 0)
+        rows.setSpacing(theme.SPACE_XXS)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(theme.SPACE_XXS)
 
         self._new_button = QPushButton("New", toolbar)
@@ -384,6 +429,22 @@ class RecipesScreen(QWidget):
         _let_shrink(self._delete_button)
         row.addWidget(self._delete_button)
         row.addStretch(1)
+        rows.addLayout(row)
+
+        second = QHBoxLayout()
+        second.setContentsMargins(0, 0, 0, 0)
+        second.setSpacing(theme.SPACE_XXS)
+        self._import_button = QPushButton("Import…", toolbar)
+        self._import_button.setToolTip(
+            "Turn EDA files you already have -- a Quantus command file, a "
+            "Calibre deck setup, an si.env -- into a recipe"
+        )
+        self._import_button.clicked.connect(self._on_import_clicked)
+        _let_shrink(self._import_button)
+        second.addWidget(self._import_button)
+        second.addStretch(1)
+        rows.addLayout(second)
+
         column.addWidget(toolbar)
         return panel
 
@@ -649,6 +710,42 @@ class RecipesScreen(QWidget):
     def delete_button(self) -> QPushButton:
         return self._delete_button
 
+    def import_button(self) -> QPushButton:
+        return self._import_button
+
+    def import_dialog(self) -> RecipeImportDialog | None:
+        """The dialog the Import button opened, or ``None`` before it has been.
+
+        Kept as an attribute rather than a local so the screen stays drivable
+        from outside -- the host may want to preload a path, and a test needs
+        to reach the dialog the click created.
+        """
+
+        return self._import_dialog
+
+    def frozen_option_keys(self) -> list[str]:
+        """Catalog keys shown on this form that the templates freeze.
+
+        Empty against the shipped catalog. Non-empty means somebody added a
+        row before its template hole, and every one of these fields is
+        disabled on the page.
+        """
+
+        return [key for key, editor in self._editors.items() if editor.is_frozen]
+
+    def frozen_overrides(self) -> dict[str, Any]:
+        """``{key: stored value}`` for frozen rows this recipe disagrees with.
+
+        Exactly what ``check_representable`` will refuse. Surfaced here so the
+        page can say it before a run does.
+        """
+
+        return {
+            key: editor.frozen_override()
+            for key, editor in self._editors.items()
+            if editor.frozen_override() is not None
+        }
+
     def options_summary_bar(self) -> QFrame:
         return self._summary_bar
 
@@ -688,6 +785,17 @@ class RecipesScreen(QWidget):
     def status_text(self) -> str:
         if self._working is None:
             return "no recipe selected"
+        blocked = self.frozen_overrides()
+        if blocked:
+            # Ahead of the dirty/saved line on purpose: a recipe that cannot
+            # render is a bigger fact about it than whether it is saved.
+            names = ", ".join(sorted(blocked))
+            return (
+                f"recipe {self._working.name} {_EM_DASH} "
+                f"{len(blocked)} value" + ("" if len(blocked) == 1 else "s")
+                + f" the templates still hardcode ({names}); the run will refuse "
+                "these stages"
+            )
         changed = len(self.changed_field_paths())
         if not self._dirty:
             return f"recipe {self._working.name} {_EM_DASH} saved"
@@ -822,6 +930,33 @@ class RecipesScreen(QWidget):
         if self._working is not None:
             self.delete_requested.emit(self._working.recipe_id)
 
+    def _on_import_clicked(self) -> None:
+        """Open the import dialog, modally, over this screen.
+
+        A fresh dialog each time: the previous one carries the files and the
+        report of the previous import, and a dialog that reopens showing the
+        last user's ``.qci`` is how a wrong file gets imported twice. The old
+        one is released here rather than on close, so the accessor stays valid
+        for as long as anything could still ask about it.
+        """
+
+        if self._import_dialog is not None:
+            self._import_dialog.deleteLater()
+        dialog = RecipeImportDialog(
+            catalog=self._catalog,
+            existing_ids=[recipe.recipe_id for recipe in self._recipes],
+            parent=self,
+        )
+        dialog.import_accepted.connect(self._on_import_accepted)
+        self._import_dialog = dialog
+        dialog.exec_()
+
+    def _on_import_accepted(self, result: object) -> None:
+        """Hand the imported recipe out. The host writes it, this screen does not."""
+
+        self.status_changed.emit(import_status_text(result))
+        self.recipe_imported.emit(result)
+
     def _on_list_context_menu(self, pos) -> None:
         item = self._list.itemAt(pos)
         if item is None:
@@ -876,6 +1011,24 @@ class RecipesScreen(QWidget):
 
     def _refresh_status(self) -> None:
         self.status_changed.emit(self.status_text())
+
+
+def import_status_text(result: Any) -> str:
+    """The status-bar line for one finished import.
+
+    The three numbers the report page shows, in the order it shows them, so
+    the bar and the dialog cannot tell different stories. The count of options
+    left at the default is the one worth carrying out of the dialog: it is the
+    part the user will not remember having been told.
+    """
+
+    kept = sum(1 for value in result.mapped if not value.applied_to) + len(result.unread)
+    return (
+        f"imported {result.recipe.name} {_EM_DASH} "
+        f"{result.applied_count} value" + ("" if result.applied_count == 1 else "s") + ", "
+        f"{result.hunk_count} manual edit" + ("" if result.hunk_count == 1 else "s") + ", "
+        f"{kept} option" + ("" if kept == 1 else "s") + " left at the catalog default"
+    )
 
 
 def _first_error(exc: ValidationError) -> str:

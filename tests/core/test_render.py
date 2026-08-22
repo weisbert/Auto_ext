@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from auto_ext.catalog import Currently, Owner, builtin_catalog
+from auto_ext.catalog import Catalog, Currently, Owner, builtin_catalog
 from auto_ext.core import render
 from auto_ext.core.errors import AutoExtError
 from auto_ext.core.patch import PatchConflictError, capture_patch, render_masked, sha256_text
@@ -384,6 +384,36 @@ def test_every_target_has_a_filename_and_a_stage_key() -> None:
 # ---- representability --------------------------------------------------------
 
 
+def _frozen(*keys: str) -> Catalog:
+    """The shipped catalog with ``keys`` put back to ``hardcoded_literal``.
+
+    ``check_representable`` guards a shrinking population. Every recipe-owned
+    row that used to demonstrate it -- ``decoupling_factor``, ``metal_fill``,
+    the corner -- is a ``[[var]]`` now, which is the point of the
+    parameterisation round and not something to undo in a template so a test
+    keeps its example. Freezing a row in a copy of the catalog tests the
+    *mechanism*, which is what these cases were ever about, and cannot go stale
+    again the next time a row is parameterised.
+
+    The rows that are still literally frozen are exercised too, by
+    :func:`test_a_resources_value_the_template_hardcodes_is_reported` and
+    :func:`test_a_profile_owned_hardcoded_value_is_reported`, so this does not
+    become the only coverage.
+    """
+
+    catalog = builtin_catalog()
+    wanted = set(keys)
+    options = [
+        opt.model_copy(update={"currently": Currently.HARDCODED_LITERAL})
+        if opt.key in wanted
+        else opt
+        for opt in catalog.options
+    ]
+    missing = wanted - {opt.key for opt in options}
+    assert not missing, f"no such catalog row: {sorted(missing)}"
+    return catalog.model_copy(update={"options": options})
+
+
 def test_a_default_recipe_is_fully_representable(
     recipe: Recipe, profile: PdkProfile
 ) -> None:
@@ -433,11 +463,35 @@ def test_a_hardcoded_setting_the_user_changed_is_reported(
         profile=profile,
         resources=ResourceProfile(),
         corner=corner,
+        catalog=_frozen("decoupling_factor"),
     )
     assert [f.option_key for f in found] == ["decoupling_factor"]
     assert found[0].wanted == 0.5
     assert found[0].template_literal == 1.0
     assert "decoupling_factor" in found[0].describe()
+
+
+def test_the_same_setting_is_silent_against_the_shipped_catalog(
+    profile: PdkProfile,
+) -> None:
+    """The other half of the case above, and the one the user cares about.
+
+    ``-decoupling_factor`` is a ``[[var]]`` in ``ext.cmd.j2`` now, so setting
+    it is expressible and reporting it would be a false alarm that sends the
+    user to write a patch they do not need.
+    """
+
+    changed = Recipe(recipe_id="r", name="r", extraction={"decoupling_factor": 0.5})
+    assert (
+        render.check_representable(
+            list(RenderTarget),
+            recipe=changed,
+            profile=profile,
+            resources=ResourceProfile(),
+            corner=render.resolve_corner(changed, profile),
+        )
+        == []
+    )
 
 
 def test_a_hardcoded_setting_is_only_reported_for_the_files_that_carry_it(
@@ -447,6 +501,7 @@ def test_a_hardcoded_setting_is_only_reported_for_the_files_that_carry_it(
 
     changed = Recipe(recipe_id="r", name="r", extraction={"metal_fill": "none"})
     corner = render.resolve_corner(changed, profile)
+    catalog = _frozen("metal_fill_type")
     assert (
         render.check_representable(
             [RenderTarget.QUANTUS_EXT],
@@ -454,6 +509,7 @@ def test_a_hardcoded_setting_is_only_reported_for_the_files_that_carry_it(
             profile=profile,
             resources=ResourceProfile(),
             corner=corner,
+            catalog=catalog,
         )
         == []
     )
@@ -465,6 +521,7 @@ def test_a_hardcoded_setting_is_only_reported_for_the_files_that_carry_it(
             profile=profile,
             resources=ResourceProfile(),
             corner=corner,
+            catalog=catalog,
         )
     ] == ["metal_fill_type"]
 
@@ -488,11 +545,18 @@ def test_a_knob_backed_setting_is_never_reported(profile: PdkProfile) -> None:
 
 
 def test_a_profile_owned_hardcoded_value_is_reported(recipe: Recipe) -> None:
+    """``lvs_rules_filename_pattern`` is the one row still frozen for real.
+
+    Line 1 of ``calibre_lvs.qci.j2`` spells ``.qcilvs`` out between three
+    ``[[var]]`` holes, so a PDK that names its decks anything else has no way
+    to say so and must be told, not quietly rendered as ``.qcilvs``. No
+    synthetic catalog here on purpose: this is the live gap, and when the
+    template grows a fourth hole this test is meant to fail.
+    """
+
     other = make_profile(
-        parasitics=ParasiticDeviceContract(
-            res_component="myres",
-            cap_component="pcapacitor",
-            res_model="analogLib/myres/symbol",
+        lvs_decks=make_profile().lvs_decks.model_copy(
+            update={"filename_pattern": "{basename}_{suffix}.rules"}
         )
     )
     corner = render.resolve_corner(recipe, other)
@@ -503,18 +567,53 @@ def test_a_profile_owned_hardcoded_value_is_reported(recipe: Recipe) -> None:
         resources=ResourceProfile(),
         corner=corner,
     )
-    assert sorted(f.option_key for f in found) == [
-        "parasitic_res_model",
-        "res_component",
-    ]
+    assert [f.option_key for f in found] == ["lvs_rules_filename_pattern"]
+    assert found[0].wanted == "{basename}_{suffix}.rules"
+    assert found[0].targets == (RenderTarget.LVS_QCI,)
 
 
-def test_a_non_typical_corner_is_reported_because_the_template_froze_it(
+def test_a_profile_owned_value_the_round_parameterised_is_silent(
     recipe: Recipe,
 ) -> None:
-    """The corner translation works, but ``ext.cmd.j2`` still types
-    ``"TYPICAL"``. Reporting it is the honest answer: the alternative is
-    resolving RCWORST and writing TYPICAL anyway."""
+    """The parasitic device contract used to be reported on both sides.
+
+    ``-res_component`` in the two quantus files and ``rModel`` in the jivaro
+    XML are ``[[var]]``s now, so a profile that names its own devices renders
+    correctly instead of being refused. Both halves have to stay parameterised
+    or :class:`ParasiticDeviceContract` starts describing a file that ignores
+    it, which is why this asserts silence rather than deleting the case.
+    """
+
+    other = make_profile(
+        parasitics=ParasiticDeviceContract(
+            res_component="myres",
+            cap_component="pcapacitor",
+            res_model="analogLib/myres/symbol",
+        )
+    )
+    assert (
+        render.check_representable(
+            list(RenderTarget),
+            recipe=recipe,
+            profile=other,
+            resources=ResourceProfile(),
+            corner=render.resolve_corner(recipe, other),
+        )
+        == []
+    )
+
+
+def test_a_non_typical_corner_is_no_longer_refused(recipe: Recipe) -> None:
+    """The case this test used to make, inverted.
+
+    It asserted that picking RCWORST was *reported* -- ``ext.cmd.j2`` typed
+    ``"TYPICAL"`` and the honest answer was to refuse rather than resolve
+    RCWORST and write TYPICAL anyway. The template carries
+    ``[[technology_corner]]`` now, so the refusal would be a false alarm on the
+    one setting a user changes most often.
+    :func:`test_e2e_a_non_typical_corner_reaches_the_quantus_command_file`
+    checks the other half: that the literal really arrives in the file.
+    """
 
     worst = make_profile(
         corners=[
@@ -528,14 +627,16 @@ def test_a_non_typical_corner_is_reported_because_the_template_froze_it(
     )
     corner = render.resolve_corner(recipe, worst)
     assert corner.technology_corner == "RCWORST"
-    found = render.check_representable(
-        [RenderTarget.QUANTUS_EXT],
-        recipe=recipe,
-        profile=worst,
-        resources=ResourceProfile(),
-        corner=corner,
+    assert (
+        render.check_representable(
+            [RenderTarget.QUANTUS_EXT],
+            recipe=recipe,
+            profile=worst,
+            resources=ResourceProfile(),
+            corner=corner,
+        )
+        == []
     )
-    assert [f.option_key for f in found] == ["technology_corner"]
 
 
 def test_a_resources_value_the_template_hardcodes_is_reported(
@@ -585,7 +686,11 @@ def test_every_checkable_catalog_row_can_be_read(
         if o.currently is Currently.HARDCODED_LITERAL
         and o.owner in (Owner.RECIPE, Owner.PROFILE, Owner.RESOURCES)
     ]
-    assert len(checkable) > 50
+    # The population is small now and shrinking further is the goal, so the
+    # count is pinned in one place only --
+    # ``tests/catalog/test_catalog.py::test_no_owned_row_is_left_hardcoded``.
+    # Here it only has to be non-empty, or the loop below asserts nothing.
+    assert checkable, "the loop is vacuous; check the gap audit in test_catalog"
     for opt in checkable:
         render.declared_value(
             opt,
@@ -594,6 +699,19 @@ def test_every_checkable_catalog_row_can_be_read(
             resources=ResourceProfile(),
             corner=corner,
         )
+    # ...and the recipe branch, which no live row exercises any more, has to
+    # keep working for the next row that is added before its template hole is.
+    frozen = _frozen("decoupling_factor").option("decoupling_factor")
+    assert (
+        render.declared_value(
+            frozen,
+            recipe=recipe,
+            profile=profile,
+            resources=ResourceProfile(),
+            corner=corner,
+        )
+        == recipe.extraction.decoupling_factor
+    )
 
 
 def test_an_unwired_profile_row_raises_rather_than_passing_unchecked(
@@ -744,6 +862,16 @@ def test_both_quantus_forms_render_to_different_files(
 def test_rendering_refuses_a_setting_the_template_hardcodes(
     tmp_path: Path, profile: PdkProfile
 ) -> None:
+    """The last line of defence, still wired: nothing is written.
+
+    The example is synthetic (see :func:`_frozen`) because no recipe-owned row
+    is frozen in the shipped templates any more. The refusal itself is not
+    obsolete -- the GUI now disables such a field rather than letting the user
+    reach this, but a recipe written by hand or by an older catalog can still
+    arrive here, and a silently ignored setting is the failure mode this whole
+    check exists to prevent.
+    """
+
     changed = Recipe(
         recipe_id="r", name="r", extraction={"decoupling_factor": 0.5}
     )
@@ -763,11 +891,98 @@ def test_rendering_refuses_a_setting_the_template_hardcodes(
             profile=profile,
             resolved_env=ENV,
             out_dir=tmp_path / "rendered",
+            catalog=_frozen("decoupling_factor"),
         )
     message = str(exc.value)
     assert "decoupling_factor" in message
     assert "Recipe.patches" in message
     assert not (tmp_path / "rendered").exists()
+
+
+def test_picking_rcworst_writes_rcworst_into_the_quantus_command_file(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    """The whole point of parameterising the catalog, in one file.
+
+    ``ext.cmd.j2`` used to type ``-technology_corner "TYPICAL"`` as a literal.
+    A user who needed the worst-case RC corner could pick it in the GUI, watch
+    the recipe store ``rcworst``, and get an extraction run against TYPICAL
+    that looked exactly like a successful one -- which is why the render
+    refused to do it at all.
+
+    Now: the recipe holds the *semantic* name, the profile's corner table maps
+    it onto this PDK's literal, and the literal is what the file says. Both
+    halves are asserted, because getting ``rcworst`` into the file would be as
+    wrong as ``TYPICAL``: Quantus does not know the semantic name. The
+    temperature travels with the corner, so it is checked on the same line
+    block.
+    """
+
+    two_corners = make_profile(
+        corners=[
+            CornerSpec(
+                name="typical", technology_corner="TYPICAL", default_temperature_c=55.0
+            ),
+            CornerSpec(
+                name="rcworst", technology_corner="RCWORST", default_temperature_c=125.0
+            ),
+        ],
+        default_corner="typical",
+    )
+    picked = Recipe(recipe_id="worst", name="worst", extraction={"corner": "rcworst"})
+
+    resolved = render.resolve_corner(picked, two_corners)
+    assert resolved.name == "rcworst"
+    assert resolved.technology_corner == "RCWORST"
+
+    ctx = render.build_context(
+        dut=make_dut(),
+        recipe=picked,
+        profile=two_corners,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    plan = [p for p in render.plan_targets(picked) if p.target is RenderTarget.QUANTUS_EXT][0]
+    text = render.render_one(
+        plan,
+        context=ctx,
+        recipe=picked,
+        profile=two_corners,
+        resolved_env=ENV,
+        out_dir=tmp_path / "rendered",
+        write=False,
+    ).text
+
+    # Quantus puts -technology_corner on one line and its value on the next.
+    lines = [line.strip().rstrip("\\").strip() for line in text.splitlines()]
+    at = lines.index("-technology_corner")
+    assert lines[at + 1] == '"RCWORST"', lines[at : at + 3]
+    assert lines[lines.index("-temperature") + 1] == "125.0"
+    assert "TYPICAL" not in text
+    assert "rcworst" not in text  # the semantic name must not leak into the tool
+
+
+def test_the_same_recipe_writes_typical_against_the_typical_corner(
+    tmp_path: Path, recipe: Recipe, profile: PdkProfile, context: dict[str, object]
+) -> None:
+    """The other side of the previous test: parameterising the row did not
+    change what a default recipe renders. Without this, "RCWORST reaches the
+    file" is also satisfied by a template that writes the corner name into
+    every file regardless of the profile."""
+
+    plan = [p for p in render.plan_targets(recipe) if p.target is RenderTarget.QUANTUS_EXT][0]
+    text = render.render_one(
+        plan,
+        context=context,
+        recipe=recipe,
+        profile=profile,
+        resolved_env=ENV,
+        out_dir=tmp_path / "rendered",
+        write=False,
+    ).text
+    lines = [line.strip().rstrip("\\").strip() for line in text.splitlines()]
+    assert lines[lines.index("-technology_corner") + 1] == '"TYPICAL"'
+    assert lines[lines.index("-temperature") + 1] == "55.0"
 
 
 def test_a_none_valued_reference_is_refused_rather_than_stringified(
@@ -798,21 +1013,36 @@ def test_a_none_valued_reference_is_refused_rather_than_stringified(
     assert "None" in str(exc.value)
 
 
-def test_an_unresolved_env_var_is_refused_before_rendering(
-    tmp_path: Path, recipe: Recipe, profile: PdkProfile, context: dict[str, object]
+def test_an_unresolved_env_var_is_refused_rather_than_written(
+    tmp_path: Path, recipe: Recipe, profile: PdkProfile
 ) -> None:
+    """``$env(SETUP_ROOT)`` reaches the file through the profile now, not the
+    template, so the context has to be built with the same thinned env the
+    render is given -- otherwise the fixture resolves the path and there is
+    nothing left to catch. The refusal moved from the pre-scan of the template
+    source to the rescan of the rendered text, and still fires before the file
+    is written, which is the property that matters."""
+
     thin = {k: v for k, v in ENV.items() if k != "SETUP_ROOT"}
+    ctx = render.build_context(
+        dut=make_dut(),
+        recipe=recipe,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=thin,
+    )
     plan = [p for p in render.plan_targets(recipe) if p.stage is Stage.QUANTUS][0]
     with pytest.raises(render.RenderError) as exc:
         render.render_one(
             plan,
-            context=context,
+            context=ctx,
             recipe=recipe,
             profile=profile,
             resolved_env=thin,
             out_dir=tmp_path / "rendered",
         )
     assert "SETUP_ROOT" in str(exc.value)
+    assert not (tmp_path / "rendered").exists()
 
 
 def test_write_false_renders_without_touching_the_disk(
