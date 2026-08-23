@@ -692,3 +692,31 @@ def test_a_corrupt_package_leaves_the_install_untouched(tmp_path: Path) -> None:
     assert not (box / ".deploy" / "backups").exists() or not list(
         (box / ".deploy" / "backups").iterdir()
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. the self-test must not go red for environmental reasons
+# ---------------------------------------------------------------------------
+
+
+def test_cli_output_does_not_depend_on_terminal_width() -> None:
+    """`doctor.sh --test` must not report a false red on a healthy install.
+
+    It runs the shipped suite with TMPDIR inside the install dir, and the red
+    zone's install path is long. Rich wraps at 80 columns when stdout is not a
+    terminal, so a CLI test that asserts an absolute path appears in the output
+    fails purely because the path got folded -- and the doctor then says "do not
+    trust this install". This is a real observed failure, not a precaution:
+    it appeared the first time a real package was deployed and self-tested.
+
+    tests/conftest.py pins the width by giving every CliRunner its own COLUMNS.
+    This guards that patch, which is invisible at every call site.
+    """
+
+    from click.testing import CliRunner
+
+    assert CliRunner().env.get("COLUMNS"), (
+        "tests/conftest.py no longer pins the CLI console width; long paths in "
+        "CLI assertions will fold again and doctor.sh --test will go red on a "
+        "perfectly good red-zone install"
+    )

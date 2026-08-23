@@ -38,6 +38,53 @@ the builders live so a ``parametrize`` list at module scope can reach them.
 
 from __future__ import annotations
 
+import click.testing as _click_testing
+
+
+def _pin_cli_console_width() -> None:
+    """Pin Rich's console width for every CliRunner in the suite.
+
+    Rich falls back to 80 columns when stdout is not a terminal, and several CLI
+    tests assert that an absolute path appears in the output. Whether that holds
+    then depends on how long the temp directory happens to be -- so the suite
+    passes on a short TMPDIR and fails on a long one with no code change in
+    between: Rich folds a newline into the middle of the path and the substring
+    assertion misses.
+
+    Not hypothetical. ``deploy/doctor.sh --test`` points TMPDIR at
+    ``<install>/.deploy/tmp`` (the red zone forbids writing outside the install
+    dir) and the deployment path over there is
+    ``/data/RFIC3/<project>/<sub-project>/<employee-id>/workarea/Auto_ext_pro``.
+    Run directories underneath that overflow 80 columns, and the doctor then
+    reports "self-test failed -- do not trust this install" for an install that
+    is in fact perfect. A false red in the one place with no debugger is worse
+    than no check at all. Caught by rehearsing a real deploy, not by reasoning.
+
+    Two things this is NOT, both measured rather than assumed:
+
+    * Setting ``COLUMNS`` in the ambient environment does not work.
+      ``CliRunner.isolation()`` builds its own environment, and inside the
+      invocation the variable is gone (width 79, ``COLUMNS`` None). It has to
+      travel as the runner's own ``env``.
+    * A fixture is too late. Test modules build their runner at import time
+      (``runner = CliRunner()`` at module scope), which happens before any
+      fixture runs -- so the patch has to be applied when conftest itself is
+      imported, which is earlier than every test module.
+    """
+
+    original = _click_testing.CliRunner.__init__
+
+    def _with_width(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        original(self, *args, **kwargs)
+        merged = dict(self.env or {})
+        merged.setdefault("COLUMNS", "300")
+        self.env = merged
+
+    _click_testing.CliRunner.__init__ = _with_width  # type: ignore[method-assign]
+
+
+_pin_cli_console_width()
+
 import os
 import shutil
 import sys
