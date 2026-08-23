@@ -3,6 +3,10 @@
 这份清单里的每一条，我在 Windows 开发机上都无法回答。凡是被它卡住的功能，
 我都做成了**可改的数据表**，你带回答案之后改数据、不改代码。
 
+> **代码怎么弄到红区去？** 看 [`REDZONE_DEPLOY.md`](REDZONE_DEPLOY.md) ——
+> 黄区打包、上传、`bash deploy.sh`、`bash deploy/doctor.sh --test`，每步带预期输出。
+> 红区**没有** git，任何让你在服务器上 `git pull` 的说明都是过时的。
+
 ---
 
 ## 第一优先：三样硬阻断
@@ -139,12 +143,32 @@
 `docs/OFFICE_QUICKSTART.md` 等四份文档描述的是重构前的架构，已加作废横幅。
 下面是当前的命令。
 
-## 0. 分支
+## 0. 装上去
 
-```bash
-cd <deploy>/Auto_ext
-git checkout refactor/recipe-and-run     # 全部改动都在这个分支，main 一个字没动
+代码从黄区打包上传，不是 `git pull` —— 完整步骤（每步带预期输出）在
+[`REDZONE_DEPLOY.md`](REDZONE_DEPLOY.md)。
+
+**先在黄区切到对的分支再打包** —— 全部改动都在 `refactor/recipe-and-run` 上，
+`main` 一个字没动：
+
+```powershell
+git checkout refactor/recipe-and-run
+powershell -ExecutionPolicy Bypass -File deploy\pack.ps1
 ```
+
+（不想切分支就 `pack.ps1 -Ref refactor/recipe-and-run`，效果一样。包名里的短哈希
+会告诉你打的到底是哪一个 commit。）
+
+红区三十秒版：
+
+```tcsh
+cd <install>            # 把 .tar.gz + .sha256 上传到这里之后
+bash deploy.sh
+bash deploy/doctor.sh --test
+```
+
+判据是 `OK  deployed.` 和 `OK  self-test passed`。**self-test 不绿就别往下走** ——
+后面出的任何问题都分不清是环境的锅还是代码的锅。
 
 ## 1. 先体检 —— 它会告诉你能不能跑
 

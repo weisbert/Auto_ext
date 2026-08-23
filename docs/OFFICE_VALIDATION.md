@@ -18,7 +18,7 @@
 **目的**：把 Windows 上跑过的所有事情在 Linux 服务器 + 真 Cadence 上重新跑一遍，发现"在我这能跑、在你那不能跑"的 bug。
 
 **前提**：
-- 在服务器上已 `git clone` 过 Auto_ext，路径 `/data/RFIC3/<Project>/<Employee ID>/workarea/Auto_ext_pro/`
+- 已按 [`refactor/REDZONE_DEPLOY.md`](refactor/REDZONE_DEPLOY.md) 部署过一次，安装目录 `<install>`
 - 已 `source` 过项目的 Cadence/PDK setup（`$WORK_ROOT` / `$WORK_ROOT2` / `$VERIFY_ROOT` / `$SETUP_ROOT` / `$PDK_LAYER_MAP_FILE` 都有值）
 - Python 3.11 + 离线依赖已装好（`OFFICE_QUICKSTART.md` §0 + §2）
 
@@ -28,9 +28,12 @@
 
 ## Step 1 — 拉最新代码 + 跑测试
 
+> **⚠ 这里原来写的是在服务器上 `git pull`，那是错的** —— 红区没有 git。
+> 代码从黄区打包上传，见 [`refactor/REDZONE_DEPLOY.md`](refactor/REDZONE_DEPLOY.md)；
+> 装完之后 `bash deploy/doctor.sh --test` 已经把整套单测跑过一遍了。
+
 ```bash
-cd /data/RFIC3/<Project>/<Employee ID>/workarea/Auto_ext_pro
-git pull
+cd <install>
 ./run.sh test                       # 跑 tests/ 全集
 ./run.sh test tests/core -k progress  # 也接受 pytest 任意参数
 ```

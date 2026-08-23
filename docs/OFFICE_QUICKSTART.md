@@ -33,12 +33,9 @@
 
 ## 1. 拉最新代码
 
-```bash
-cd /data/RFIC3/<Project>/<Employee ID>/workarea/Auto_ext_pro
-git pull
-```
-
-预期：fast-forward 拉到包含 Phase 3 + 本文档的 commit。
+> **⚠ 这一步原来写的是在服务器上 `git pull`，那是错的。** 红区没有到 GitHub 的
+> 路，而且包里不带 `.git` —— 那条命令的实际结果是 `fatal: not a git repository`。
+> 代码从黄区打包上传：见 [`refactor/REDZONE_DEPLOY.md`](refactor/REDZONE_DEPLOY.md)。
 
 ## 2. 验证 Python 依赖
 
