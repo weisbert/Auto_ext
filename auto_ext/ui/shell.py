@@ -4,7 +4,7 @@ The shell is the frame every screen is mounted into. It owns four regions,
 laid out exactly as artboard ``1a`` draws them::
 
     +--------------------------------------------------------------+ 34px
-    | Auto_ext   /home/rfv/wa/Auto_ext_pro/config      [x Setup 1]  |
+    | Auto_ext   /work/wa/Auto_ext_pro/config      [x Setup 1]  |
     +----------+---------------------------------------+-----------+
     |  Cells 8 |                                       |   Setup   |
     |  Recipes |          QStackedWidget               |  drawer   | 132px

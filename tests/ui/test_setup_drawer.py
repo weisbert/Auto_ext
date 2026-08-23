@@ -69,7 +69,7 @@ def mixed_report() -> PdkHealthReport:
         _result(
             "env.work_root",
             title="Environment variable WORK_ROOT",
-            observed="/home/rfv/wa",
+            observed="/work/wa",
             message="from shell",
         ),
         _result(

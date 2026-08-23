@@ -191,7 +191,7 @@ def test_chip_set_chip_text_sets_both(qtbot) -> None:
 # PathLabel
 # ============================================================================
 
-_LONG = "/proj/pdk/CFXXX/verify/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck/preserveCellList.txt"
+_LONG = "/proj/pdk/CFXXX/verify/QRC/Ver_QRC_B/CFXXX/QCI_deck/preserveCellList.txt"
 
 
 def test_path_label_never_reports_a_large_minimum_width(qtbot) -> None:

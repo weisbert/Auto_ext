@@ -103,7 +103,7 @@ def _write_run(
     frozen_clock,
     *,
     cell: str = "amp2",
-    library: str = "WB_PLL_DCO",
+    library: str = "EXAMPLE_LIB",
     layout_view: str = "layout",
     source_view: str = "schematic",
     recipe_id: str = "ext",
@@ -649,7 +649,7 @@ def test_runs_list_task_filter_matches_the_cell_row_key(
             "--auto-ext-root",
             _root_of(runs_root),
             "--task",
-            "WB_PLL_DCO__inv__layout__schematic",
+            "EXAMPLE_LIB__inv__layout__schematic",
         ],
     )
 
@@ -726,7 +726,7 @@ def test_runs_list_skips_junk_directories_without_dying(
     """A hand-made dir, a legacy ``task_*`` dir and a truncated record."""
     _write_run(runs_root, make_run_record, frozen_clock, cell="inv")
     (runs_root / "scratch").mkdir()
-    (runs_root / "task_WB_PLL_DCO__inv__layout__schematic").mkdir()
+    (runs_root / "task_EXAMPLE_LIB__inv__layout__schematic").mkdir()
     broken = runs_root / "20260821T999999Z_broken"
     broken.mkdir()
     (broken / "run.json").write_text('{"schema_version": 2, "run_i', encoding="utf-8")
@@ -1189,7 +1189,7 @@ def test_summary_row_falls_back_to_the_task_id_without_a_record() -> None:
     from auto_ext.tools.base import ToolResult
 
     task = TaskResult(
-        task_id="WB_PLL_DCO__inv__layout__schematic",
+        task_id="EXAMPLE_LIB__inv__layout__schematic",
         overall=TaskStatus.FAILED,
         stages=[
             StageResult(stage="si", status=StageStatus.PASSED),
@@ -1209,7 +1209,7 @@ def test_summary_row_falls_back_to_the_task_id_without_a_record() -> None:
 
     assert len(rows) == 1
     assert rows[0].run_id is None
-    assert rows[0].label == "WB_PLL_DCO__inv__layout__schematic"
+    assert rows[0].label == "EXAMPLE_LIB__inv__layout__schematic"
     assert rows[0].stages == (("si", "passed"), ("quantus", "failed"))
     assert [f.failure_class for f in rows[0].failures] == ["tool-not-found"]
 

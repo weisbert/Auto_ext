@@ -64,11 +64,11 @@ def test_dry_run_projectA_produces_full_preview(
     # calibre lvsPostTriggers + quantus -parasitic_blocking.
     assert (
         preview.constants.paths["calibre_lvs_dir"]
-        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
+        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX"
     )
     assert (
         preview.constants.paths["qrc_deck_dir"]
-        == "$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
+        == "$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck"
     )
     assert not preview.conflicts
     # Ordering: 4 templates, then project.yaml, then tasks.yaml. There are no

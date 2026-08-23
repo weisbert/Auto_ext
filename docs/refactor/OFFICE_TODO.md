@@ -25,14 +25,14 @@
 ### 2. 两条 ls（阻断：LVS variant 和 deck 自动发现）
 
 现在我手上只有 `docs/calibre_raw.txt` 里的一个样本
-（`.../LVS/Ver_Plus_1.0l_0.9/CFXXX/CFXXX.wodio.qcilvs`），
+（`.../LVS/Ver_LVS_A/CFXXX/CFXXX.wodio.qcilvs`），
 `widio` 这个变体**只存在于手写的 manifest 里，真实文件里从没出现过**。
 
 - [ ] `ls $VERIFY_ROOT/runset/Calibre_QRC/LVS/*/*/`
 - [ ] `ls <你的 qrc_deck_dir>`（就是 `project.yaml` 里 `qrc_deck_dir` 指的那个目录）
 
 注意一个已发现的事实：LVS deck 和 QRC deck 的版本号**可以不同步**
-（样本里是 `Ver_Plus_1.0l_0.9` vs `Ver_Plus_1.0a`），而且 QRC deck 比 LVS deck
+（样本里是 `Ver_LVS_A` vs `Ver_QRC_B`），而且 QRC deck 比 LVS deck
 多一层 `QCI_deck` —— 这正是 `qrc_deck_dir` 没法用 `|parent` 自动推导、
 必须手填的根本原因。
 

@@ -45,7 +45,7 @@ STAMP = "20260821T143205Z"
 
 def _dut(**kw: object) -> DutSnapshot:
     base: dict[str, object] = {
-        "library": "WB_PLL_DCO",
+        "library": "EXAMPLE_LIB",
         "cell": "amp2",
         "layout_view": "layout",
     }
@@ -170,7 +170,7 @@ def test_allocate_uses_the_module_clock_when_now_is_omitted(
 
 def test_parse_run_id_rejects_a_non_run_directory_name() -> None:
     with pytest.raises(RunIdError):
-        parse_run_id("task_WB_PLL_DCO__amp2__layout__schematic")
+        parse_run_id("task_EXAMPLE_LIB__amp2__layout__schematic")
 
 
 # ---- A.8: slug path safety ----------------------------------------------------
@@ -426,7 +426,7 @@ def test_run_record_rejects_a_slug_that_contradicts_the_run_id() -> None:
 def test_run_record_rejects_a_free_form_run_id() -> None:
     with pytest.raises(ValidationError, match="timestamp"):
         RunRecord(
-            run_id="task_WB_PLL_DCO__amp2__layout__schematic",
+            run_id="task_EXAMPLE_LIB__amp2__layout__schematic",
             slug="amp2",
             created_at=datetime(2026, 8, 21, 14, 32, 5, tzinfo=timezone.utc),
             dut=_dut(),
@@ -466,7 +466,7 @@ def test_run_record_is_frozen(make_run_record) -> None:
 
 def test_run_record_rejects_unknown_fields(make_run_record) -> None:
     with pytest.raises(ValidationError):
-        make_run_record(task_id="WB_PLL_DCO__amp2__layout__schematic")
+        make_run_record(task_id="EXAMPLE_LIB__amp2__layout__schematic")
 
 
 def test_run_record_defaults_to_pending(make_run_record) -> None:
@@ -487,7 +487,7 @@ def test_run_record_duration_and_labels(make_run_record, frozen_clock) -> None:
 
     assert record.duration_s == 42.0
     assert record.finished_at == record.ended_at
-    assert record.dut_label == "WB_PLL_DCO__amp2__layout__schematic"
+    assert record.dut_label == "EXAMPLE_LIB__amp2__layout__schematic"
     assert record.default_display_name == "amp2 \u00b7 RC coupled typical"
 
 
@@ -569,8 +569,8 @@ def test_dut_snapshot_from_task_config() -> None:
     from auto_ext.core.config import JivaroConfig, TaskConfig
 
     task = TaskConfig(
-        task_id="WB_PLL_DCO__amp2__layout__schematic",
-        library="WB_PLL_DCO",
+        task_id="EXAMPLE_LIB__amp2__layout__schematic",
+        library="EXAMPLE_LIB",
         cell="amp2",
         lvs_source_view="schematic",
         lvs_layout_view="layout",
@@ -585,7 +585,7 @@ def test_dut_snapshot_from_task_config() -> None:
 
     dut = DutSnapshot.from_task_config(task)
 
-    assert dut.library == "WB_PLL_DCO"
+    assert dut.library == "EXAMPLE_LIB"
     assert dut.layout_view == "layout"
     assert dut.source_view == "schematic"
     assert dut.out_file == "av_extracted"

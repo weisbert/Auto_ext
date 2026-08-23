@@ -796,7 +796,7 @@ def test_result_card_compares_against_the_previous_run(
         ended_at=None,
         overall="failed",
         slug="amp2-ext",
-        library="WB_PLL_DCO",
+        library="EXAMPLE_LIB",
         cell="amp2",
         layout_view="layout",
         source_view="schematic",
@@ -1132,7 +1132,7 @@ def test_result_card_artifacts_are_the_canvas_1c_rows(
     assert "rendered calibre" in rows
     assert "run dir" in rows
     # The extracted view is a lib/cell/view triple, not a filesystem path.
-    assert rows["extracted"].full_text() == "WB_PLL_DCO / amp2 / av_extracted"
+    assert rows["extracted"].full_text() == "EXAMPLE_LIB / amp2 / av_extracted"
 
 
 def test_result_card_artifact_paths_are_clickable_when_they_exist(
@@ -1193,7 +1193,7 @@ def test_result_card_copy_button_emits_the_view_triple(
     )
     with qtbot.waitSignal(card.copy_requested, timeout=1000) as blocker:
         copy_btn.click()
-    assert blocker.args == ["WB_PLL_DCO / amp2 / av_extracted"]
+    assert blocker.args == ["EXAMPLE_LIB / amp2 / av_extracted"]
 
 
 def test_result_card_stage_logs_are_collapsed_until_asked_for(

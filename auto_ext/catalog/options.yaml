@@ -852,7 +852,7 @@ options:
     notes: >-
       Reaches the template through ProjectConfig.paths, not through a knob.
       The real deck path seen in docs/calibre_raw.txt:2 is
-      .../LVS/Ver_Plus_1.0l_0.9/CFXXX/ -- version segment plus PDK subdir, and
+      .../LVS/Ver_LVS_A/CFXXX/ -- version segment plus PDK subdir, and
       both are separate rows below.
     why: Where this PDK keeps its LVS rule decks. Pure process fact.
 
@@ -930,7 +930,7 @@ options:
     observed: true
     source_ref: docs/calibre_raw.txt:2
     notes: >-
-      Ver_Plus_1.0l_0.9 in the sample. Kept SEPARATE from qrc_runset_version
+      Ver_LVS_A in the sample. Kept SEPARATE from qrc_runset_version
       because the two demonstrably drift apart (1.0l_0.9 vs 1.0a), which the
       draft lost by storing both decks as one opaque path string. The old flat
       context key of this name was a dead reserved name and section 4.2 of the
@@ -947,7 +947,7 @@ options:
     currently: absent
     observed: true
     source_ref: docs/calibre_raw.txt:27
-    notes: Ver_Plus_1.0a in the sample -- a different version from the LVS deck.
+    notes: Ver_QRC_B in the sample -- a different version from the LVS deck.
     why: Same as lvs_runset_version, for the QRC deck.
 
   - key: pdk_subdir

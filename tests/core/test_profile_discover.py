@@ -39,8 +39,8 @@ from auto_ext.model.pdk import DEFAULT_TECH_NAME_ENV_VARS, PdkProfile
 #: invoked from anywhere, and docs/calibre_raw.txt is read below.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-LVS_VERSION = "Ver_Plus_1.0l_0.9"
-QRC_VERSION = "Ver_Plus_1.0a"
+LVS_VERSION = "Ver_LVS_A"
+QRC_VERSION = "Ver_QRC_B"
 PDK_SUBDIR = "CFXXX"
 
 TECH_LIB_SAMPLE = """; synthetic assura_tech.lib -- see SCAN_RULES["R6"], nobody has a real one

@@ -1,0 +1,17 @@
+# Site wordlist for scripts/redzone_scan.sh -- COPY to `.redzone_patterns.local`
+# and fill in with YOUR site's real values. `.redzone_patterns.local` is
+# gitignored and must stay that way: the wordlist is itself the list of secrets.
+#
+# One extended-regex (grep -E) per line; `#` starts a comment. Matching is
+# case-insensitive.
+#
+# What belongs here -- anything that identifies your employer, project, or you:
+#   - project / sub-project codes        e.g.  ^|[^A-Za-z]Hx1A00V000
+#   - your employee id and unix user
+#   - real library / cell / view names of designs you work on
+#   - real port and net names of those designs
+#   - PDK release strings and deck directory names
+#   - internal host names, Donau/LSF queue and account names
+#
+# Keep it wide: the gate is cheap and a false positive costs one waiver comment,
+# while a miss costs a permanent entry in a public git history.

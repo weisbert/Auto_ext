@@ -103,7 +103,7 @@ SCAN_RULES: dict[str, str] = {
     ),
     "R4": (
         "unverified: the path segment immediately after a segment named 'LVS' (resp. "
-        "'QRC') is the runset version ('Ver_Plus_1.0l_0.9', resp. 'Ver_Plus_1.0a'). "
+        "'QRC') is the runset version ('Ver_LVS_A', resp. 'Ver_QRC_B'). "
         "Provenance only -- no path is ever assembled from it."
     ),
     "R5": (

@@ -25,10 +25,10 @@
 
 | 字段 | 必填？ | 自动反解来源 | 例子 |
 |---|---|---|---|
-| `work_root` | 否 | `$WORK_ROOT`（display only） | `/data/RFIC3/projB/Hi1A22V100/<id>/workarea` |
+| `work_root` | 否 | `$WORK_ROOT`（display only） | `/data/RFIC3/<project>/<sub-project>/<employee-id>/workarea` |
 | `verify_root` | 否 | `$VERIFY_ROOT`（display only） | `/software/PDK/.../verify` |
 | `setup_root` | 否 | `$SETUP_ROOT`（display only） | `/software/PDK/.../setup` |
-| `employee_id` | 否 | `$USER` | `w84368867` |
+| `employee_id` | 否 | `$USER` | `<employee-id>` |
 | `tech_name` | 否 | parent of `$PDK_TECH_FILE` 等 | `HN001` |
 | **[`paths`](#paths)** | **看模板** | env var 引用直接写在 path 表达式里 | 见下文 |
 | `layer_map` | 否 | `$PDK_LAYER_MAP_FILE` | `/software/PDK/.../layers.map` |
@@ -87,7 +87,7 @@ paths:
 
   # QRC 部署目录（query_cmd / preserveCellList.txt 所在），模板里被 calibre +
   # quantus 共三处引用为 [[qrc_deck_dir]]。没有公认的 env var 约定，建议显式拼。
-  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CF710_Plus_..._V1d0a/QCI_deck
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX_..._V1d0a/QCI_deck
 ```
 
 **`|parent` 过滤器**：`<expr>|parent` 表示 env-substitute 后取 `pathlib.PurePosixPath(s).parent`。可以串：`$X|parent|parent` 是祖父目录。**注意**：仅当你在路径末尾留了文件名（典型：`empty.cdl`）时才用 `|parent`；若 env var 已经直接指向目录，不要加。
@@ -241,17 +241,17 @@ Phase 5.6.5 删除了以下字段（旧 yaml 加载会报错，因为 pydantic `
 
 ```yaml
 # 旧 schema
-pdk_subdir: CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9
+pdk_subdir: CFXXX_LVS_DECK
 runset_versions:
-  lvs: Ver_Plus_1.0l_0.9
-  qrc: Ver_Plus_1.0a
+  lvs: Ver_LVS_A
+  qrc: Ver_QRC_B
 ```
 
 ```yaml
 # 新 schema（等价）
 paths:
-  calibre_lvs_dir: $VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9
-  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9/QCI_deck
+  calibre_lvs_dir: $VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX_LVS_DECK
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX_LVS_DECK/QCI_deck
 ```
 
 或者更动态、利用 env var：
@@ -259,5 +259,5 @@ paths:
 ```yaml
 paths:
   calibre_lvs_dir: $calibre_source_added_place|parent
-  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9/QCI_deck
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX_LVS_DECK/QCI_deck
 ```

@@ -20,7 +20,7 @@
 ## 0. 前提
 
 - 已经在服务器上 `git clone` 过 Auto_ext，部署路径 `/data/RFIC3/<Project>/<Employee ID>/workarea/Auto_ext_pro/`
-- Python 3.11 已就位（`/software/public/python/3.11.4/bin/python3.11`）
+- Python 3.11 已就位（`/software/public/python/3.11.4/bin/python3.11`）  <!-- redzone-scan-ok: shared tool mount path, not project/employee identity -->
 - 第三方依赖已通过 `scripts/install_offline.sh` 装到 `~/.local/lib/python3.11/site-packages/`
 - 你的 Cadence / PDK setup 脚本 `source` 之后，shell 里这几个 env var 有值：
   - `$WORK_ROOT`（你的 workarea 的父目录，extraction 输出落盘处）
@@ -98,8 +98,8 @@ Jivaro 可选：不跑 reduction 的项目省掉 `--raw-jivaro`，init-project �
 init-project 写的 `tasks.yaml` 只有**一条 task**，用的是 raw 文件里检测到的 cell / library。真跑 batch 时编辑它：
 
 ```yaml
-- library: WB_PLL_DCO                          # 你 design 的 library
-  cell: [LO_5GRX_LO_back_v3, another_cell]     # 列表 → 自动展开
+- library: EXAMPLE_LIB                          # 你 design 的 library
+  cell: [BLOCK_A_v3, another_cell]     # 列表 → 自动展开
   lvs_layout_view: [layout, layout_test]
   lvs_source_view: schematic
   ground_net: vss
@@ -117,8 +117,8 @@ init-project 写出的 project.yaml 长这样（节选）：
 ```yaml
 tech_name: HN001
 paths:
-  calibre_lvs_dir: $VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX
-  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck
+  calibre_lvs_dir: $VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck
 templates:
   calibre: Auto_ext_pro/templates/calibre/imported.qci.j2
   si: Auto_ext_pro/templates/si/imported.env.j2
@@ -344,7 +344,7 @@ LVS 过了之后：
 | `$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_*/CF*` | `[[calibre_lvs_dir]]` | `project.yaml.paths.calibre_lvs_dir` |
 | `<dir>/CFXXX.<variant>.qcilvs` 中的 `CFXXX` | `[[calibre_lvs_basename]]` | 自动派生：`Path(calibre_lvs_dir).name` |
 | `$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_*/CF*/QCI_deck` | `[[qrc_deck_dir]]` | `project.yaml.paths.qrc_deck_dir` |
-| `/tmpdata/RFIC/rfic_share/alice/` + `/data/RFIC3/.../alice/` | `[[employee_id]]` | shell `$USER` 或 `project.yaml.employee_id` |
+| `/tmpdata/RFIC/rfic_share/alice/` + `/data/RFIC3/.../alice/` | `[[employee_id]]` | shell `$USER` 或 `project.yaml.employee_id` |  <!-- redzone-scan-ok: alice is an invented user; this row documents the de-identification itself -->
 
 换 PDK / tech / 项目 / 用户 = 编辑 `project.yaml` 的对应字段，模板完全不碰。
 
@@ -363,8 +363,8 @@ LVS 过了之后：
 ### 批量展开（Cartesian product）
 
 ```yaml
-- library: WB_PLL_DCO
-  cell: [LO_5GRX_LO_back_v3, another_cell]
+- library: EXAMPLE_LIB
+  cell: [BLOCK_A_v3, another_cell]
   lvs_layout_view: [layout, layout_test]
   lvs_source_view: schematic
   ...
@@ -400,15 +400,15 @@ task_id 格式是 `<library>__<cell>__<layout_view>__<source_view>`：
 
 ```bash
 ./run.sh run --config-dir Auto_ext_pro/config \
-  --task WB_PLL_DCO__LO_5GRX_LO_back_v3__layout__schematic
+  --task EXAMPLE_LIB__BLOCK_A_v3__layout__schematic
 ```
 
 `--task` 可重复使用跑多个：
 
 ```bash
 ./run.sh run --config-dir Auto_ext_pro/config \
-  --task WB_PLL_DCO__cell_a__layout__schematic \
-  --task WB_PLL_DCO__cell_b__layout__schematic
+  --task EXAMPLE_LIB__cell_a__layout__schematic \
+  --task EXAMPLE_LIB__cell_b__layout__schematic
 ```
 
 ---
@@ -457,7 +457,7 @@ Calibre 失败时，`./run.sh run` 的 summary 里会显示 banner + discrepanci
 2026-04-24 办公室诊断：
 
 - 服务器 `/usr/lib64/libstdc++.so.6` 的最高版本符号是 `GLIBCXX_3.4.19`（GCC 4.8），**不提供** `_ZdaPvm`（C++14 sized-delete operator，GLIBCXX_3.4.21+ 才有）。
-- PyQt5 5.15.9 的 `QtCore.abi3.so` 链接时引用了 `_ZdaPvm@Qt_5`。任何依赖系统 libstdc++ 的 Qt5（如 `/software/public/qt/5.15.3_xcb/lib/libQt5Core.so.5`，`nm -D` 显示 `U _ZdaPvm`）都无法解析这个符号。
+- PyQt5 5.15.9 的 `QtCore.abi3.so` 链接时引用了 `_ZdaPvm@Qt_5`。任何依赖系统 libstdc++ 的 Qt5（如 `/software/public/qt/5.15.3_xcb/lib/libQt5Core.so.5`，`nm -D` 显示 `U _ZdaPvm`）都无法解析这个符号。  <!-- redzone-scan-ok: shared tool mount path, not project/employee identity -->
 - **PyQt5 的 manylinux2014 wheel 自带一份 Qt5**（`<PyQt5_path>/Qt5/lib/`），用较新工具链编译，`libQt5Core.so.5` 里 `T _ZdaPvm`（已定义，非引用）。只要把这个路径前置到 `LD_LIBRARY_PATH` 就能 bypass 系统 libstdc++ 老旧的问题。
 
 `run.sh` 已加上这个逻辑：当检测到 subcommand 为 `gui` 或 `gui-*` 时自动前置 `<PyQt5>/Qt5/lib` 到 `LD_LIBRARY_PATH`。非 GUI 命令（如 `run` / `check-env` / `init-project`）不触发，保持 EDA 子进程环境干净。
@@ -465,7 +465,7 @@ Calibre 失败时，`./run.sh run` 的 summary 里会显示 banner + discrepanci
 诊断确认（bash 里跑）：
 
 ```bash
-export LD_LIBRARY_PATH=/software/public/python/3.11.4/lib/python3.11/site-packages/PyQt5/Qt5/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/software/public/python/3.11.4/lib/python3.11/site-packages/PyQt5/Qt5/lib:$LD_LIBRARY_PATH  <!-- redzone-scan-ok: shared tool mount path, not project/employee identity -->
 python3 -c 'from PyQt5 import QtCore, QtGui, QtWidgets; print("modules ok")'
 python3 -c 'from PyQt5 import QtWidgets; a = QtWidgets.QApplication([]); print("QApplication ok")'
 ```

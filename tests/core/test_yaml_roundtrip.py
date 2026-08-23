@@ -254,7 +254,7 @@ def test_yaml_rt_cells_document_comments_survive_an_edit(tmp_path: Path) -> None
         "# The DUT table.\n"
         "schema_version: 1\n"
         "cells:\n"
-        "  - library: WB_PLL_DCO\n"
+        "  - library: EXAMPLE_LIB\n"
         "    cell: amp2\n"
         "    layout_view: layout\n"
         "    source_view: schematic\n"

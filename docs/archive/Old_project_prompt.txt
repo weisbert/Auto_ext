@@ -11,7 +11,7 @@
 在Run_ext.txt文件中有这些变量：
 
 Task: 1 \\这个代表后抽的任务编号
-LibraryName: WB_PLL_DCO
+LibraryName: EXAMPLE_LIB
 CellName: DCO5G_BUF_TOP
 lvsSourceView: schematic
 lvsLayoutView:layout
@@ -33,25 +33,25 @@ Task2: 2 \\第二个后抽任务
 首先需要定义这个任务的仿真文件设置
 1. 对于LVS的文件，使用用户指定的calibre_wiodio.qci，在workarea/scripts/template/calibre_wiodio.qci下
       a.替换掉该文件中所有的“CellName”字符为“DCO5G_BUF_TOP”
-      b.替换掉该文件中所有的“LibraryName”字符为“WB_PLL_DCO”
+      b.替换掉该文件中所有的“LibraryName”字符为“EXAMPLE_LIB”
       c.将改文件中“*lvsSourceView:”后的内容替换成用户定义的lvsSourceView
       d.将改文件中“*lvsLayoutView:”后的内容替换成用户定义的lvsLayoutView
       e.将文件中的QCI_PATH替换为QCI_PATH_<CellName>
 2. 对于quantus仿真文件
       a.替换掉该文件中所有的“CellName”字符为“DCO5G_BUF_TOP”
-      b.替换掉该文件中所有的“LibraryName”字符为“WB_PLL_DCO”
+      b.替换掉该文件中所有的“LibraryName”字符为“EXAMPLE_LIB”
       b.替换 -ground_net "(随机的字符)" 中""里的内容改为<GndName>，本例中为AVSS_DCO_BUF
       e.将文件中的QCI_PATH替换为QCI_PATH_<CellName>
       c.讲文件中-view_name "av_ext"，“”内的内容换成<OutFileName>
 3. 对于jivaro仿真文件
       a.里面有一行为inputView value="xx/xx/xx"，“xx”不是代表文件中真的是xx，可能是别的随机的值，将""内容替换为
-          <LibraryName>/<CellName>/<OutFileName>，在本例中为WB_PLL_DCO/DCO5G_BUF_TOP/av_ext
+          <LibraryName>/<CellName>/<OutFileName>，在本例中为EXAMPLE_LIB/DCO5G_BUF_TOP/av_ext
       b.里面有一行为frequencyLimit value="12", 将文件中的值换成Run_ext.txt中定义的值，即为14
       c.里面有一行为errorMax value="5", 将文件中的值换成Run_ext.txt中定义的值，即为2
       d.里面有一行为 outputView value="xx"，将双引号中的内容替换成<OutFileName>_red
 4. 对于si.env仿真文件
       a.替换掉该文件中所有的“CellName”字符为“DCO5G_BUF_TOP”
-      b.替换掉该文件中所有的“LibraryName”字符为“WB_PLL_DCO”
+      b.替换掉该文件中所有的“LibraryName”字符为“EXAMPLE_LIB”
       c.文件中有一行为 simViewName = "xxxx"，将""内的内容替换成<lvsSourceView>
       e.将文件中的QCI_PATH替换为QCI_PATH_<CellName>
       f.替换掉WORK_ROOT字符，换成当前环境$WORK_ROOT的字符

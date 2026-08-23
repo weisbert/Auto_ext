@@ -40,7 +40,7 @@
 **B3. `*cmnFDIDEFLayoutPath: [[cell]].def`** — qci L44。整条流水线没有任何一步产生或读取 `.def`。
 应进 catalog，归 `fixed / dead field`，明确标注"Calibre Interactive 面板残留，保留字面量以免 runset 不完整"。否则重构时一定有人纠结它。
 
-**B4. 两个 deck 各自的版本段与 PDK 子目录** — raw L2 `.../LVS/Ver_Plus_1.0l_0.9/CFXXX/CFXXX.wodio.qcilvs`；raw L27 `.../QRC/Ver_Plus_1.0a/CFXXX/QCI_deck/query_cmd`。
+**B4. 两个 deck 各自的版本段与 PDK 子目录** — raw L2 `.../LVS/Ver_LVS_A/CFXXX/CFXXX.wodio.qcilvs`；raw L27 `.../QRC/Ver_QRC_B/CFXXX/QCI_deck/query_cmd`。
 应进 catalog，归 `profile`，拆成 `lvs_runset_version` / `qrc_runset_version` / `pdk_subdir` 三项 + 体检。理由：草案的 `lvs_deck_dir` / `qrc_deck_dir` 把这些揉成一整串路径，因此丢掉了两条硬事实：(1) LVS deck 与 QRC deck 版本号可以不同步（`1.0l_0.9` vs `1.0a`）；(2) LVS deck 目录就是 `<pdk_subdir>`，而 QRC deck 目录多一层 `QCI_deck` —— 这正是 `qrc_deck_dir` 无法沿用 `|parent` 自动推导、必须手填的根本原因（config/project.yaml 里那句 "No standard env-var convention" 就是它的后果）。
 
 **B5. 可选行的 trim_blocks 缠绕写法** — qci L31-32：

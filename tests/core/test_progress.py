@@ -283,7 +283,7 @@ def test_parallel_per_task_event_sequence_is_ordered(
     # cell with different library would still trip _validate_task_outputs).
     t0 = task[0]
     t1 = t0.model_copy(
-        update={"task_id": "WB_PLL_DCO__buf__layout__schematic", "cell": "buf"}
+        update={"task_id": "EXAMPLE_LIB__buf__layout__schematic", "cell": "buf"}
     )
     tasks = [t0, t1]
     reporter = SpyReporter()

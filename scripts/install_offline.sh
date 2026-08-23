@@ -19,7 +19,7 @@
 #                                 the default `python` in PATH is not 3.11
 #                                 (typical on RHEL/CentOS where `python` is 2.7
 #                                 and the real 3.11 lives at a site path like
-#                                 /software/public/python/3.11.4/bin/python).
+#                                 /software/public/python/3.11.4/bin/python).  # redzone-scan-ok: shared tool mount path, not project/employee identity
 #
 # Flags:
 #   --no-dev    Currently a no-op on what gets installed -- every .whl in

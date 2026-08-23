@@ -116,8 +116,8 @@ def test_init_project_projectA_writes_full_skeleton(
     text = (cfg / "project.yaml").read_text(encoding="utf-8")
     assert "\npaths:" not in text
     assert "\ntemplates:" not in text
-    assert "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX" in text
-    assert "QRC/Ver_Plus_1.0a/CFXXX/QCI_deck" in text
+    assert "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX" in text
+    assert "QRC/Ver_QRC_B/CFXXX/QCI_deck" in text
     assert "profile discover" in text
 
 
@@ -349,8 +349,8 @@ def test_init_project_cross_project_abstraction(
     raw_leak_universal_A = {"INV1", "INV_LIB", "HN001"}
     raw_leak_universal_B = {"AMP2", "AMP_LIB", "HN042"}
     raw_leak_paths_A = {
-        "Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX",
-        "Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck",
+        "Calibre_QRC/LVS/Ver_LVS_A/CFXXX",
+        "Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck",
     }
     raw_leak_paths_B = {
         "Calibre_QRC/LVS/Ver_Minus_2.1a_0.3/CFBETA",
@@ -387,9 +387,9 @@ def test_init_project_cross_project_abstraction(
     # the whole claim: one template body, two technologies behind it.
     textA = (out_A / "config" / "project.yaml").read_text(encoding="utf-8")
     textB = (out_B / "config" / "project.yaml").read_text(encoding="utf-8")
-    assert "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX" in textA
+    assert "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX" in textA
     assert "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Minus_2.1a_0.3/CFBETA" in textB
-    assert "QRC/Ver_Plus_1.0a/CFXXX/QCI_deck" in textA
+    assert "QRC/Ver_QRC_B/CFXXX/QCI_deck" in textA
     assert "QRC/Ver_Minus_2.1c/CFBETA/QCI_deck" in textB
     assert "CFBETA" not in textA
     assert "CFXXX" not in textB
@@ -455,8 +455,8 @@ def test_init_project_summary_shows_promoted_constants(
     assert "tech_name" in result.output and "HN001" in result.output
     assert "calibre_lvs_dir" in result.output
     assert "qrc_deck_dir" in result.output
-    assert "Ver_Plus_1.0l_0.9" in result.output
-    assert "Ver_Plus_1.0a" in result.output
+    assert "Ver_LVS_A" in result.output
+    assert "Ver_QRC_B" in result.output
 
 
 def test_init_project_summary_surfaces_unclassified_on_conflict(

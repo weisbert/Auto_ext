@@ -342,7 +342,7 @@ def test_list_runs_carries_the_lvs_outcome(
 
     assert entry.lvs_passed is False
     assert entry.lvs_discrepancies == 7
-    assert entry.dut_key == "WB_PLL_DCO__amp2__layout__schematic"
+    assert entry.dut_key == "EXAMPLE_LIB__amp2__layout__schematic"
 
 
 def test_list_runs_uses_the_annotation_display_name(

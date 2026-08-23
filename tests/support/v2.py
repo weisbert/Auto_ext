@@ -55,7 +55,7 @@ ENV: dict[str, str] = {
     "SETUP_ROOT": f"{WORK}/fake/setup",
     "PDK_LAYER_MAP_FILE": f"{WORK}/fake/layers.map",
     "calibre_source_added_place": (
-        f"{WORK}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
+        f"{WORK}/fake/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX/empty.cdl"
     ),
 }
 
@@ -76,11 +76,11 @@ def make_profile(**overrides: Any) -> PdkProfile:
             dir_expr="$calibre_source_added_place|parent",
             variants=[LvsDeckVariant(name="wodio", rules_suffix="wodio")],
             default_variant="wodio",
-            runset_version="Ver_Plus_1.0l_0.9",
+            runset_version="Ver_LVS_A",
         ),
         "qrc": QrcDeck(
-            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck",
-            runset_version="Ver_Plus_1.0a",
+            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck",
+            runset_version="Ver_QRC_B",
         ),
         "corners": [
             CornerSpec(
@@ -149,7 +149,7 @@ def make_dut(**overrides: Any) -> DutSnapshot:
     """The DUT half of a render context."""
 
     fields: dict[str, Any] = {
-        "library": "WB_PLL_DCO",
+        "library": "EXAMPLE_LIB",
         "cell": "inv",
         "layout_view": "layout",
         "source_view": "schematic",
@@ -164,7 +164,7 @@ def make_cell(**overrides: Any) -> CellEntry:
     """One row of the Cells table, matching :func:`make_dut`'s DUT."""
 
     fields: dict[str, Any] = {
-        "library": "WB_PLL_DCO",
+        "library": "EXAMPLE_LIB",
         "cell": "inv",
         "layout_view": "layout",
         "source_view": "schematic",

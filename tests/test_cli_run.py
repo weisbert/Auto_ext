@@ -276,7 +276,7 @@ def test_run_then_runs_show_reads_back_the_same_run(
         app, ["runs", "show", "latest", "--auto-ext-root", str(root)]
     )
     assert shown.exit_code == 0, shown.stdout
-    assert "WB_PLL_DCO / inv / layout vs schematic" in shown.stdout
+    assert "EXAMPLE_LIB / inv / layout vs schematic" in shown.stdout
     assert "Stages" in shown.stdout
     assert "logs/calibre.log" in shown.stdout
     assert "LVS" in shown.stdout

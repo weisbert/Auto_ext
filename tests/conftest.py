@@ -217,7 +217,7 @@ def sandbox_env(workarea: Path) -> dict[str, str]:
         "SETUP_ROOT": f"{wa}/fake/setup",
         "PDK_LAYER_MAP_FILE": f"{wa}/fake/layers.map",
         "calibre_source_added_place": (
-            f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
+            f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX/empty.cdl"
         ),
     }
 
@@ -265,7 +265,7 @@ dspf_out_path: "${{WORK_ROOT2}}/{{cell}}.dspf"
     )
     (config_dir / "tasks.yaml").write_text(
         """\
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: inv
   lvs_layout_view: layout
   lvs_source_view: schematic
@@ -314,7 +314,7 @@ employee_id: alice
 tech_name: HN001
 paths:
   calibre_lvs_dir: $calibre_source_added_place|parent
-  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck
 layer_map: {wa_posix}/fake/layers.map
 env_overrides:
 {overrides}
@@ -331,7 +331,7 @@ templates:
     )
     (config_dir / "tasks.yaml").write_text(
         """\
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: inv
   lvs_layout_view: layout
   lvs_source_view: schematic
@@ -628,7 +628,7 @@ def make_run_record(frozen_clock: FrozenClock) -> Any:
 
     def _make(
         *,
-        library: str = "WB_PLL_DCO",
+        library: str = "EXAMPLE_LIB",
         cell: str = "amp2",
         layout_view: str = "layout",
         source_view: str = "schematic",

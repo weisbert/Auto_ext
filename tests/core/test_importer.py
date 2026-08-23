@@ -1,4 +1,8 @@
 """Tests for :mod:`auto_ext.core.importer` — per-tool importers, candidate
+
+redzone-scan-ok: file -- every path below is invented (alice/bob/projA/projB);
+the suite exists to prove real ones get rewritten out.
+
 detection, and PdkToken detection.
 
 The importer survives this round as the one-shot tool that builds the
@@ -539,7 +543,7 @@ def test_aggregate_calibre_lvs_dir_extracted_from_rules_file(raw_dir: Path) -> N
     constants = aggregate_pdk_tokens(_all_four_results(raw_dir))
     assert (
         constants.paths["calibre_lvs_dir"]
-        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
+        == "$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX"
     )
 
 
@@ -553,7 +557,7 @@ def test_aggregate_qrc_deck_dir_cross_checked(raw_dir: Path) -> None:
     constants = aggregate_pdk_tokens(_all_four_results(raw_dir))
     assert (
         constants.paths["qrc_deck_dir"]
-        == "$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
+        == "$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck"
     )
 
 
@@ -665,13 +669,13 @@ def test_apply_constants_substitutes_calibre_paths_and_basename() -> None:
     from auto_ext.core.importer import ProjectConstants, apply_project_constants
 
     body = (
-        "*lvsRulesFile: /r/LVS/Ver_Plus_1.0l_0.9/CFXXX/CFXXX.wodio.qcilvs\n"
+        "*lvsRulesFile: /r/LVS/Ver_LVS_A/CFXXX/CFXXX.wodio.qcilvs\n"
         "*lvsPostTriggers: {{calibre -query_input /q/QCI_deck/query_cmd -query svdb } process 1}\n"
     )
     constants = ProjectConstants(
         tech_name="HN001",
         paths={
-            "calibre_lvs_dir": "/r/LVS/Ver_Plus_1.0l_0.9/CFXXX",
+            "calibre_lvs_dir": "/r/LVS/Ver_LVS_A/CFXXX",
             "qrc_deck_dir": "/q/QCI_deck",
         },
     )
@@ -680,7 +684,7 @@ def test_apply_constants_substitutes_calibre_paths_and_basename() -> None:
     assert "[[calibre_lvs_basename]].wodio.qcilvs" in out
     assert "[[qrc_deck_dir]]" in out
     # Raw values gone.
-    assert "/r/LVS/Ver_Plus_1.0l_0.9/CFXXX" not in out
+    assert "/r/LVS/Ver_LVS_A/CFXXX" not in out
     assert "/q/QCI_deck" not in out
 
 
@@ -724,9 +728,9 @@ def test_apply_constants_si_body_untouched_by_paths() -> None:
     """paths.calibre_lvs_dir / qrc_deck_dir don't apply to si templates."""
     from auto_ext.core.importer import ProjectConstants, apply_project_constants
 
-    body = "incFILE = '/r/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl'\n"
+    body = "incFILE = '/r/LVS/Ver_LVS_A/CFXXX/empty.cdl'\n"
     constants = ProjectConstants(
-        paths={"calibre_lvs_dir": "/r/LVS/Ver_Plus_1.0l_0.9/CFXXX"}
+        paths={"calibre_lvs_dir": "/r/LVS/Ver_LVS_A/CFXXX"}
     )
     out = apply_project_constants("si", body, constants)
     assert out == body

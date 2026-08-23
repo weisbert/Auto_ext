@@ -1,5 +1,5 @@
 <?xml version="1.0" ?> <reductionParameters version="2024.1"> <options> <!-- General Options -->
-<inputView value="WB_PLL_DCO/inv/av_ext"/>
+<inputView value="EXAMPLE_LIB/inv/av_ext"/>
 <outputView value="av_ext_red"/>
 <logVerboseLevel value="trace"/>
 <cpu value="1"/>

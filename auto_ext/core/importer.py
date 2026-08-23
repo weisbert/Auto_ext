@@ -563,7 +563,7 @@ _QUANTUS_RULES: dict[str, list[_Rule]] = {
 #   (si's ``incFILE``). The project segment stays raw so the PdkToken
 #   detector can still surface it as ``project_subdir``.
 #
-# Both regexes require a trailing ``/`` so "bar" in ``/data/RFIC3/foo/bar}``
+# Both regexes require a trailing ``/`` so "bar" in ``/data/RFIC3/foo/bar}``  # redzone-scan-ok: the regex must MATCH this shape; no real value here
 # (no trailing slash) is not mis-substituted.
 _EMPLOYEE_ID_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(/tmpdata/RFIC/rfic_share/)([^/\s\"']+)(/)"),

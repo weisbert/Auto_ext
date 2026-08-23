@@ -56,14 +56,14 @@ RECIPES = [("rc-typ", "RC typical 55C"), ("rc-worst", "RCworst 85C")]
 def _book(*extra: CellEntry) -> CellBook:
     return CellBook(
         cells=[
-            CellEntry(library="WB_PLL_DCO", cell="LO_5GRX_LO_back_v3", layout_view="layout"),
+            CellEntry(library="EXAMPLE_LIB", cell="BLOCK_A_v3", layout_view="layout"),
             CellEntry(
-                library="WB_PLL_DCO",
-                cell="DCO_CORE_TOP_v7",
+                library="EXAMPLE_LIB",
+                cell="CORE_TOP_v7",
                 layout_view="layout",
                 ground_net="avss",
             ),
-            CellEntry(library="WB_PLL_TOP", cell="PLL_TOP_WRAP_v1", layout_view="layout"),
+            CellEntry(library="EXAMPLE_LIB_TOP", cell="TOP_WRAP_v1", layout_view="layout"),
             *extra,
         ]
     )
@@ -152,8 +152,8 @@ def test_every_row_is_one_dut(qtbot) -> None:
     screen = _screen(qtbot)
 
     assert screen.table.rowCount() == 3
-    assert screen.table.item(0, COL_LIBRARY).text() == "WB_PLL_DCO"
-    assert screen.table.item(0, COL_CELL).text() == "LO_5GRX_LO_back_v3"
+    assert screen.table.item(0, COL_LIBRARY).text() == "EXAMPLE_LIB"
+    assert screen.table.item(0, COL_CELL).text() == "BLOCK_A_v3"
 
 
 def test_there_is_exactly_one_table_and_no_expansion_preview(qtbot) -> None:
@@ -310,9 +310,9 @@ def test_editing_a_field_goes_through_the_model(qtbot) -> None:
     seen: list[CellBook] = []
     screen.cells_changed.connect(seen.append)
 
-    screen.table.item(0, COL_CELL).setText("LO_5GRX_LO_back_v4")
+    screen.table.item(0, COL_CELL).setText("BLOCK_back_v4")
 
-    assert screen.cells().cells[0].cell == "LO_5GRX_LO_back_v4"
+    assert screen.cells().cells[0].cell == "BLOCK_back_v4"
     assert len(seen) == 1
 
 
@@ -324,11 +324,11 @@ def test_a_duplicate_row_is_refused_and_the_text_goes_back(qtbot) -> None:
     rejected: list[str] = []
     screen.edit_rejected.connect(rejected.append)
 
-    screen.table.item(0, COL_CELL).setText("DCO_CORE_TOP_v7")
+    screen.table.item(0, COL_CELL).setText("CORE_TOP_v7")
 
     assert len(rejected) == 1
-    assert screen.cells().cells[0].cell == "LO_5GRX_LO_back_v3"
-    assert screen.table.item(0, COL_CELL).text() == "LO_5GRX_LO_back_v3"
+    assert screen.cells().cells[0].cell == "BLOCK_A_v3"
+    assert screen.table.item(0, COL_CELL).text() == "BLOCK_A_v3"
 
 
 def test_emptying_a_required_field_is_refused(qtbot) -> None:
@@ -339,7 +339,7 @@ def test_emptying_a_required_field_is_refused(qtbot) -> None:
     screen.table.item(0, COL_LIBRARY).setText("")
 
     assert len(rejected) == 1
-    assert screen.table.item(0, COL_LIBRARY).text() == "WB_PLL_DCO"
+    assert screen.table.item(0, COL_LIBRARY).text() == "EXAMPLE_LIB"
 
 
 def test_renaming_a_row_carries_its_recipe_and_status_along(qtbot) -> None:
@@ -348,7 +348,7 @@ def test_renaming_a_row_carries_its_recipe_and_status_along(qtbot) -> None:
     screen.set_recipe_binding(old_key, "rc-typ")
     screen.set_row_status(old_key, "passed", text="passed", when="08-20 17:42")
 
-    screen.table.item(0, COL_CELL).setText("LO_5GRX_LO_back_v9")
+    screen.table.item(0, COL_CELL).setText("BLOCK_back_v9")
     new_key = screen.cells().keys[0]
 
     assert new_key != old_key
@@ -407,7 +407,7 @@ def test_duplicate_copies_the_row_and_its_recipe(qtbot) -> None:
     copies = screen.duplicate_selected()
 
     assert len(copies) == 1
-    assert screen.cells().entry(copies[0]).cell == "LO_5GRX_LO_back_v3_copy"
+    assert screen.cells().entry(copies[0]).cell == "BLOCK_A_v3_copy"
     assert screen.recipe_bindings()[copies[0]] == "rc-typ"
 
 
@@ -503,7 +503,7 @@ def test_duplicate_and_remove_are_dead_without_a_selection(qtbot) -> None:
 def test_filter_hides_the_rows_that_do_not_match(qtbot) -> None:
     screen = _screen(qtbot)
 
-    screen.set_filter_text("LO_5G")
+    screen.set_filter_text("BLOCK")
 
     assert screen.visible_keys() == (screen.cells().keys[0],)
 
@@ -687,8 +687,8 @@ def test_a_very_long_cell_name_does_not_widen_the_screen(qtbot) -> None:
     book = CellBook(
         cells=[
             CellEntry(
-                library="WB_PLL_DCO",
-                cell="LO_5GRX_" + "very_long_block_name_" * 8,
+                library="EXAMPLE_LIB",
+                cell="BLOCK_" + "very_long_block_name_" * 8,
                 layout_view="layout",
             )
         ]

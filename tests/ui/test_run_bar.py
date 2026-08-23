@@ -478,7 +478,7 @@ def test_elided_label_keeps_the_whole_string_for_the_tooltip(qtbot) -> None:
     qtbot.addWidget(label)
     label.resize(40, 20)
 
-    label.set_full_text("/home/rfv/wa/Auto_ext_pro/logs/task/quantus.log")
+    label.set_full_text("/work/wa/Auto_ext_pro/logs/task/quantus.log")
 
     assert label.full_text().endswith("quantus.log")
     assert label.toolTip() == label.full_text()

@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def make_entry(**overrides: object) -> CellEntry:
     fields: dict[str, object] = {
-        "library": "WB_PLL_DCO",
+        "library": "EXAMPLE_LIB",
         "cell": "inv",
         "layout_view": "layout",
     }
@@ -56,11 +56,11 @@ def test_defaults_match_the_legacy_task_spec() -> None:
 
 def test_key_is_the_legacy_task_id_spelling() -> None:
     entry = make_entry(source_view="cdl")
-    assert entry.key == "WB_PLL_DCO__inv__layout__cdl"
+    assert entry.key == "EXAMPLE_LIB__inv__layout__cdl"
 
 
 def test_label_falls_back_to_the_key() -> None:
-    assert make_entry().label == "WB_PLL_DCO__inv__layout__schematic"
+    assert make_entry().label == "EXAMPLE_LIB__inv__layout__schematic"
     assert make_entry(display_name="the DCO").label == "the DCO"
 
 
@@ -111,7 +111,7 @@ def test_enabled_cells_filters_parked_rows() -> None:
 
 def test_entry_lookup_and_missing_key() -> None:
     book = CellBook(cells=[make_entry()])
-    assert book.entry("WB_PLL_DCO__inv__layout__schematic").cell == "inv"
+    assert book.entry("EXAMPLE_LIB__inv__layout__schematic").cell == "inv"
     with pytest.raises(KeyError):
         book.entry("nope")
 

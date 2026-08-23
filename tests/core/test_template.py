@@ -91,7 +91,7 @@ def test_render_none_value_for_referenced_var_raises(tmp_path: Path) -> None:
     with pytest.raises(TemplateError, match=r"references \['pdk_subdir'\].*is None"):
         render_template(
             tpl,
-            context={"lvs_runset_version": "Ver_Plus_1.0l_0.9", "pdk_subdir": None},
+            context={"lvs_runset_version": "Ver_LVS_A", "pdk_subdir": None},
             env={"VERIFY_ROOT": "/v"},
         )
 

@@ -15,7 +15,7 @@ extraction_setup \
               -max_fracture_length infinite \
               -max_fracture_length_unit "MICRONS" \
               -max_via_array_size "auto" \
-              -parasitic_blocking_device_cells_file "/w/fake/verify/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck/preserveCellList.txt" \
+              -parasitic_blocking_device_cells_file "/w/fake/verify/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck/preserveCellList.txt" \
               -net_name_space "SCHEMATIC"
 filter_cap \
               -exclude_self_cap true \
@@ -29,7 +29,7 @@ filter_res \
               -min_res 0.001 \
               -remove_dangling_res true
 input_db -type calibre \
-              -design_cell_name "inv layout WB_PLL_DCO" \
+              -design_cell_name "inv layout EXAMPLE_LIB" \
               -device_property_value 7 \
               -run_name "Design" \
               -directory_name "/w/cds/verify/QCI_PATH_inv/query_output" \

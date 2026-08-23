@@ -33,7 +33,7 @@ rf_analysis \
               -substrate_coupling true \
               -frequency_sweep "1e9 40e9 200"
 input_db -type calibre \
-              -design_cell_name "pll_dco layout WB_PLL_DCO" \
+              -design_cell_name "pll_dco layout EXAMPLE_LIB" \
               -device_property_value 7 \
               -run_name "Design" \
               -directory_name "/proj/wb/verify/QCI_PATH_pll_dco/query_output" \

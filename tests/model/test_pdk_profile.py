@@ -241,15 +241,15 @@ def test_lvs_and_qrc_runset_versions_may_differ():
     # The one real sample has exactly this mismatch. Nothing may reject it.
     p = _profile(
         lvs_decks=LvsDeckSet(
-            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX",
-            runset_version="Ver_Plus_1.0l_0.9",
+            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX",
+            runset_version="Ver_LVS_A",
         ),
         qrc=QrcDeck(
-            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck",
-            runset_version="Ver_Plus_1.0a",
+            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck",
+            runset_version="Ver_QRC_B",
         ),
     )
-    assert p.deck_versions == ("Ver_Plus_1.0l_0.9", "Ver_Plus_1.0a")
+    assert p.deck_versions == ("Ver_LVS_A", "Ver_QRC_B")
     # ... and the QRC path is one level deeper, which is why it is its own field.
     assert p.qrc.dir_expr.endswith("/QCI_deck")
     assert not p.lvs_decks.dir_expr.endswith("/QCI_deck")

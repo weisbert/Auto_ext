@@ -155,7 +155,7 @@ def test_context_carries_the_namespaced_tree(context: dict[str, object]) -> None
 def test_pdk_paths_are_resolved_and_assembled(context: dict[str, object]) -> None:
     pdk = context["pdk"]  # type: ignore[index]
     assert pdk["lvs_dir"] == (
-        f"{WORK}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX"
+        f"{WORK}/fake/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX"
     )
     # basename auto-derives from the directory's last segment, as the runner
     # used to do inline.
@@ -764,10 +764,10 @@ def test_every_production_template_renders_from_a_recipe(
         "lvs.qci",
         "si.env",
     ]
-    assert 'simLibName = "WB_PLL_DCO"' in files["si"].text
+    assert 'simLibName = "EXAMPLE_LIB"' in files["si"].text
     assert files["calibre"].text.splitlines()[0].endswith("/CFXXX.wodio.qcilvs")
     assert '-min_res 0.001' in files["quantus"].text
-    assert '<inputView value="WB_PLL_DCO/inv/av_ext"/>' in files["jivaro"].text
+    assert '<inputView value="EXAMPLE_LIB/inv/av_ext"/>' in files["jivaro"].text
 
 
 def test_the_rendered_files_are_named_after_the_artifact_not_the_template(

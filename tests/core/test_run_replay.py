@@ -43,7 +43,7 @@ def _profile(workarea: Path):
             "SETUP_ROOT": f"{wa}/fake/setup",
             "PDK_LAYER_MAP_FILE": f"{wa}/fake/layers.map",
             "calibre_source_added_place": (
-                f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
+                f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX/empty.cdl"
             ),
         },
     )

@@ -20,8 +20,8 @@ Two asymmetries this schema is deliberately built to express (they are real
 observations from ``docs/calibre_raw.txt``, see ``05-catalog-critique.md`` B4):
 
 * The LVS deck and the QRC deck carry **independent** runset versions --
-  the one real sample has ``LVS/Ver_Plus_1.0l_0.9`` next to
-  ``QRC/Ver_Plus_1.0a``. Nothing may force them to agree.
+  the one real sample has ``LVS/Ver_LVS_A`` next to
+  ``QRC/Ver_QRC_B``. Nothing may force them to agree.
 * The QRC deck directory has **one level more** than the LVS deck directory
   (``.../<pdk_subdir>/QCI_deck`` vs ``.../<pdk_subdir>``). This is precisely
   why ``qrc.dir_expr`` cannot be derived from ``lvs_decks.dir_expr`` with the
@@ -181,7 +181,7 @@ class LvsDeckSet(Base):
     filename_pattern: str = "{basename}.{suffix}.qcilvs"
     variants: list[LvsDeckVariant] = Field(default_factory=list)
     default_variant: Slug | None = None
-    #: Runset version segment of the deck path (``Ver_Plus_1.0l_0.9`` in the one
+    #: Runset version segment of the deck path (``Ver_LVS_A`` in the one
     #: real sample). Provenance only -- ``dir_expr`` is the locator. It is
     #: recorded separately because it is legitimately allowed to differ from
     #: :attr:`QrcDeck.runset_version`.
@@ -265,8 +265,8 @@ class QrcDeck(Base):
 
     This is a separate object from :class:`LvsDeckSet` on purpose: in the one
     real sample the QRC deck sits at
-    ``.../QRC/Ver_Plus_1.0a/CFXXX/QCI_deck`` while the LVS deck sits at
-    ``.../LVS/Ver_Plus_1.0l_0.9/CFXXX``. Different version segment, one extra
+    ``.../QRC/Ver_QRC_B/CFXXX/QCI_deck`` while the LVS deck sits at
+    ``.../LVS/Ver_LVS_A/CFXXX``. Different version segment, one extra
     directory level. ``config/project.yaml`` already says as much in prose
     ("No standard env-var convention"); here it is structure.
     """
@@ -277,7 +277,7 @@ class QrcDeck(Base):
     dir_expr: PathExpr | None = None
     query_cmd_name: str = "query_cmd"
     preserve_cell_list_name: str = "preserveCellList.txt"
-    #: Runset version segment (``Ver_Plus_1.0a`` in the sample). Provenance
+    #: Runset version segment (``Ver_QRC_B`` in the sample). Provenance
     #: only, and explicitly allowed to differ from the LVS deck's.
     runset_version: str | None = None
 
@@ -664,7 +664,7 @@ class PdkProfile(Base):
         """``(lvs_runset_version, qrc_runset_version)``.
 
         They are allowed to differ; the one real sample has
-        ``Ver_Plus_1.0l_0.9`` against ``Ver_Plus_1.0a``. Nothing in this
+        ``Ver_LVS_A`` against ``Ver_QRC_B``. Nothing in this
         codebase may treat a mismatch as an error.
         """
 

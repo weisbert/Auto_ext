@@ -20,7 +20,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 workarea="$(cd "${here}/.." && pwd)"
 
 # Pick a Python 3.x interpreter. Skip `python` if it is Python 2 (some
-# sites put /software/public/openoffice/.../python on PATH first).
+# sites put /software/public/openoffice/.../python on PATH first).  # redzone-scan-ok: shared tool mount path, not project/employee identity
 pick_python() {
     if [ -n "${PYTHON:-}" ]; then
         echo "${PYTHON}"

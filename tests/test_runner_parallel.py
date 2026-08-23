@@ -55,13 +55,13 @@ symlink_required = pytest.mark.skipif(
 
 
 _TWO_TASKS_YAML = """\
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: inv
   lvs_layout_view: layout
   lvs_source_view: schematic
   ground_net: vss
   out_file: av_ext
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: buf
   lvs_layout_view: layout
   lvs_source_view: schematic
@@ -96,7 +96,7 @@ def _profile(workarea: Path):
             default_variant="wodio",
         ),
         qrc=QrcDeck(
-            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
+            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck"
         ),
         env_overrides={
             "WORK_ROOT": wa,
@@ -105,7 +105,7 @@ def _profile(workarea: Path):
             "SETUP_ROOT": f"{wa}/fake/setup",
             "PDK_LAYER_MAP_FILE": f"{wa}/fake/layers.map",
             "calibre_source_added_place": (
-                f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
+                f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX/empty.cdl"
             ),
         },
     )
@@ -263,11 +263,11 @@ def test_preflight_accepts_same_cell_when_pattern_discriminates(
 
     (project_tools_config / "tasks.yaml").write_text(
         """\
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: inv
   lvs_layout_view: layout
   lvs_source_view: schematic
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: inv
   lvs_layout_view: layout_test
   lvs_source_view: schematic
@@ -337,13 +337,13 @@ def test_preflight_rejects_concurrent_workspace_sharing(
     # the extraction output dir.
     (project_tools_config / "tasks.yaml").write_text(
         """\
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: inv
   lvs_layout_view: layout
   lvs_source_view: schematic
   ground_net: vss
   out_file: av_ext_a
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: inv
   lvs_layout_view: layout_test
   lvs_source_view: schematic
@@ -395,11 +395,11 @@ def test_parallel_same_cell_allowed_when_run_slug_isolates(
     )
     (project_tools_config / "tasks.yaml").write_text(
         """\
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: inv
   lvs_layout_view: layout
   lvs_source_view: schematic
-- library: WB_PLL_DCO
+- library: EXAMPLE_LIB
   cell: inv
   lvs_layout_view: layout_test
   lvs_source_view: schematic

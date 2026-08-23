@@ -474,8 +474,8 @@ def test_title_bar_and_status_bar_text_round_trips(qtbot) -> None:
     shell = _shell(qtbot)
 
     assert shell.app_name() == "Auto_ext"
-    shell.set_config_path("/home/rfv/wa/Auto_ext_pro/config")
-    assert shell.config_path() == "/home/rfv/wa/Auto_ext_pro/config"
+    shell.set_config_path("/work/wa/Auto_ext_pro/config")
+    assert shell.config_path() == "/work/wa/Auto_ext_pro/config"
     shell.set_config_path(None)
     assert shell.config_path() == ""
 

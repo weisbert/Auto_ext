@@ -29,7 +29,7 @@ filter_res \
               -min_res 0.005 \
               -remove_dangling_res true
 input_db -type calibre \
-              -design_cell_name "pll_dco layout WB_PLL_DCO" \
+              -design_cell_name "pll_dco layout EXAMPLE_LIB" \
               -device_property_value 7 \
               -run_name "Design" \
               -directory_name "/proj/wb/verify/QCI_PATH_pll_dco/query_output" \

@@ -48,7 +48,7 @@ def _write_tasks(config_dir: Path, rows: list[dict[str, str]]) -> Path:
     """
 
     defaults = {
-        "library": "WB_PLL_DCO",
+        "library": "EXAMPLE_LIB",
         "cell": "inv",
         "lvs_layout_view": "layout",
         "lvs_source_view": "schematic",
@@ -715,7 +715,7 @@ def test_run_writes_a_record_with_identity_and_snapshots(
     record = read_record(run_dir)
     assert record.run_id == run_dir.name
     assert record.overall == "passed"
-    assert record.dut.library == "WB_PLL_DCO"
+    assert record.dut.library == "EXAMPLE_LIB"
     assert record.dut.cell == "inv"
     assert record.dut_label == tasks[0].task_id
     # The directory name is <stamp>_<cell>-<recipe_id>. The recipe id is the
@@ -1395,7 +1395,7 @@ def _profile(workarea: Path) -> "PdkProfile":
             default_variant="wodio",
         ),
         qrc=QrcDeck(
-            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck"
+            dir_expr="$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck"
         ),
         corners=[
             CornerSpec(
@@ -1410,7 +1410,7 @@ def _profile(workarea: Path) -> "PdkProfile":
             "SETUP_ROOT": f"{wa}/fake/setup",
             "PDK_LAYER_MAP_FILE": f"{wa}/fake/layers.map",
             "calibre_source_added_place": (
-                f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CFXXX/empty.cdl"
+                f"{wa}/fake/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX/empty.cdl"
             ),
         },
     )

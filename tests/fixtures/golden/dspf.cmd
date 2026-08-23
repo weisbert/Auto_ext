@@ -15,7 +15,7 @@ extraction_setup \
               -max_fracture_length infinite \
               -max_fracture_length_unit "MICRONS" \
               -max_via_array_size "auto" \
-              -parasitic_blocking_device_cells_file "/w/fake/verify/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CFXXX/QCI_deck/preserveCellList.txt" \
+              -parasitic_blocking_device_cells_file "/w/fake/verify/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX/QCI_deck/preserveCellList.txt" \
               -net_name_space "SCHEMATIC"
 filter_cap \
               -exclude_self_cap true \

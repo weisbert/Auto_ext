@@ -76,10 +76,10 @@ ImportError: .../PyQt5/QtCore.abi3.so: symbol _ZdaPvm, version Qt_5 not defined
 
 ```yaml
 # 旧（5.6.5 不再接受）
-pdk_subdir: CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9
+pdk_subdir: CFXXX_LVS_DECK
 runset_versions:
-  lvs: Ver_Plus_1.0l_0.9
-  qrc: Ver_Plus_1.0a
+  lvs: Ver_LVS_A
+  qrc: Ver_QRC_B
 ```
 
 `./run.sh check-env --config-dir config` 应该 **明确报错** 提到 `pdk_subdir` / `runset_versions` 是 unknown field（pydantic `extra="forbid"`）。**这就是 5.6.5 的预期行为**——如果没报错说明拉错代码了。
@@ -89,7 +89,7 @@ runset_versions:
 ```yaml
 paths:
   calibre_lvs_dir: $calibre_source_added_place|parent
-  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9/QCI_deck
+  qrc_deck_dir: $VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX_LVS_DECK/QCI_deck
 ```
 
 `calibre_lvs_dir` 用 `$calibre_source_added_place|parent` 是因为这个 env var 由 PDK setup 设置成 `<dir>/empty.cdl`，`|parent` 取 dir 本身。`qrc_deck_dir` 没有等价的 env var 约定，建议显式拼。详见 `CONFIG_GLOSSARY.md#paths`。
@@ -117,7 +117,7 @@ grep 'parasitic_blocking' $RD/dspf.cmd
 
 **预期**：
 - (a) 是 `<calibre_lvs_dir>/<calibre_lvs_basename>.<variant>.qcilvs`，里面是你 PDK 的 **LVS** subdir
-- (b)(c)(d) 都是 `<qrc_deck_dir>/...`，里面是你 PDK 的 **QRC** subdir + `Ver_Plus_1.0a`（不是 `Ver_Plus_1.0l_0.9`）
+- (b)(c)(d) 都是 `<qrc_deck_dir>/...`，里面是你 PDK 的 **QRC** subdir + `Ver_QRC_B`（不是 `Ver_LVS_A`）
 - (a) 和 (b) 解析出来的目录**不应该相同**（LVS dir vs QRC dir）。这一条是 5.6.5 的核心 regression check——如果它们一样，说明 schema 没生效。
 - 全部路径都是真值，没有 `$X` / `${X}` / `$env(X)` / `<runset>` / `<pdk_subdir>` 残留。
 
@@ -142,8 +142,8 @@ grep 'parasitic_blocking' $RD/dspf.cmd
 
 如果有空的话，把你**真的 office 用的 4 份 raw 文件**喂给 `init-project`（File → New project from raws…），到 Preview 页看 `生成的 yaml` tab：
 
-- `paths.calibre_lvs_dir` 应该是真路径，类似 `$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_Plus_1.0l_0.9/CF710_Plus_CalLVS_QCI_CCI_081825_V1d0l_0d9`（注意：**整条路径，不是单个段**）。`$VERIFY_ROOT` / `$env(VERIFY_ROOT)` 都会被规范化成 `$VERIFY_ROOT`。
-- `paths.qrc_deck_dir` 同理，类似 `$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_Plus_1.0a/CF710_Plus_0818_QRC_QCI_1P10M_7X1Z1U_AL28K_V1.0a_offline/QCI_deck`。
+- `paths.calibre_lvs_dir` 应该是真路径，类似 `$VERIFY_ROOT/runset/Calibre_QRC/LVS/Ver_LVS_A/CFXXX_LVS_DECK`（注意：**整条路径，不是单个段**）。`$VERIFY_ROOT` / `$env(VERIFY_ROOT)` 都会被规范化成 `$VERIFY_ROOT`。
+- `paths.qrc_deck_dir` 同理，类似 `$VERIFY_ROOT/runset/Calibre_QRC/QRC/Ver_QRC_B/CFXXX_QRC_DECK_offline/QCI_deck`。
 - 如果 calibre 的 `*lvsPostTriggers` 行抽出来的 QRC dir 和 quantus 的 `-parasitic_blocking_device_cells_file` 抽出来的不一致 → 不会 promote，两个值都会出现在 Unclassified 区，需要你手 review。这种情况报告一下。
 
 ---
