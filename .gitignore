@@ -43,3 +43,11 @@ dist/
 
 # Claude Code session state (agent worktrees, local settings)
 .claude/
+
+# Red-zone deployment runtime state (backups / staging / scratch / seed).
+# Created inside the install dir on the server -- and on this box too, whenever
+# deploy/doctor.sh is run once. Never a commit.
+.deploy/
+
+# Packages built by deploy/pack.ps1
+deploy/dist/

@@ -1,15 +1,71 @@
-# Force LF on everything textual so scripts do not break when cloned on Linux.
-# The mock EDA binaries and shell scripts in particular refuse to parse with \r\n.
+# Line endings ------------------------------------------------------------
+# `eol=lf` is load-bearing and must NOT be shortened to just `text=auto`: a
+# file marked `text` with no `eol` falls back to core.eol, which is `native` =
+# CRLF on Windows. `git archive` then honours that, so a package built on the
+# yellow zone would ship CRLF and the red zone's bash would die on
+# `$'\r': command not found` -- in the one place you cannot debug it.
+# The deployment target is Linux; pin LF everywhere.
 * text=auto eol=lf
 
 # Explicitly force LF for files Linux will execute.
 *.sh          text eol=lf
 *.py          text eol=lf
 run.sh        text eol=lf
+deploy.sh     text eol=lf
 scripts/*     text eol=lf
 tests/mocks/* text eol=lf
 
-# Binary-ish things (none right now, but future-proofed).
+# ...and CRLF for the ones only Windows runs.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Binary-ish things.
 *.whl    binary
 *.gds    binary
 *.png    binary
+
+# What crosses the air gap -----------------------------------------------
+# BLACKLIST, not a whitelist: everything in the repo ships unless it is
+# export-ignored here. New modules, new tests and new docs therefore cross the
+# gap automatically and deploy/pack.ps1 never needs touching -- which is the
+# bug the previous whitelist-based packer had (it silently dropped recipes/,
+# added months after the include list was written).
+#
+# Only cut what is meaningless -- or actively misleading -- on the far side.
+.gitignore                 export-ignore
+.gitattributes             export-ignore
+.redzone_patterns.example  export-ignore
+
+# Yellow-zone-only tooling. deploy/pack.ps1 and pack.bat build the package, so
+# they cannot be inside it; the red zone has neither PowerShell nor git.
+deploy/pack.ps1  export-ignore
+deploy/pack.bat  export-ignore
+
+# These two are the DEV-SIDE commit gate. Both start with
+# `git rev-parse --show-toplevel`, and the red zone has no git => shipping them
+# means shipping two scripts that can only ever `exit 1`. An operator who types
+# `sh scripts/redzone_scan.sh` over there gets a bare failure and concludes the
+# install is broken. Their job -- keeping coordinates out of a public repo --
+# has no meaning inside the red zone anyway.
+# Listed one by one rather than as `scripts/` so the zero-maintenance property
+# survives: anything else added under scripts/ still ships by default.
+scripts/redzone_scan.sh    export-ignore
+scripts/install_hooks.sh   export-ignore
+
+# Downloads wheels from PyPI. The red zone has no network, so over there it can
+# only fail -- and its presence invites someone to try, which wastes an hour
+# before the penny drops. The wheels bundle crosses the gap as its own upload
+# (deploy/pack.ps1 -WithWheels).
+scripts/download_wheels.py export-ignore
+
+# Development history and a Windows-only design canvas: neither is usable, or
+# useful, on the far side.
+docs/archive/          export-ignore
+docs/refactor/design/  export-ignore
+
+# Version stamp ------------------------------------------------------------
+# `git archive` substitutes the $Format:...$ placeholders below; in the working
+# tree they stay literal. This is how the red zone answers "which build is
+# installed here" -- a question that gets asked constantly once the only link
+# between the two zones is a file upload.
+VERSION export-subst
