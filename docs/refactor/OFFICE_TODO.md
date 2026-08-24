@@ -187,16 +187,20 @@ RuleSet 里，而那是个 GUI 列表，扫描器读不到。R6 规则降级为"
 代码从黄区打包上传，不是 `git pull` —— 完整步骤（每步带预期输出）在
 [`REDZONE_DEPLOY.md`](REDZONE_DEPLOY.md)。
 
-**先在黄区切到对的分支再打包** —— 全部改动都在 `refactor/recipe-and-run` 上，
-`main` 一个字没动：
+**2026-08-24 起不用切分支了** —— `refactor/recipe-and-run` 已 fast-forward 并入
+`main`（纯快进，无 merge commit），两者都在 `e66916f`。黄区直接：
 
 ```powershell
-git checkout refactor/recipe-and-run
+git pull
 powershell -ExecutionPolicy Bypass -File deploy\pack.ps1
 ```
 
-（不想切分支就 `pack.ps1 -Ref refactor/recipe-and-run`，效果一样。包名里的短哈希
-会告诉你打的到底是哪一个 commit。）
+分支 ref 留着当历史标记，但**不要再从它打包** —— 少一个"必须记得切分支"的步骤，
+正是并进 main 的理由：`pack.ps1` 默认打 `HEAD`，切错分支会打出一个看起来完全正常
+（有 sha256、有 commit info、装得上）却少了半年功能的包。
+
+包名里的短哈希会告诉你打的到底是哪一个 commit，它必须和红区 `deploy.sh` 打印的
+`installed version` 一致。
 
 红区三十秒版：
 
