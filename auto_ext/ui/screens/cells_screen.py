@@ -87,6 +87,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QAction,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -283,6 +284,10 @@ class RunRequest(NamedTuple):
     dry_run: bool
     continue_on_lvs_fail: bool
     recipe_override: str | None
+    #: Set only by "Export GDS": a standalone GDS for software outside this
+    #: flow. When set, ``stages`` is always exactly ``("strmout",)`` -- the
+    #: LVS layout file is never relocated, a second one is written instead.
+    layout_export_path: str | None = None
 
 
 @dataclass
@@ -1319,6 +1324,18 @@ class CellsScreen(QWidget):
         menu.addAction(act_toggle)
 
         menu.addSeparator()
+        act_export = QAction("Export GDS…", menu)
+        act_export.setEnabled(bool(keys) and not running)
+        act_export.setToolTip(
+            "Write a standalone GDS for software outside this flow. "
+            "The layout file Calibre reads is not moved."
+        )
+        act_export.triggered.connect(
+            lambda _checked=False, keys=keys: self.export_gds(keys)
+        )
+        menu.addAction(act_export)
+
+        menu.addSeparator()
         act_copy = QAction("Copy row key", menu)
         act_copy.setEnabled(bool(keys))
         act_copy.triggered.connect(lambda _checked=False, keys=keys: _copy_keys(keys))
@@ -1343,6 +1360,70 @@ class CellsScreen(QWidget):
             dry_run=self.run_bar.is_dry_run(),
             continue_on_lvs_fail=self.run_bar.continue_on_lvs_fail(),
             recipe_override=self.run_bar.recipe_override(),
+        )
+
+    def export_gds(self, keys: tuple[str, ...] | None = None) -> None:
+        """Write a standalone GDS for software outside this flow.
+
+        Deliberately NOT a relocation of the layout file Calibre reads. That
+        file is a producer/consumer contract -- strmout writes it, the LVS
+        runset names the same value as ``*lvsLayoutPaths`` -- so this runs
+        strmout a second time to a second destination and leaves the first
+        one alone. The stage set is pinned to ``strmout`` here for the same
+        reason the runner refuses anything else: there must be no combination
+        of clicks that points LVS at a file nobody wrote.
+
+        Multi-row exports get ``{cell}`` appended to the chosen directory
+        rather than a single filename, because one fixed name would have each
+        cell silently overwrite the last.
+        """
+        if self._worker is not None:
+            return
+        keys = tuple(keys) if keys else self.selected_keys()
+        keys = tuple(k for k in keys if self._book.entry(k).enabled)
+        if not keys:
+            return
+
+        if len(keys) == 1:
+            cell = self._book.entry(keys[0]).cell
+            chosen, _ = QFileDialog.getSaveFileName(
+                self, "Export GDS", f"{cell}.gds", "GDS (*.gds *.db);;All files (*)"
+            )
+            target = chosen
+        else:
+            # A directory, not a filename: {cell} is what keeps N exports
+            # from collapsing onto one file.
+            directory = QFileDialog.getExistingDirectory(
+                self, f"Export GDS for {len(keys)} cells"
+            )
+            target = f"{directory}/{{cell}}.gds" if directory else ""
+
+        if not target:
+            return
+
+        self.run_requested.emit(
+            RunRequest(
+                keys=keys,
+                stages=("strmout",),
+                jobs=1,
+                dry_run=False,
+                continue_on_lvs_fail=False,
+                recipe_override=self.run_bar.recipe_override(),
+                layout_export_path=target,
+            )
+        )
+        if self._controller is None:
+            return
+        self._dispatch(
+            RunRequest(
+                keys=keys,
+                stages=("strmout",),
+                jobs=1,
+                dry_run=False,
+                continue_on_lvs_fail=False,
+                recipe_override=self.run_bar.recipe_override(),
+                layout_export_path=target,
+            )
         )
 
     def start_run(self) -> None:
@@ -1437,6 +1518,7 @@ class CellsScreen(QWidget):
             resources=getattr(controller, "resources", None),
             max_workers=request.jobs if request.jobs >= 2 else None,
             dry_run=request.dry_run,
+            layout_export_path=request.layout_export_path,
         )
         self._worker.error.connect(self._on_worker_error)
         self._worker.finished.connect(self._on_worker_done)

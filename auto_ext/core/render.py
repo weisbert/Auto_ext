@@ -280,6 +280,15 @@ class RunFacts:
     intermediate_dir: str
     #: Resolved DSPF output path; ``None`` when the recipe emits no DSPF.
     dspf_out_path: str | None = None
+    #: Where this dispatch exports a SECOND, standalone GDS to, for tools
+    #: outside this flow. ``None`` (the norm) means no export.
+    #:
+    #: Deliberately NOT a relocation of the LVS layout file. That file is a
+    #: producer/consumer contract -- strmout writes it and Calibre reads it
+    #: back as ``*lvsLayoutPaths`` -- so moving it means moving both sides or
+    #: breaking LVS. The export is a separate strmout invocation writing a
+    #: separate file, and the LVS path is untouched by it.
+    layout_export_path: str | None = None
     #: Parallel isolation cwd (``<run_dir>/work``); ``None`` in serial mode.
     work_dir: Path | None = None
     started_at: datetime | None = None
@@ -537,10 +546,14 @@ def build_context(
         "lvs_source_view": dut.source_view,
         "ground_net": dut.ground_net,
         "out_file": dut.out_file,
+        # Not a catalog row and deliberately so: no template renders it, and
+        # a template that did would be relocating the LVS layout file.
+        "layout_export_path": run.layout_export_path,
         "paths": {
             "output_dir": output_dir,
             "intermediate_dir": run.intermediate_dir,
             "dspf_out": run.dspf_out_path,
+            "layout_export": run.layout_export_path,
             "run_dir": str(run.run_dir),
             "work_dir": str(run.work_dir) if run.work_dir is not None else None,
             # Calibre's query post-trigger writes these three under output_dir

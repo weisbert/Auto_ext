@@ -11,6 +11,20 @@ auto-detects layout format from file magic bytes rather than the suffix.
 Because there is no rendered input file to read outputs back out of, the
 argv *is* the declaration: ``-strmFile`` names the one artifact this stage
 produces.
+
+Export mode
+-----------
+``context["layout_export_path"]``, when set, redirects ``-strmFile`` to that
+path instead. It exists for one purpose: handing a GDS to software outside
+this flow.
+
+It is NOT a way to relocate the LVS layout file. That file is a
+producer/consumer contract -- this tool writes it, Calibre reads it back as
+``*lvsLayoutPaths`` -- and the two sides are the same catalog value, so
+moving one without the other silently breaks LVS. The runner therefore
+refuses an export whose stage set is anything but ``strmout`` alone: an
+export is a second, separate invocation producing a second, separate file,
+and the LVS path is left exactly where it was.
 """
 
 from __future__ import annotations
@@ -32,7 +46,12 @@ class StrmoutTool(Tool):
         layout_view = context["lvs_layout_view"]
         output_dir = context["output_dir"]
         layer_map = context["layer_map"]
-        layout_out = Path(output_dir) / f"{cell}.calibre.db"
+        # Export mode: an explicit destination replaces the default, and
+        # only ever on a strmout-only dispatch (enforced in the runner).
+        export = context.get("layout_export_path")
+        layout_out = (
+            Path(export) if export else Path(output_dir) / f"{cell}.calibre.db"
+        )
         return [
             self.executable,
             "-library", library,

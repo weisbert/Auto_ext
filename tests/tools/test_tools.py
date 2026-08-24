@@ -140,6 +140,66 @@ def test_strmout_argv_built_from_context(tmp_path: Path) -> None:
     assert argv[argv.index("-layerMap") + 1] == "/pdk/layers.map"
 
 
+# ---- strmout export mode -------------------------------------------------
+
+
+def _strmout_ctx(**over) -> dict:
+    ctx = {
+        "library": "LIB",
+        "cell": "inv",
+        "lvs_layout_view": "layout",
+        "output_dir": "/w/cds/out",
+        "layer_map": "/pdk/layers.map",
+    }
+    ctx.update(over)
+    return ctx
+
+
+def test_strmout_export_path_redirects_the_stream_file(tmp_path: Path) -> None:
+    """``layout_export_path`` replaces the destination, verbatim."""
+
+    argv = StrmoutTool().build_argv(
+        tmp_path / "unused", _strmout_ctx(layout_export_path="/elsewhere/inv.gds")
+    )
+    strm = argv[argv.index("-strmFile") + 1]
+    assert strm.replace("\\", "/") == "/elsewhere/inv.gds"
+    # Everything that identifies the layout is unchanged: same cell, same
+    # view, same layer map. Only where it lands moves.
+    assert argv[argv.index("-topCell") + 1] == "inv"
+    assert argv[argv.index("-view") + 1] == "layout"
+    assert argv[argv.index("-layerMap") + 1] == "/pdk/layers.map"
+
+
+def test_strmout_without_an_export_path_keeps_the_lvs_destination(tmp_path: Path) -> None:
+    """The default must survive every falsy spelling of "no export".
+
+    A ``layout_export_path`` of None or "" is the normal case -- it is a
+    plain field on RunFacts that every ordinary run leaves unset -- and it
+    must not be allowed to produce ``-strmFile ''``.
+    """
+    for absent in (None, ""):
+        argv = StrmoutTool().build_argv(
+            tmp_path / "unused", _strmout_ctx(layout_export_path=absent)
+        )
+        strm = argv[argv.index("-strmFile") + 1].replace("\\", "/")
+        assert strm.endswith("/w/cds/out/inv.calibre.db"), absent
+
+
+def test_strmout_export_is_recorded_as_the_artifact(tmp_path: Path) -> None:
+    """parse_result reads -strmFile out of argv, so the export follows for free."""
+
+    exported = tmp_path / "reliability" / "inv.gds"
+    exported.parent.mkdir()
+    exported.write_text("gds", encoding="utf-8")
+    argv = StrmoutTool().build_argv(
+        tmp_path / "unused", _strmout_ctx(layout_export_path=str(exported))
+    )
+    result = ToolResult(
+        success=True, exit_code=0, diagnostics={"exit_code": 0, "argv": argv}
+    )
+    assert StrmoutTool().parse_result(result).artifact_paths == [exported]
+
+
 # ---- CalibreTool.parse_result integration with checks.py -----------------
 
 

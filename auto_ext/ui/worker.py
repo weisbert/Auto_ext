@@ -54,6 +54,7 @@ class RunWorker(QThread):
         templates_root: Path | None = None,
         max_workers: int | None = None,
         dry_run: bool = False,
+        layout_export_path: str | None = None,
     ) -> None:
         super().__init__()
         self._project = project
@@ -70,6 +71,7 @@ class RunWorker(QThread):
         self._templates_root = templates_root
         self._max_workers = max_workers
         self._dry_run = dry_run
+        self._layout_export_path = layout_export_path
         self._summary: RunSummary | None = None
 
     @property
@@ -110,6 +112,7 @@ class RunWorker(QThread):
                 templates_root=self._templates_root,
                 max_workers=self._max_workers,
                 dry_run=self._dry_run,
+                layout_export_path=self._layout_export_path,
                 reporter=self._reporter,
                 cancel_token=self._cancel_token,
             )

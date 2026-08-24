@@ -166,6 +166,14 @@ def run(
         "--continue-on-lvs-fail",
         help="Force continue_on_lvs_fail=True on every task (overrides per-task config).",
     ),
+    layout_out: Optional[str] = typer.Option(
+        None,
+        "--layout-out",
+        help="Export a SECOND, standalone GDS to this path, for software "
+        "outside this flow. Requires --stage strmout: the LVS layout file is "
+        "never moved. Accepts ${ENV} and {cell}/{library}; {cell} is required "
+        "when more than one cell is selected.",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -421,6 +429,7 @@ def run(
             verbose=verbose,
             dry_run=dry_run,
             max_workers=jobs if jobs >= 2 else None,
+            layout_export_path=layout_out,
             reporter=reporter,
             cancel_token=cancel_token,
             recipe=recipe_obj,
@@ -436,6 +445,79 @@ def run(
     _print_summary(summary, runs_root=summary.runs_root or root / "runs")
     exit_code = 0 if (summary.failed == 0 and summary.cancelled == 0) else 1
     raise typer.Exit(code=exit_code)
+
+
+@app.command("export-gds")
+def export_gds(
+    config_dir: Path = typer.Option(
+        ...,
+        "--config-dir",
+        help="Directory containing workspace.yaml + cells.yaml.",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    to: str = typer.Option(
+        ...,
+        "--to",
+        help="Destination for the exported GDS. Accepts ${ENV} and "
+        "{cell}/{library}; {cell} is required when exporting more than one "
+        "cell, or each would overwrite the last.",
+    ),
+    task: Optional[list[str]] = typer.Option(
+        None,
+        "--task",
+        help="Filter to specific task_id(s). Repeat for several. Default: "
+        "every enabled cell.",
+    ),
+    recipe: Optional[str] = typer.Option(None, "--recipe"),
+    profile: Optional[str] = typer.Option(None, "--profile"),
+    auto_ext_root: Optional[Path] = typer.Option(None, "--auto-ext-root"),
+    workarea: Optional[Path] = typer.Option(None, "--workarea"),
+    recipes_dir: Optional[Path] = typer.Option(None, "--recipes-dir", help=_RECIPES_DIR_HELP),
+    profiles_dir: Optional[Path] = typer.Option(None, "--profiles-dir", help=_PROFILES_DIR_HELP),
+    resources: Optional[Path] = typer.Option(None, "--resources"),
+    health_check: bool = typer.Option(True, "--health-check/--no-health-check"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show the argv without spawning strmout."
+    ),
+    no_progress: bool = typer.Option(False, "--no-progress"),
+    verbose: bool = typer.Option(False, "-v", "--verbose"),
+) -> None:
+    """Export a standalone GDS for software outside this flow.
+
+    Runs the ``strmout`` stage, and only that stage, writing to ``--to``.
+
+    This does NOT relocate the layout file Calibre reads. That file is a
+    producer/consumer contract -- strmout writes it, the LVS runset names the
+    same value as ``*lvsLayoutPaths`` -- so it stays exactly where it is and
+    this writes a second, separate file beside it. That is also why the stage
+    set is pinned here rather than offered: there is no combination of flags
+    that can point LVS at a file nobody wrote.
+
+    Equivalent to ``auto-ext run --stage strmout --layout-out <path>``; this
+    is the discoverable spelling of it.
+    """
+    run(
+        config_dir=config_dir,
+        task=task,
+        stage="strmout",
+        continue_on_lvs_fail=False,
+        layout_out=to,
+        dry_run=dry_run,
+        auto_ext_root=auto_ext_root,
+        workarea=workarea,
+        recipe=recipe,
+        profile=profile,
+        resources=resources,
+        recipes_dir=recipes_dir,
+        profiles_dir=profiles_dir,
+        health_check=health_check,
+        jobs=1,
+        no_progress=no_progress,
+        verbose=verbose,
+    )
 
 
 @app.command()

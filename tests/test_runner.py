@@ -87,6 +87,135 @@ def _only_run_dir(auto_ext_root: Path) -> Path:
     return dirs[0]
 
 
+# ---- GDS export: a second file, and no way to move the first one ---------
+
+
+def test_export_refuses_any_stage_set_but_strmout_alone(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """The guard that makes breaking LVS impossible rather than discouraged.
+
+    ``-strmFile`` and the runset's ``*lvsLayoutPaths`` are the same catalog
+    value. A dispatch that redirected strmout *and* ran calibre would point
+    LVS at a file nobody wrote -- and it would not fail loudly, it would fail
+    as a confusing LVS error. So the combination is refused up front, before
+    any subprocess, rather than documented as a thing not to do.
+    """
+    project, tasks = _load(project_tools_config)
+    from auto_ext.core.errors import ConfigError
+
+    for stages in (
+        ["si", "strmout", "calibre", "quantus", "jivaro"],
+        ["strmout", "calibre"],
+        ["si", "strmout"],
+        ["calibre"],
+    ):
+        with pytest.raises(ConfigError, match="strmout stage and nothing else"):
+            run_tasks(
+                project,
+                tasks,
+                stages=stages,
+                auto_ext_root=tmp_path / "project_root",
+                workarea=workarea,
+                recipe=_recipe(),
+                profile=_profile(workarea),
+                dry_run=True,
+                layout_export_path="/tmp/out.gds",
+            )
+
+
+def test_export_alone_is_accepted_and_lands_where_asked(
+    project_tools_config: Path, workarea: Path, mocks_on_path: Path, tmp_path: Path
+) -> None:
+    project, tasks = _load(project_tools_config)
+    dest = tmp_path / "reliability" / "{cell}.gds"
+
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["strmout"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
+        layout_export_path=str(dest),
+    )
+
+    assert summary.failed == 0
+    strmout = summary.tasks[0].stages[0]
+    argv = strmout.record.argv
+    written = argv[argv.index("-strmFile") + 1].replace("\\", "/")
+    # {cell} was substituted, and the destination is the one asked for --
+    # NOT the workspace path the LVS file uses.
+    assert written.endswith("/reliability/inv.gds"), written
+    assert "QCI_PATH" not in written
+
+
+def test_an_ordinary_run_is_untouched_by_the_export_feature(
+    project_tools_config: Path, workarea: Path, mocks_on_path: Path, tmp_path: Path
+) -> None:
+    """No export requested -> the LVS layout destination is exactly as before."""
+
+    project, tasks = _load(project_tools_config)
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["strmout"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
+    )
+    argv = summary.tasks[0].stages[0].record.argv
+    written = argv[argv.index("-strmFile") + 1].replace("\\", "/")
+    assert written.endswith("/inv.calibre.db"), written
+
+
+def test_multi_cell_export_without_a_cell_placeholder_is_refused(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """Two cells, one fixed filename: the second would silently eat the first.
+
+    Silently, because strmout succeeds every time -- the loss shows up later
+    as a GDS whose contents belong to a different cell. Refuse instead.
+    """
+    _write_tasks(
+        project_tools_config,
+        [
+            {"library": "LIB", "cell": "inv", "out_file": "av_ext"},
+            {"library": "LIB", "cell": "nand", "out_file": "av_ext"},
+        ],
+    )
+    project, tasks = _load(project_tools_config)
+    from auto_ext.core.errors import ConfigError
+
+    with pytest.raises(ConfigError, match=r"overwrite the last"):
+        run_tasks(
+            project,
+            tasks,
+            stages=["strmout"],
+            auto_ext_root=tmp_path / "project_root",
+            workarea=workarea,
+            recipe=_recipe(),
+            profile=_profile(workarea),
+            dry_run=True,
+            layout_export_path="/tmp/fixed.gds",
+        )
+
+    # ...and it is accepted the moment the path can tell the cells apart.
+    run_tasks(
+        project,
+        tasks,
+        stages=["strmout"],
+        auto_ext_root=tmp_path / "project_root2",
+        workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
+        dry_run=True,
+        layout_export_path="/tmp/{cell}.gds",
+    )
+
+
 def test_happy_path_all_stages_pass(
     project_tools_config: Path,
     workarea: Path,

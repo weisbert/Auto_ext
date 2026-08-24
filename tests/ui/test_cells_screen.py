@@ -551,6 +551,7 @@ def test_context_menu_is_deferred_and_lists_its_actions(qtbot) -> None:
         "Duplicate",
         "Remove",
         "Disable rows",
+        "Export GDS…",
         "Copy row key",
     ]
 
@@ -806,6 +807,80 @@ def test_dispatch_reuses_the_existing_worker(qtbot, controller, fake_worker) -> 
     assert worker.kwargs["auto_ext_root"] == controller.auto_ext_root
     assert isinstance(worker.kwargs["reporter"], cells_mod.QtProgressReporter)
     assert isinstance(worker.kwargs["cancel_token"], cells_mod.CancelToken)
+
+
+# ---- Export GDS ----------------------------------------------------------
+
+
+def _pin_save_dialog(monkeypatch, chosen: str) -> None:
+    monkeypatch.setattr(
+        cells_mod.QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (chosen, ""))
+    )
+
+
+def _pin_dir_dialog(monkeypatch, chosen: str) -> None:
+    monkeypatch.setattr(
+        cells_mod.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: chosen)
+    )
+
+
+def test_export_gds_runs_strmout_alone_and_never_moves_the_lvs_file(
+    qtbot, controller, fake_worker, monkeypatch
+) -> None:
+    """The whole point of the feature, pinned.
+
+    ``-strmFile`` and the runset's ``*lvsLayoutPaths`` are the same value, so
+    an export that also ran calibre would point LVS at a file nobody wrote.
+    The stage set is therefore pinned here, not merely defaulted -- whatever
+    stages the run bar happens to have ticked are ignored.
+    """
+    screen = _screen(qtbot, controller=controller)
+    screen.set_selected_keys(screen.cells().keys[:1])
+    screen.run_bar.set_selected_stages(["si", "strmout", "calibre"])
+    _pin_save_dialog(monkeypatch, "/elsewhere/inv.gds")
+
+    screen.export_gds()
+
+    kwargs = fake_worker.instances[0].kwargs
+    assert kwargs["stages"] == ["strmout"]
+    assert kwargs["layout_export_path"] == "/elsewhere/inv.gds"
+    assert kwargs["dry_run"] is False
+
+
+def test_export_gds_of_many_cells_keeps_them_apart(
+    qtbot, controller, fake_worker, monkeypatch
+) -> None:
+    """A directory plus {cell}, not one filename: else each cell eats the last."""
+
+    screen = _screen(qtbot, controller=controller)
+    screen.set_selected_keys(screen.cells().keys[:2])
+    _pin_dir_dialog(monkeypatch, "/exports")
+
+    screen.export_gds()
+
+    assert fake_worker.instances[0].kwargs["layout_export_path"] == "/exports/{cell}.gds"
+
+
+def test_a_cancelled_export_dialog_starts_nothing(
+    qtbot, controller, fake_worker, monkeypatch
+) -> None:
+    screen = _screen(qtbot, controller=controller)
+    screen.set_selected_keys(screen.cells().keys[:1])
+    _pin_save_dialog(monkeypatch, "")
+
+    screen.export_gds()
+
+    assert fake_worker.instances == []
+    assert screen.is_running() is False
+
+
+def test_an_ordinary_run_requests_no_export(qtbot, controller, fake_worker) -> None:
+    screen = _screen(qtbot, controller=controller)
+    screen.set_selected_keys(screen.cells().keys[:1])
+
+    screen.start_run()
+
+    assert fake_worker.instances[0].kwargs["layout_export_path"] is None
 
 
 def test_one_job_means_serial_not_a_pool_of_one(qtbot, controller, fake_worker) -> None:

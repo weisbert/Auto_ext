@@ -357,6 +357,7 @@ def run_tasks(
     resources: ResourceProfile | None = None,
     catalog: Catalog | None = None,
     templates_root: Path | None = None,
+    layout_export_path: str | None = None,
 ) -> RunSummary:
     """Execute the stage × task matrix, serial or parallel.
 
@@ -401,6 +402,8 @@ def run_tasks(
 
     _validate_stages(stages)
     _validate_tasks(tasks, stages, pipeline=pipeline)
+    if layout_export_path is not None:
+        layout_export_path = _validate_layout_export(layout_export_path, stages, tasks)
 
     if reporter is None:
         reporter = NullReporter()
@@ -457,6 +460,7 @@ def run_tasks(
             batch_id=batch_id,
             reporter=reporter,
             cancel_token=cancel_token,
+            layout_export_path=layout_export_path,
         )
 
     if not parallel:
@@ -676,6 +680,7 @@ def _run_single_task(
     batch_id: str | None,
     reporter: ProgressReporter,
     cancel_token: CancelToken,
+    layout_export_path: str | None = None,
 ) -> TaskResult:
     dut = DutSnapshot.from_task_config(task)
     recipe_id = pipeline.recipe.recipe_id
@@ -707,6 +712,7 @@ def _run_single_task(
             workarea=workarea,
             created_at=created_at,
             batch_id=batch_id,
+            layout_export_path=layout_export_path,
             dry_run=dry_run,
             max_workers=max_workers,
             parallel=parallel,
@@ -1214,6 +1220,7 @@ def _recipe_context(
     max_workers: int,
     parallel: bool,
     steps: list[_Step],
+    layout_export_path: str | None = None,
 ) -> dict[str, Any]:
     """Build the recipe path's render context, workspace paths included.
 
@@ -1241,6 +1248,16 @@ def _recipe_context(
     intermediate_tpl = substitute_env(project.intermediate_dir, resolved_env)
     intermediate_dir = intermediate_tpl.format(cell=task.cell, library=task.library)
 
+    # Same two-step as the workspace patterns: env first (so ${WORK_ROOT} is
+    # gone before str.format could read {WORK_ROOT} as a format key), then the
+    # DUT keys. Validated upstream: {cell} is mandatory for a multi-cell
+    # export, so per-cell files cannot silently overwrite one another.
+    export_path = layout_export_path
+    if export_path is not None:
+        export_path = substitute_env(export_path, resolved_env).format(
+            cell=task.cell, library=task.library
+        )
+
     def facts(dspf: str | None) -> render.RunFacts:
         return render.RunFacts(
             run_id=run_id,
@@ -1250,6 +1267,7 @@ def _recipe_context(
             output_dir=output_dir,
             intermediate_dir=intermediate_dir,
             dspf_out_path=dspf,
+            layout_export_path=export_path,
             work_dir=(run_dir / "work") if parallel else None,
             started_at=created_at,
             batch_id=batch_id,
@@ -1848,6 +1866,41 @@ def _resolve_dspf_out_path(
             "supported: cell, library, task_id"
         )
     raise ConfigError(f"dspf_out_path {error}")
+
+
+
+def _validate_layout_export(
+    layout_export_path: str, stages: list[str], tasks: list[TaskConfig]
+) -> str:
+    """Refuse an export that could disturb the LVS layout file, or collide.
+
+    The export exists to hand a GDS to software outside this flow. It is not
+    a relocation of the file Calibre reads: ``-strmFile`` and the runset's
+    ``*lvsLayoutPaths`` are the same catalog value, so a dispatch that
+    redirected strmout *and* ran calibre would point LVS at a file nobody
+    wrote. Two rules keep that impossible rather than merely discouraged:
+
+    1. the stage set must be exactly ``{"strmout"}`` -- an export is its own
+       invocation, producing its own file, alongside an untouched LVS path;
+    2. exporting more than one cell requires ``{cell}`` in the path, because
+       a fixed filename would have each cell silently overwrite the last.
+
+    Returns the path unchanged; raises :class:`ConfigError` otherwise.
+    """
+    if set(stages) != {"strmout"}:
+        raise ConfigError(
+            "a GDS export runs the strmout stage and nothing else "
+            f"(asked for: {sorted(stages)}). The export writes a second, "
+            "separate file; the LVS layout file stays where Calibre expects "
+            "it. Re-run with --stage strmout, or drop the export."
+        )
+    if len(tasks) > 1 and "{cell}" not in layout_export_path:
+        raise ConfigError(
+            f"exporting {len(tasks)} cells to one fixed path would have each "
+            f"cell overwrite the last. Put {{cell}} in the path, e.g. "
+            f"'reliability/{{cell}}.gds'."
+        )
+    return layout_export_path
 
 
 def _validate_stages(stages: list[str]) -> None:
