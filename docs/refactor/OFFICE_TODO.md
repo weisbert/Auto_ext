@@ -9,9 +9,12 @@
 
 ---
 
-## 第一优先：三样硬阻断
+## 第一优先：三样硬阻断 —— 已解决 2 样，**剩 1 样**
 
-### 1. 真实日志样本（阻断：失败分类）
+2026-08-24 办公室一轮把第 2、3 条答死了，顺带在扫描器里挖出一个真 bug（见第 2 条）。
+现在只剩日志样本，而它必须等一次真跑。
+
+### 1. 真实日志样本（阻断：失败分类）**← 唯一还开着的硬阻断**
 
 仓库里一份真实 EDA 日志都没有（`find . -name "*.log"` 零命中），所以我**没有编造**
 任何日志特征串。现在的分类器只用能确定的判据（退出码 127、LVS banner、有无报告），
@@ -26,27 +29,54 @@
 
 拿到之后填进 `auto_ext/core/failure_signatures.yaml`，文件头有格式说明。
 
-### 2. 两条 ls（阻断：LVS variant 和 deck 自动发现）
+### 2. ~~两条 ls~~ ✅ 已解决 2026-08-24
 
-现在我手上只有 `docs/calibre_raw.txt` 里的一个样本
-（`.../LVS/Ver_LVS_A/CFXXX/CFXXX.wodio.qcilvs`），
-`widio` 这个变体**只存在于手写的 manifest 里，真实文件里从没出现过**。
+- [x] `ls $VERIFY_ROOT/runset/Calibre_QRC/LVS/*/*/`
+- [x] `ls <你的 qrc_deck_dir>`
 
-- [ ] `ls $VERIFY_ROOT/runset/Calibre_QRC/LVS/*/*/`
-- [ ] `ls <你的 qrc_deck_dir>`（就是 `project.yaml` 里 `qrc_deck_dir` 指的那个目录）
+**结果一：`widio` 是真的。** 真实 deck 目录里 `.wodio.qcilvs` 和 `.widio.qcilvs`
+两个文件都在，没有第三种后缀。`choices_confidence` 从 `likely` 提到 `certain`。
+顺带发现每个变体旁边还有一个 `.lvs` 兄弟文件（外加一个无后缀的 `<basename>.lvs`
+和一个 `empty.cdl`）—— 那是另一种 deck 口味，`filename_pattern` 继续钉死 `.qcilvs`，
+不去 glob `.lvs*`。
 
-注意一个已发现的事实：LVS deck 和 QRC deck 的版本号**可以不同步**
-（样本里是 `Ver_LVS_A` vs `Ver_QRC_B`），而且 QRC deck 比 LVS deck
-多一层 `QCI_deck` —— 这正是 `qrc_deck_dir` 没法用 `|parent` 自动推导、
-必须手填的根本原因。
+**结果二（更重要）：R5 规则被证伪，是个真 bug。**
+扫描器原来假设 QRC deck 和 LVS deck 共用同一个 `<pdk_subdir>`，
+所以把 glob 钉成 `QRC/*/<LVS的basename>/QCI_deck`。真实树上这两个子目录名
+**是两个互相独立的 deck 发布号**，除了工艺前缀之外没有任何公共子串 ——
+于是那个 glob 在你的服务器上会匹配到**零个**结果，扫描器会对着一个明明就在那儿的
+目录说"找不到"。已修：两段都放成通配，窄匹配保留为"先试一次"的快速消歧路径
+（名字恰好对得上的 PDK 仍然免问自动定）。三条回归测试钉住了你这棵树的形状。
 
-### 3. corner 的真实取值（阻断：你点名要的那个功能）
+**结果三：并排两个 QRC deck 发布是常态，不是错误。**
+真实树上就有一个正式版和一个 `_offline` 版。所以"多个候选 → 交还给人选"
+这条行为是对的，而且是**常见路径**而非异常路径。
 
-`templates/quantus/ext.cmd.j2` 里 `-technology_corner "TYPICAL"` 是写死的。
-我给的候选列表混了两代命名（`RCWORST` 一套 和 `RCWORST_CCWORST` 一套），
-真实的 `assura_tech.lib` 通常只提供其中一套 —— 直接做成下拉框会给你一半无效选项。
+版本号不同步这条也当场坐实了（LVS 和 QRC 各自带自己的版本段），
+R4 从 `unverified` 升为 `observed`。
 
-- [ ] `grep -i corner $SETUP_ROOT/assura_tech.lib`（或者你直接说这颗工艺认哪几个）
+### 3. ~~corner 的真实取值~~ ✅ 已解决 2026-08-24
+
+- [x] 这颗工艺认的 corner（来源：**Quantus GUI 的 RuleSet 列表**）
+
+九个，全在这儿了：
+
+```
+TYPICAL
+CBEST   CBEST_T    CWORST   CWORST_T
+RCBEST  RCBEST_T   RCWORST  RCWORST_T
+```
+
+**旧一代命名赢了**：`CBEST_CCBEST` / `RCWORST_CCWORST` 那一套在这颗工艺上
+**整套不存在**。当初把两代混在一个候选表里发出去，会给你一个一半是无效项的下拉框
+—— 这就是它被列为硬阻断的原因。现在 profile 的 corner 表和 catalog 的
+`technology_corner` 都是这九个，`certain`。
+
+**另一个发现：找错地方了。** `grep -i corner $SETUP_ROOT/assura_tech.lib`
+在真 PDK 上**一条都不返回** —— corner 列表根本不在 tech lib 里，在 Quantus 的
+RuleSet 里，而那是个 GUI 列表，扫描器读不到。R6 规则降级为"尽力而为"，
+`check-env` 和扫描器的修复提示都已改成指向 RuleSet，不再让你去跑一条注定空手而归的 grep。
+（那条 grep 的字面串此前还被一个测试断言着 —— 测试已反转成断言它*不再出现*。）
 
 ---
 
@@ -81,7 +111,8 @@
 
 ### LVS
 
-- [ ] LVS deck 后缀：deck 目录里除了 wodio、widio 还有别的吗？（默认 两种）
+- [x] ~~LVS deck 后缀~~ ✅ 2026-08-24：没有别的，就这两种。见第一优先第 2 条。
+      （目录里那些 `.lvs` 文件是另一种 deck 口味，不是第三个 variant。）
 - [ ] 按名连接：现在只有"全部按名连"和"完全不连"两档。有没有过只对电源地按名连的需求？
       （默认 不按名连接）
 - [ ] LVS 器件过滤：过滤开关是关的，但过滤项写着 `AG RC RE RG`。这四个字母各代表什么？
@@ -108,14 +139,22 @@
 
 ### 版图导出 / 其它
 
-- [ ] 版图导出文件名：现在导出 `<cell>.calibre.db`（内容是 GDS）。旧脚本导出 `<cell>.gds`
-      并且允许你选落在默认目录 / 当前目录 / 指定子目录 —— **这是你曾经有、现在被拿掉的能力**。
-      三种落点还要保留吗？（默认 `<cell>.calibre.db`，落在本次运行目录）
+- [x] ~~版图导出文件名 / 三种落点~~ ✅ **2026-08-24 已恢复，做成了两个文件。**
+      裁决：跑 LVS 用的那个文件**不动**，照旧 `<cell>.calibre.db` 落在运行目录；
+      想给别的软件一份 GDS，就**再导一个**。
+      入口：`auto-ext export-gds --to '<路径>'`，或 GUI 里 Cells 右键 `Export GDS…`。
+      落点、文件名、后缀全随你（内容是 GDSII，Calibre 按 magic bytes 认格式）。
+      两条护栏：带导出的 dispatch 的 stage 集合必须恰好是 `{strmout}`；多单元导出
+      路径里必须有 `{cell}`。细节见 `OLD_VS_NEW_FLOW.md` 第三节。
 - [ ] 版图导出的其它选项：层次深度、大小写处理、点号转换现在一个都没传，用的是
       strmout 默认。你原来的手工流程有没有指定过？（默认 全默认）
-- [ ] `Design` 这个基名：`query_output/` 下的 `Design.gds.map` / `Design.props` 到底是
-      PDK 的 `query_cmd` 生成的，还是我们可以改？请打开 QRC deck 目录下的 `query_cmd` 看一眼。
-      （默认 Design，且当作不可改）
+- [x] ~~`Design` 这个基名~~ ✅ **已解决 2026-08-24，而且答案比"默认值对"更强。**
+      真 `query_cmd` 把它全部十三个输出都写成 `query_output/Design.<ext>`，
+      并且文件头**白纸黑字写着契约**：QRC 的 `input_db -run_name` 必须等于前缀
+      (`Design`)，`-directory_name` 必须等于目录 (`query_output`)。
+      所以它不只是"PDK 定的"，而是**必须和另外两个字段保持锁步**，否则 Quantus
+      什么都读不到 —— 这正是它 owner 是 `fixed` 而不是可调项的理由。
+      两个 QRC deck 发布里的 `query_cmd` 逐字节相同，不存在版本间分歧。
 - [ ] 寄生器件映射：Quantus 把寄生电阻/电容映射成 `presistor` / `pcapacitor`，
       Jivaro 那边另外还认电感和互感（`pinductor` / `pmind`）。这四个名字在你们 PDK 里是这样吗？
       两边必须一致吗？（默认 analogLib 的这四个）
