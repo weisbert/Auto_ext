@@ -44,7 +44,16 @@ import pytest
 pytest.importorskip("PyQt5")
 
 from auto_ext.model.cells import CellEntry  # noqa: E402
+from auto_ext.model.pdk import PdkProfile  # noqa: E402
 from auto_ext.model.recipe import recipe_field_paths  # noqa: E402
+from auto_ext.model.workspace import WorkspaceConfig  # noqa: E402
+from auto_ext.ui.project_fields import (  # noqa: E402
+    PROFILE_FIELDS,
+    PROFILE_UNREACHABLE,
+    WORKSPACE_FIELDS,
+    WORKSPACE_UNREACHABLE,
+    bound_paths,
+)
 from auto_ext.ui.screens.cells_screen import EDITABLE_FIELDS  # noqa: E402
 from auto_ext.ui.screens.recipes_screen import recipe_specs  # noqa: E402
 
@@ -115,12 +124,56 @@ def test_every_cell_field_is_reachable_or_explicitly_exempt() -> None:
     )
 
 
+def test_every_workspace_field_is_reachable_or_explicitly_exempt() -> None:
+    """``workspace.yaml`` had no editor at all until the Project screen.
+
+    It was listed as a *known gap* in ``main_window``'s own docstring, which
+    is the politest possible version of the same defect: three settings the
+    user could only reach by opening the file in an editor.
+    """
+
+    unreachable = set(recipe_field_paths(WorkspaceConfig)) - bound_paths(WORKSPACE_FIELDS)
+    assert sorted(unreachable) == sorted(WORKSPACE_UNREACHABLE), (
+        "a WorkspaceConfig field changed reachability. Either bind it in "
+        "auto_ext/ui/project_fields.py or add it to WORKSPACE_UNREACHABLE "
+        "with a reason."
+    )
+
+
+def test_every_profile_field_is_reachable_or_explicitly_exempt() -> None:
+    """Same for the profile -- every path in the flow hangs off one of these."""
+
+    unreachable = set(recipe_field_paths(PdkProfile)) - bound_paths(PROFILE_FIELDS)
+    assert sorted(unreachable) == sorted(PROFILE_UNREACHABLE), (
+        "a PdkProfile field changed reachability. Either bind it in "
+        "auto_ext/ui/project_fields.py or add it to PROFILE_UNREACHABLE "
+        "with a reason."
+    )
+
+
+def test_no_field_inventory_entry_points_at_a_field_that_is_gone() -> None:
+    """The other direction: a renamed field leaves a control bound to nothing.
+
+    Without this, dropping a model field would leave a row on screen whose
+    edits raise ``AttributeError`` the first time someone types in it.
+    """
+
+    for name, model, fields in (
+        ("WORKSPACE_FIELDS", WorkspaceConfig, WORKSPACE_FIELDS),
+        ("PROFILE_FIELDS", PdkProfile, PROFILE_FIELDS),
+    ):
+        stale = bound_paths(fields) - set(recipe_field_paths(model))
+        assert stale == set(), f"{name} binds paths {model.__name__} no longer has: {stale}"
+
+
 def test_every_exemption_carries_a_reason() -> None:
     """The exemption sets are only worth anything if the reasons are real."""
 
     for name, reasons in (
         ("RECIPE_UNREACHABLE", RECIPE_UNREACHABLE),
         ("CELL_UNREACHABLE", CELL_UNREACHABLE),
+        ("WORKSPACE_UNREACHABLE", WORKSPACE_UNREACHABLE),
+        ("PROFILE_UNREACHABLE", PROFILE_UNREACHABLE),
     ):
         blank = [key for key, why in reasons.items() if len(why.strip()) < 20]
         assert blank == [], f"{name}: these exemptions have no real reason: {blank}"

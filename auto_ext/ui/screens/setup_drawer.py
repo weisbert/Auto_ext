@@ -21,10 +21,15 @@ The drawer performs no I/O of its own:
 * :attr:`SetupDrawer.close_requested` -- close the drawer (the shell owns the
   open/closed flag),
 * :attr:`SetupDrawer.override_requested` -- pin an environment variable, which
-  means writing ``env_overrides`` in a profile. Nothing in this round writes
-  configuration from the GUI, so the row that offers it is enabled **only
-  when a receiver is connected** and explains itself in a tooltip when it is
-  not. A button that silently does nothing is worse than a disabled one.
+  means writing ``env_overrides`` in a profile,
+* :attr:`SetupDrawer.edit_field_requested` -- open the profile field a fix
+  hint names, on the Project screen. The drawer says *what* to change and only
+  the host can show *where*.
+
+Both of those are offered **only when a receiver is connected**, and the pin
+row explains itself in a tooltip when it is not. A button that silently does
+nothing is worse than a disabled one -- and worse than absent, which is what
+the edit button is without a host.
 
 Assumptions
 -----------
@@ -42,8 +47,13 @@ Assumptions
   carries everywhere else in this app.
 * **The two-way fix block of canvas 1h is rendered for env-var checks only.**
   The canvas's second option ("pin it here") is meaningful only for something
-  that has a value to pin; a missing deck directory is fixed in the profile
-  YAML, which the ``fix_hint`` already spells out.
+  that has a value to pin. A missing deck directory is fixed in the profile
+  YAML, which the ``fix_hint`` spells out and the Edit button now opens.
+* **Which field a check is about comes from a map, not from ``PdkCheck.target``.**
+  ``target`` holds a field name only for ``FIELD_SET`` checks; for the rest it
+  is a resolved path expression or an executable. The map is
+  :data:`auto_ext.ui.project_fields.CHECK_FIELDS`, next to the field inventory
+  it makes claims about.
 """
 
 from __future__ import annotations
@@ -66,6 +76,7 @@ from PyQt5.QtWidgets import (
 
 from auto_ext.model.pdk import CheckStatus, PdkCheckResult, PdkHealthReport
 from auto_ext.ui import theme
+from auto_ext.ui.project_fields import field_for_check
 from auto_ext.ui.widgets.failure_chip import PathLabel
 
 __all__ = [
@@ -241,6 +252,10 @@ class SetupDrawer(QWidget):
     #: ``(env var name, absolute path)`` the user wants pinned in the
     #: profile's ``env_overrides``. Only ever emitted for ``env.*`` checks.
     override_requested = pyqtSignal(str, str)
+    #: A profile field path the user wants to edit, e.g. ``lvs_decks.dir_expr``.
+    #: The drawer says WHAT to change; only the host can show WHERE, so this
+    #: asks it to bring the Project screen up scrolled to that field.
+    edit_field_requested = pyqtSignal(str)
     #: Emitted with text that was just put on the clipboard.
     copy_requested = pyqtSignal(str)
 
@@ -315,6 +330,15 @@ class SetupDrawer(QWidget):
         """
 
         return self.receivers(self.override_requested) > 0
+
+    def can_edit_fields(self) -> bool:
+        """True when something is listening for :attr:`edit_field_requested`.
+
+        Same rule as :meth:`can_pin_overrides`: a button that silently does
+        nothing is worse than one that is not there.
+        """
+
+        return self.receivers(self.edit_field_requested) > 0
 
     # ---- construction --------------------------------------------------
 
@@ -534,6 +558,21 @@ class SetupDrawer(QWidget):
         copy_btn.setToolTip("Copy this fix hint so it can be pasted into a shell.")
         copy_btn.clicked.connect(lambda _c=False, t=hint: self.copy_text(t))
         copy_row.addWidget(copy_btn)
+
+        # Most hints end "...in config/profiles/<id>.yaml", naming a field.
+        # Until the Project screen existed that sentence was the whole answer,
+        # because there was nowhere to send the user. Same rule as the pin row:
+        # offered only when a host is listening, never as a dead button.
+        field = field_for_check(result.check_id)
+        if field is not None and self.can_edit_fields():
+            edit_btn = QPushButton("Edit the field", fix)
+            edit_btn.setProperty("primary", True)
+            edit_btn.setToolTip(f"Open {field} on the Project screen.")
+            edit_btn.clicked.connect(
+                lambda _c=False, path=field: self.edit_field_requested.emit(path)
+            )
+            copy_row.addWidget(edit_btn)
+
         copy_row.addStretch(1)
         fix_layout.addLayout(copy_row)
 

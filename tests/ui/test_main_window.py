@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import QMenu, QMessageBox  # noqa: E402
 
 from auto_ext.ui.main_window import MainWindow  # noqa: E402
 from auto_ext.ui.screens.cells_screen import CellsScreen  # noqa: E402
+from auto_ext.ui.screens.project_screen import ProjectScreen  # noqa: E402
 from auto_ext.ui.screens.recipes_screen import RecipesScreen  # noqa: E402
 from auto_ext.ui.screens.runs_screen import RunsScreen  # noqa: E402
 from auto_ext.ui.screens.setup_drawer import SetupDrawer  # noqa: E402
@@ -122,11 +123,14 @@ def _find_action(window: MainWindow, text_contains: str):
 # ---- the page set -----------------------------------------------------------
 
 
-def test_the_rail_holds_exactly_the_three_redesign_screens(window: MainWindow) -> None:
-    assert window.shell.page_keys() == ["cells", "recipes", "runs"]
+def test_the_rail_holds_exactly_the_redesign_screens(window: MainWindow) -> None:
+    assert window.shell.page_keys() == ["cells", "recipes", "runs", "project"]
     assert isinstance(window.shell.page("cells"), CellsScreen)
     assert isinstance(window.shell.page("recipes"), RecipesScreen)
     assert isinstance(window.shell.page("runs"), RunsScreen)
+    # Project came last on purpose: it is the screen a user visits when
+    # something is wrong or when a project is new, not the one they work in.
+    assert isinstance(window.shell.page("project"), ProjectScreen)
 
 
 def test_the_retired_tabs_are_gone_from_the_package(window: MainWindow) -> None:
@@ -152,7 +156,7 @@ def test_the_retired_tabs_are_gone_from_the_package(window: MainWindow) -> None:
 
 def test_nav_codes_are_unique_three_letter_labels(window: MainWindow) -> None:
     codes = [window.shell.nav_button(k).code for k in window.shell.page_keys()]
-    assert codes == ["CEL", "RCP", "RNS"]
+    assert codes == ["CEL", "RCP", "RNS", "PRJ"]
     assert len(set(codes)) == len(codes)
 
 
@@ -742,3 +746,141 @@ def test_an_edit_the_patch_format_cannot_anchor_is_refused_in_plain_words(
     assert "validation error" not in message
     assert "above the final line" in message
     assert loaded_window.controller.is_dirty is False
+
+
+# ---- the Project screen -----------------------------------------------------
+
+
+def test_a_loaded_project_reaches_the_project_screen(loaded_window: MainWindow) -> None:
+    screen = loaded_window.project_screen
+    controller = loaded_window.controller
+    assert screen.workspace() == controller.workspace
+    assert screen.profile() == controller.profile
+    # loading is not an edit, here as well as on the screen alone
+    assert screen.is_dirty() is False
+    assert controller.is_dirty is False
+
+
+def test_the_profile_picker_lists_the_directorys_profiles(
+    loaded_window: MainWindow,
+) -> None:
+    combo = loaded_window.project_screen.row("pdk_profile").control()
+    listed = {combo.itemText(i) for i in range(combo.count())}
+    controller = loaded_window.controller
+    on_disk = {p.stem for p in controller.profiles_dir.glob("*.yaml")}
+    assert on_disk <= listed
+    assert controller.workspace.pdk_profile in listed
+
+
+def test_saving_the_project_screen_writes_the_profile(
+    loaded_window: MainWindow, profile_env
+) -> None:
+    """End to end: type, Save, and the YAML on disk says so."""
+
+    screen = loaded_window.project_screen
+    row = screen.row("display_name")
+    row.control().setText("Renamed by the Project screen")
+    row.commit()
+    assert screen.is_dirty() is True
+
+    screen._save_btn.click()
+
+    assert loaded_window.errors == [], loaded_window.errors
+    assert loaded_window.controller.is_dirty is False
+    text = loaded_window.controller.profile_path.read_text(encoding="utf-8")
+    assert "Renamed by the Project screen" in text
+
+
+def test_a_profile_only_edit_leaves_workspace_yaml_alone(
+    loaded_window: MainWindow, profile_env
+) -> None:
+    """Rewriting a file nobody edited is how a round trip loses its comments."""
+
+    controller = loaded_window.controller
+    workspace_path = controller.config_dir / "workspace.yaml"
+    before = workspace_path.read_bytes()
+    mtime = workspace_path.stat().st_mtime_ns
+
+    row = loaded_window.project_screen.row("display_name")
+    row.control().setText("Renamed again")
+    row.commit()
+    loaded_window.project_screen._save_btn.click()
+
+    assert loaded_window.errors == [], loaded_window.errors
+    assert workspace_path.read_bytes() == before
+    assert workspace_path.stat().st_mtime_ns == mtime
+
+
+def test_reverting_the_project_screen_restores_what_is_on_disk(
+    loaded_window: MainWindow,
+) -> None:
+    screen = loaded_window.project_screen
+    loaded = loaded_window.controller.profile.display_name
+
+    row = screen.row("display_name")
+    row.control().setText("about to be thrown away")
+    row.commit()
+    assert screen.is_dirty() is True
+
+    screen._revert_btn.click()
+
+    assert screen.is_dirty() is False
+    assert screen.profile().display_name == loaded
+    assert screen.row("display_name").value() == loaded
+
+
+def test_an_env_pinned_from_setup_survives_a_project_revert(
+    loaded_window: MainWindow,
+) -> None:
+    """Both write into the same object, so Revert has to mean both.
+
+    Pinning stages a profile on the controller; the screen holds a working
+    copy. A Revert that only re-pushed would leave the staged pin behind and
+    the window would still be dirty with nothing on screen to show for it.
+    """
+
+    screen = loaded_window.project_screen
+    on_disk = dict(screen.profile().env_overrides)
+
+    loaded_window.setup_drawer.override_requested.emit("SETUP_ROOT", "/pinned")
+    assert loaded_window.controller.is_dirty is True
+    assert screen.profile().env_overrides["SETUP_ROOT"] == "/pinned"
+    assert screen.is_dirty() is True
+
+    screen._revert_btn.click()
+
+    assert loaded_window.controller.is_dirty is False
+    assert screen.is_dirty() is False
+    assert screen.profile().env_overrides == on_disk
+
+
+def test_a_pin_from_the_setup_drawer_shows_up_on_the_project_screen(
+    loaded_window: MainWindow, profile_env
+) -> None:
+    """The two write paths must agree about what the profile now says."""
+
+    loaded_window.setup_drawer.override_requested.emit("SETUP_ROOT", "/pinned")
+    loaded_window.save()
+
+    assert loaded_window.errors == [], loaded_window.errors
+    row = loaded_window.project_screen.row("env_overrides")
+    assert row.value().get("SETUP_ROOT") == "/pinned"
+
+
+def test_the_setup_drawer_can_open_the_field_a_check_is_about(
+    loaded_window: MainWindow,
+) -> None:
+    loaded_window.shell.set_setup_open(True)
+    loaded_window.setup_drawer.edit_field_requested.emit("lvs_decks.dir_expr")
+
+    assert loaded_window.shell.current_page_key() == "project"
+    assert loaded_window.shell.is_setup_open() is False
+
+
+def test_a_field_the_project_screen_cannot_show_is_reported(
+    loaded_window: MainWindow,
+) -> None:
+    """A drifted CHECK_FIELDS entry must be loud, not a no-op."""
+
+    loaded_window.setup_drawer.edit_field_requested.emit("nope.not.a.field")
+    assert "nope.not.a.field" in loaded_window.shell.status_left()

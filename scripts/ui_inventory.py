@@ -131,9 +131,49 @@ def dump_cells(window: object) -> str:
 
 
 def dump_setup(window: object) -> str:
-    screen = window._setup  # noqa: SLF001 - there is no public accessor yet
+    screen = window.setup_drawer  # type: ignore[attr-defined]
     out = ["=== Setup drawer ===", "", f"  buttons : {_buttons(screen)}", ""]
     return "\n".join(out)
+
+
+def dump_project(window: object) -> str:
+    """The Project screen: workspace.yaml + the PDK profile, field by field.
+
+    Prints the help line as well as the label. Both objects are full of terms
+    a first-time reader has no way to guess ("dir_expr", "filename_pattern",
+    "preserve cell list"), so the sentence under the control IS the control's
+    usability -- which is exactly the class of defect this inventory is for.
+    """
+
+    from auto_ext.ui.screens.project_screen import field_editors
+
+    screen = window.shell.page("project")  # type: ignore[attr-defined]
+    out = ["=== Project screen ===", "", f"  buttons : {_buttons(screen)}", ""]
+    group = None
+    for spec in field_editors():
+        if spec.group != group:
+            group = spec.group
+            out.append(f"  [{group}]")
+        row = screen.row(spec.path)
+        state = "enabled" if row is not None and row.isEnabled() else "disabled"
+        value = "" if row is None else _repr_value(row)
+        out.append(f"    {spec.label:22} {spec.kind.value:8} {state:8} {value}")
+        out.append(f"      {spec.help}")
+        if spec.unset_means:
+            out.append(f"      unset: {spec.unset_means}")
+    out.append("")
+    return "\n".join(out)
+
+
+def _repr_value(row: object) -> str:
+    """One short rendering of what a row currently shows."""
+
+    try:
+        value = row.value()  # type: ignore[attr-defined]
+    except Exception as exc:  # a half-typed mapping line, for instance
+        return f"<unreadable: {exc}>"
+    text = repr(value)
+    return text if len(text) <= 60 else text[:57] + "..."
 
 
 def _buttons(widget: object) -> list[str]:
@@ -146,7 +186,12 @@ def _buttons(widget: object) -> list[str]:
     ]
 
 
-_DUMPERS = {"recipes": dump_recipes, "cells": dump_cells, "setup": dump_setup}
+_DUMPERS = {
+    "recipes": dump_recipes,
+    "cells": dump_cells,
+    "project": dump_project,
+    "setup": dump_setup,
+}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -268,6 +268,20 @@ class ConfigController(QObject):
         return self._profile_path
 
     @property
+    def profiles_dir(self) -> Path | None:
+        """``<config_dir>/profiles``, whether or not it exists yet.
+
+        Derived from the config directory rather than from
+        :attr:`profile_path`: a workspace naming a profile whose file is
+        missing has no profile path, and that is precisely the case where a
+        caller needs to know where to look for the others.
+        """
+
+        if self._config_dir is None:
+            return None
+        return self._config_dir / PROFILES_DIRNAME
+
+    @property
     def health_report(self) -> PdkHealthReport | None:
         """The last health report, or ``None`` if none has been taken."""
 

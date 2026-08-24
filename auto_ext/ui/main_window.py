@@ -1,9 +1,9 @@
-"""Top-level :class:`QMainWindow`: the shell plus the three redesign screens.
+"""Top-level :class:`QMainWindow`: the shell plus the redesign screens.
 
 The window used to be a :class:`QTabWidget` with five tabs (Run, Runs,
 Project, Tasks, Templates). The redesign replaced the top tab bar with a left
 navigation rail, and this round replaced the tabs themselves. What is left is
-three screens and one drawer:
+four screens and one drawer:
 
 ======== ===== ===================================================
 key      code  screen
@@ -11,6 +11,7 @@ key      code  screen
 cells    CEL   :class:`~auto_ext.ui.screens.cells_screen.CellsScreen`
 recipes  RCP   :class:`~auto_ext.ui.screens.recipes_screen.RecipesScreen`
 runs     RNS   :class:`~auto_ext.ui.screens.runs_screen.RunsScreen`
+project  PRJ   :class:`~auto_ext.ui.screens.project_screen.ProjectScreen`
 --       --    :class:`~auto_ext.ui.screens.setup_drawer.SetupDrawer`
 ======== ===== ===================================================
 
@@ -26,21 +27,24 @@ Where the old tabs went
   ``ui/worker.py`` and ``ui/qt_reporter.py``, and the Cells screen builds it
   the same way the tab did.
 * **Runs** -- the Runs screen, with the result card rewritten around it.
-* **Project** -- split. PDK fields became the profile and are shown by the
-  Setup drawer; the render knobs became the Recipes screen; the workspace
-  paths are ``config/workspace.yaml`` and have no editor yet (see below).
+* **Project** -- split. The render knobs became the Recipes screen; the PDK
+  fields became the profile and the workspace paths became
+  ``config/workspace.yaml``, and both are edited on the Project screen, whose
+  health verdict the Setup drawer shows.
 * **Tasks** -- the Cells screen.
 * **Templates** -- gone as a concept: templates are catalog state. Editing a
   generated file is ``Recipes -> Edit rendered file``, which stores the diff
   on the recipe (:mod:`auto_ext.ui.patch_capture`).
 
-Known gap, deliberately not papered over
-----------------------------------------
+Where the Project screen fits
+-----------------------------
 
-There is no editor for ``workspace.yaml``. The design canvas has no artboard
-for one, the three values in it (two path patterns and ``keep_runs``) are
-set once per project, and the Setup drawer shows the paths they resolve to.
-:meth:`ConfigController.stage_workspace` is the seam for when one is drawn.
+``WorkspaceConfig`` and ``PdkProfile`` were both wholly unreachable until it
+existed -- the gap this docstring used to record as deliberate. The screen
+holds working copies and this window is what stages them, through the same
+``ConfigController.save`` every other screen uses. The Setup drawer keeps the
+health verdict and gains a way into the field a failing check is about
+(``edit_field_requested``). See ``docs/refactor/PROJECTS_AND_SETUP.md``.
 
 Errors from the controller land in the status bar rather than a modal box:
 under X11 forwarding a dialog costs a round trip, and a load failure is
@@ -66,6 +70,7 @@ from auto_ext.model.recipe import Recipe, recipe_from_catalog
 from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.os_open import open_in_os
 from auto_ext.ui.screens.cells_screen import CellsScreen
+from auto_ext.ui.screens.project_screen import ProjectScreen
 from auto_ext.ui.screens.recipes_screen import RecipesScreen
 from auto_ext.ui.screens.runs_screen import RunsScreen
 from auto_ext.ui.screens.setup_drawer import SetupDrawer
@@ -87,6 +92,7 @@ class MainWindow(QMainWindow):
         ("cells", "Cells", "CEL"),
         ("recipes", "Recipes", "RCP"),
         ("runs", "Runs", "RNS"),
+        ("project", "Project", "PRJ"),
     )
 
     def __init__(
@@ -125,6 +131,7 @@ class MainWindow(QMainWindow):
         self._cells = CellsScreen(self._controller, parent=shell)
         self._recipes = RecipesScreen(parent=shell)
         self._runs = RunsScreen(shell)
+        self._project = ProjectScreen(shell)
         self._setup = SetupDrawer(shell)
         self._log_view = LogView(shell)
         self._cells.run_bar.set_log_widget(self._log_view)
@@ -137,6 +144,7 @@ class MainWindow(QMainWindow):
             "cells": self._cells,
             "recipes": self._recipes,
             "runs": self._runs,
+            "project": self._project,
         }
         for key, label, code in self._PAGES:
             shell.add_page(key, label, widgets[key], code=code)
@@ -171,6 +179,10 @@ class MainWindow(QMainWindow):
     @property
     def runs_screen(self) -> RunsScreen:
         return self._runs
+
+    @property
+    def project_screen(self) -> ProjectScreen:
+        return self._project
 
     @property
     def setup_drawer(self) -> SetupDrawer:
@@ -231,10 +243,18 @@ class MainWindow(QMainWindow):
         runs.setup_requested.connect(self._open_setup_at)
         runs.rerun_requested.connect(self._on_rerun_requested)
 
+        project = self._project
+        project.edited.connect(self._on_project_edited)
+        project.save_requested.connect(self._on_project_save_requested)
+        project.revert_requested.connect(self._on_project_revert_requested)
+        project.open_project_requested.connect(self._open_config_dir)
+        project.status_changed.connect(self._set_status)
+
         setup = self._setup
         setup.recheck_requested.connect(self._on_recheck_requested)
         setup.close_requested.connect(lambda: self._shell.set_setup_open(False))
         setup.override_requested.connect(self._on_override_requested)
+        setup.edit_field_requested.connect(self._on_edit_field_requested)
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -304,12 +324,36 @@ class MainWindow(QMainWindow):
             # its corner as an unknown extra entry.
             self._recipes.set_profile(controller.profile)
             self._recipes.set_recipes(controller.recipes)
+            self._project.set_project(
+                workspace=controller.workspace,
+                profile=controller.profile,
+                config_dir="" if config_dir is None else str(config_dir),
+                profile_ids=self._profile_ids(),
+            )
         finally:
             self._pushing = False
 
         self._push_recipe_usage()
         self._runs.set_runs_root(controller.runs_root)
         self._controller.refresh_health()
+
+    def _profile_ids(self) -> list[str]:
+        """Every profile the loaded config directory offers, for the picker.
+
+        The screen does no I/O, so the set of profiles -- a property of the
+        directory around the loaded documents, not of either document -- is
+        the window's to supply. The currently-named one is included even when
+        its file is missing: a workspace pointing at a profile that is not
+        there is exactly the situation the picker has to be able to show.
+        """
+
+        controller = self._controller
+        directory = controller.profiles_dir
+        ids = sorted(p.stem for p in directory.glob("*.yaml")) if directory else []
+        workspace = controller.workspace
+        if workspace is not None and workspace.pdk_profile not in ids:
+            ids.append(workspace.pdk_profile)
+        return ids
 
     def _cannot_run_hint(self) -> str:
         """Why the Run button would not start anything, in one line."""
@@ -716,15 +760,82 @@ class MainWindow(QMainWindow):
         profile behind their back.
         """
 
-        profile = self._controller.profile
+        profile = self._project.profile()
         if profile is None:
             return
         overrides = dict(profile.env_overrides)
         overrides[name] = value
-        self._controller.stage_profile(
-            profile.model_copy(update={"env_overrides": overrides})
-        )
+        # Through the Project screen rather than straight to the controller:
+        # the screen holds the working copy, and a second copy staged behind
+        # its back would disagree with it the moment either was reverted -- and
+        # the user would not see the pin they just made in the field that shows
+        # pins.
+        self._project.apply_edit("env_overrides", overrides)
         self._set_status(f"{name} pinned in the profile - Save to write it")
+
+    # ---- project slots ---------------------------------------------------
+
+    def _on_project_edited(self, workspace: object, profile: object) -> None:
+        """Stage whichever of the two objects now differs from what was loaded.
+
+        Every edit, not only the ones Save is pressed on -- see
+        :attr:`ProjectScreen.edited`. Staging rather than writing keeps one
+        save path for the whole window: the controller renders every pending
+        document, refuses on an mtime conflict, and reloads afterwards.
+        """
+
+        if self._pushing:
+            return
+        if workspace is not None:
+            self._controller.stage_workspace(workspace)  # type: ignore[arg-type]
+        if profile is not None:
+            self._controller.stage_profile(profile)  # type: ignore[arg-type]
+
+    def _on_project_save_requested(self, workspace: object, profile: object) -> None:
+        """Save what the screen has staged."""
+
+        self._on_project_edited(workspace, profile)
+        self.save()
+
+    def _on_project_revert_requested(self) -> None:
+        """Throw the screen's working copies away and re-push what is loaded.
+
+        The screen holds working copies the controller has never seen (only
+        Save stages them), so reverting is a re-push rather than a controller
+        revert -- and the controller is reverted too, because a pinned env
+        override staged from the Setup drawer is an edit to the same object.
+        """
+
+        self._controller.revert()
+        self._push_project()
+        self._set_status("project reverted to what is on disk")
+
+    def _push_project(self) -> None:
+        controller = self._controller
+        self._pushing = True
+        try:
+            self._project.set_project(
+                workspace=controller.workspace,
+                profile=controller.profile,
+                config_dir=str(controller.config_dir or ""),
+                profile_ids=self._profile_ids(),
+            )
+        finally:
+            self._pushing = False
+
+    def _on_edit_field_requested(self, path: str) -> None:
+        """A Setup row asked for the field its fix hint names.
+
+        The drawer says *what* to change; this is the only thing that can show
+        the user *where*. A path the screen does not render is reported rather
+        than silently ignored -- it means a fix hint and the field inventory
+        have drifted apart, which is a bug in one of them.
+        """
+
+        self._shell.set_setup_open(False)
+        self._shell.set_current_page("project")
+        if not self._project.scroll_to(path):
+            self._set_status(f"no editor for {path} on the Project screen")
 
     # ---- file actions ----------------------------------------------------
 
