@@ -27,8 +27,13 @@ required_env:
 - WORK_ROOT
 - WORK_ROOT2
 - calibre_source_added_place
-# NEEDS CONFIRMATION: deck variants come from the calibre manifest,
-# which is the only place they were ever written down.
+# CONFIRMED 2026-08-24 by `ls` on the real deck directory. Both variants exist
+# as real files, so `widio` is no longer manifest-only folklore.
+# Also learned there: each variant ships TWO files, `.qcilvs` AND a `.lvs`
+# sibling (`<basename>.wodio.lvs` / `.wodio.qcilvs`, same for widio), plus an
+# unsuffixed `<basename>.lvs` and an `empty.cdl`. We want the `.qcilvs` one --
+# that is the Calibre-for-QRC (QCI) deck the runset sample uses -- so
+# filename_pattern stays pinned to `.qcilvs` rather than globbing `.lvs*`.
 lvs_decks:
   dir_expr: $calibre_source_added_place|parent
   basename:
@@ -50,15 +55,60 @@ qrc:
   preserve_cell_list_name: preserveCellList.txt
   runset_version:
 extra_paths: {}
-# NEEDS CONFIRMATION: only the corner the templates hardcode is here.
-# Add the rest of this PDK's corners; a Recipe is portable only across
-# corners this table names.
+# CONFIRMED 2026-08-24 against the Quantus GUI RuleSet list on the real PDK.
+# This PDK offers exactly these nine and nothing else. Note which generation of
+# corner naming won: the plain CBEST/CWORST/RCBEST/RCWORST set, each with a
+# `_T` sibling. The CBEST_CCBEST / RCWORST_CCWORST generation that the draft
+# catalog also listed does NOT exist here -- shipping the union would have made
+# half the dropdown invalid, which is why this was a hard blocker.
+# `assura_tech.lib` was the wrong place to look: `grep -i corner` on it returns
+# nothing. The corner list lives in the Quantus RuleSet, not the tech lib.
 corners:
 - name: typical
   technology_corner: TYPICAL
   default_temperature_c:
   aliases: []
-  description: Read back from the migrated templates.
+  description: Nominal RC. The corner the pre-refactor templates hardcoded.
+- name: cbest
+  technology_corner: CBEST
+  default_temperature_c:
+  aliases: []
+  description: Best-case capacitance.
+- name: cbest_t
+  technology_corner: CBEST_T
+  default_temperature_c:
+  aliases: []
+  description: Best-case capacitance, `_T` variant.
+- name: cworst
+  technology_corner: CWORST
+  default_temperature_c:
+  aliases: []
+  description: Worst-case capacitance.
+- name: cworst_t
+  technology_corner: CWORST_T
+  default_temperature_c:
+  aliases: []
+  description: Worst-case capacitance, `_T` variant.
+- name: rcbest
+  technology_corner: RCBEST
+  default_temperature_c:
+  aliases: []
+  description: Best-case RC.
+- name: rcbest_t
+  technology_corner: RCBEST_T
+  default_temperature_c:
+  aliases: []
+  description: Best-case RC, `_T` variant.
+- name: rcworst
+  technology_corner: RCWORST
+  default_temperature_c:
+  aliases: []
+  description: Worst-case RC.
+- name: rcworst_t
+  technology_corner: RCWORST_T
+  default_temperature_c:
+  aliases: []
+  description: Worst-case RC, `_T` variant.
 default_corner: typical
 power_names:
 - AHVDD

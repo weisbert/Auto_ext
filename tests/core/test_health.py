@@ -445,7 +445,11 @@ def test_format_report_states_the_verdict_and_lists_fixes(healthy):
     text = format_report(_report(healthy))
     assert "cannot run yet" in text
     assert "Process corner table" in text
-    assert "grep -i corner" in text
+    # The hint must send the user to the Quantus RuleSet, NOT to
+    # `grep -i corner $SETUP_ROOT/assura_tech.lib`, which is what it used to say
+    # until 2026-08-24, when that grep was run on a real PDK and came back empty.
+    assert "RuleSet" in text
+    assert "grep -i corner" not in text
 
 
 def test_format_report_says_ready_when_it_is(healthy):

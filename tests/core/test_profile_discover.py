@@ -17,6 +17,7 @@ these tests export is written with :meth:`Path.as_posix`. A Windows-style
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -280,6 +281,101 @@ def test_an_ambiguous_qrc_version_is_reported_not_guessed(pdk_env, pdk_tree):
     note = result.note_for("qrc.dir_expr")
     assert note is not None and "ambiguous" in note.reason
     assert QRC_VERSION in note.fix_hint and "Ver_Plus_2.0" in note.fix_hint
+
+
+#: The QRC deck release name observed on a real tree. It shares nothing with
+#: the LVS subdirectory name beyond the PDK prefix -- which is the whole point.
+QRC_PDK_SUBDIR = "CFXXX_QRC_QCI_1P10M_V1"
+
+
+def _move_qrc_deck(pdk_tree, *, subdir: str, version: str = QRC_VERSION) -> Path:
+    """Re-home the fixture's QRC deck under a different <version>/<subdir>."""
+
+    dest = (
+        pdk_tree["verify"]
+        / "runset"
+        / "Calibre_QRC"
+        / "QRC"
+        / version
+        / subdir
+        / "QCI_deck"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(pdk_tree["qrc_dir"]), str(dest))
+    return dest
+
+
+def test_the_qrc_subdir_need_not_match_the_lvs_subdir(pdk_env, pdk_tree):
+    """R5, corrected. This is the case the original rule got wrong.
+
+    The scan used to pin the QRC glob to the LVS deck basename, on the theory
+    that both decks live under the same <pdk_subdir>. On the first real tree
+    anyone checked (2026-08-24) they do not: the LVS subdirectory names an LVS
+    deck release and the QRC subdirectory names a QRC deck release, and the two
+    share no substring beyond the PDK prefix. The pinned glob therefore matched
+    nothing and the scan gave up on a deck that was sitting right there.
+    """
+
+    moved = _move_qrc_deck(pdk_tree, subdir=QRC_PDK_SUBDIR)
+    result = _scan(pdk_env)
+
+    assert result.profile.qrc.dir_expr == moved.as_posix()
+    assert result.profile.qrc.runset_version == QRC_VERSION
+    assert result.note_for("qrc.dir_expr") is None
+
+
+def test_a_matching_lvs_subdir_still_disambiguates_without_asking(pdk_env, pdk_tree):
+    """The narrow glob is kept as a first attempt, and it earns its keep.
+
+    Two QRC releases are present, but only one sits under the same
+    <pdk_subdir> as the LVS deck. The narrow glob matches that one uniquely, so
+    the scan settles the version itself instead of widening into an ambiguity
+    the user would have to resolve by hand.
+    """
+
+    other = (
+        pdk_tree["verify"]
+        / "runset"
+        / "Calibre_QRC"
+        / "QRC"
+        / "Ver_Plus_2.0"
+        / QRC_PDK_SUBDIR
+        / "QCI_deck"
+    )
+    other.mkdir(parents=True)
+    result = _scan(pdk_env)
+
+    assert result.profile.qrc.dir_expr == pdk_tree["qrc_dir"].as_posix()
+    assert result.note_for("qrc.dir_expr") is None
+
+
+def test_two_qrc_releases_under_unmatched_subdirs_are_reported_not_guessed(
+    pdk_env, pdk_tree
+):
+    """Shipping two QRC deck releases side by side is normal, not an error.
+
+    The real tree had exactly this: a release and an `_offline` sibling. With
+    neither under the LVS subdirectory, the narrow glob finds nothing, the wide
+    glob finds both, and the scan must hand the choice back rather than pick.
+    """
+
+    _move_qrc_deck(pdk_tree, subdir=QRC_PDK_SUBDIR)
+    offline = (
+        pdk_tree["verify"]
+        / "runset"
+        / "Calibre_QRC"
+        / "QRC"
+        / "Ver_Plus_2.0"
+        / f"{QRC_PDK_SUBDIR}_offline"
+        / "QCI_deck"
+    )
+    offline.mkdir(parents=True)
+
+    result = _scan(pdk_env)
+    assert result.profile.qrc.dir_expr is None
+    note = result.note_for("qrc.dir_expr")
+    assert note is not None and "ambiguous" in note.reason
+    assert QRC_PDK_SUBDIR in note.fix_hint and "_offline" in note.fix_hint
 
 
 def test_filesystem_scanning_can_be_switched_off_entirely(pdk_env):

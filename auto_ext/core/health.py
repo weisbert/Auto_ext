@@ -283,10 +283,11 @@ def default_checks(profile: PdkProfile) -> list[PdkCheck]:
             kind=PdkCheckKind.FIELD_SET,
             target="corners",
             fix_hint=(
-                f"No corner is defined, so no Recipe can name one. Run `grep -i corner "
-                f"$SETUP_ROOT/assura_tech.lib` on the server and add one `corners:` entry "
-                f"per corner to {yaml_file} (`name:` is yours to choose, "
-                "`technology_corner:` is the literal Quantus expects)."
+                "No corner is defined, so no Recipe can name one. Read the corner names "
+                "off the Quantus GUI RuleSet list -- NOT off $SETUP_ROOT/assura_tech.lib, "
+                "which on a real PDK was found to contain no corner names at all -- and "
+                f"add one `corners:` entry per RuleSet entry to {yaml_file} (`name:` is "
+                "yours to choose, `technology_corner:` is the literal Quantus expects)."
             ),
         )
     )

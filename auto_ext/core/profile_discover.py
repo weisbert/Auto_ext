@@ -97,27 +97,41 @@ SCAN_RULES: dict[str, str] = {
         "derives; docs/calibre_raw.txt line 2 is the only sample."
     ),
     "R3": (
-        "observed: deck files are named '<basename>.<variant>.qcilvs'. Only 'wodio' has "
-        "ever been seen; 'widio' comes from a hand-written manifest, so variants are "
-        "globbed, never assumed."
+        "observed: deck files are named '<basename>.<variant>.qcilvs'. CONFIRMED "
+        "2026-08-24 on a real deck directory: BOTH 'wodio' and 'widio' exist as files, "
+        "so widio is no longer manifest-only folklore. Each variant also ships a '.lvs' "
+        "sibling next to the '.qcilvs'; we want the '.qcilvs'. Variants stay globbed "
+        "rather than assumed -- a third suffix on another PDK would still be found."
     ),
     "R4": (
-        "unverified: the path segment immediately after a segment named 'LVS' (resp. "
-        "'QRC') is the runset version ('Ver_LVS_A', resp. 'Ver_QRC_B'). "
-        "Provenance only -- no path is ever assembled from it."
+        "observed: the path segment immediately after a segment named 'LVS' (resp. "
+        "'QRC') is the runset version ('Ver_LVS_A', resp. 'Ver_QRC_B'). CONFIRMED "
+        "2026-08-24 on the real tree, where the two versions are indeed unrelated "
+        "strings. Provenance only -- no path is ever assembled from it."
     ),
     "R5": (
-        "unverified: the QRC deck sits at "
-        "'$VERIFY_ROOT/runset/Calibre_QRC/QRC/<version>/<pdk_subdir>/QCI_deck', with the "
-        "same <pdk_subdir> as the LVS deck but its own version, one level deeper. Only "
-        "accepted when the glob matches exactly one existing directory; several matches "
-        "means the version is ambiguous and a human must choose."
+        "observed-and-corrected: the QRC deck sits at "
+        "'$VERIFY_ROOT/runset/Calibre_QRC/QRC/<version>/<pdk_subdir>/QCI_deck', one "
+        "directory deeper than the LVS deck. The 'same <pdk_subdir> as the LVS deck' "
+        "half of this rule was FALSIFIED 2026-08-24: on the real tree the LVS subdir "
+        "names the LVS deck release and the QRC subdir names the QRC deck release, and "
+        "they share no substring beyond the PDK prefix. Pinning the glob to the LVS "
+        "basename therefore matched nothing. Both segments are now wildcards, with the "
+        "LVS-pinned glob kept only as a first, narrowing attempt for PDKs where the "
+        "names do line up. Only a unique hit is accepted; several matches means a human "
+        "must choose -- which is the normal outcome, since shipping two QRC deck "
+        "releases side by side is itself normal."
     ),
     "R6": (
-        "unverified: corner names appear in assura_tech.lib as a quoted token following a "
-        "word containing 'corner' (techCorner( \"TYPICAL\" )), or as an unquoted "
-        "upper-case token after 'corner ='. Nobody has seen a real assura_tech.lib; when "
-        "the pattern misses, the corner table stays empty rather than being invented."
+        "FALSIFIED as a discovery source, kept as a best-effort: corner names were "
+        "assumed to appear in assura_tech.lib as a quoted token following a word "
+        "containing 'corner' (techCorner( \"TYPICAL\" )), or as an unquoted upper-case "
+        "token after 'corner ='. On the first real assura_tech.lib anyone has looked at "
+        "(2026-08-24), `grep -i corner` returns NOTHING -- the corner list lives in the "
+        "Quantus RuleSet, which is a GUI list this scanner cannot read. The parse still "
+        "runs because another PDK may well carry the literals, but the fix hint now "
+        "sends the user to the RuleSet, not to a grep that is known to come back empty. "
+        "When the pattern misses, the corner table stays empty rather than invented."
     ),
     "R7": (
         "observed: a raw Calibre runset export carries the global supply lists as the "
@@ -134,9 +148,17 @@ SCAN_RULES: dict[str, str] = {
 #: R1. The path expression for the Calibre LVS deck directory.
 CALIBRE_LVS_DIR_EXPR = "$calibre_source_added_place|parent"
 
-#: R5. Where to look for the QRC deck, as a filesystem glob relative to
-#: ``$VERIFY_ROOT``. ``{pdk_subdir}`` is filled with the LVS deck basename.
+#: R5. Where to look for the QRC deck, as a filesystem globs relative to
+#: ``$VERIFY_ROOT``, tried narrowest first.
+#:
+#: The narrow one pins the PDK subdirectory to the LVS deck basename. That was
+#: the ONLY glob until 2026-08-24, when a real tree showed the two subdirectory
+#: names are independent deck releases -- the LVS one names an LVS deck, the QRC
+#: one names a QRC deck -- so the pinned glob matched nothing and the scan gave
+#: up on a directory that was sitting right there. It is kept because where the
+#: names DO line up it disambiguates for free; the wide glob is the fallback.
 QRC_DECK_GLOB = "runset/Calibre_QRC/QRC/*/{pdk_subdir}/QCI_deck"
+QRC_DECK_GLOB_WIDE = "runset/Calibre_QRC/QRC/*/*/QCI_deck"
 
 #: Env vars a PDK profile is expected to need. They are always listed in
 #: ``required_env`` even when the scan cannot resolve them -- that is exactly
@@ -450,11 +472,35 @@ def _scan_qrc_deck(
     if not verify_root:
         return _give_up("$VERIFY_ROOT is not set in this shell", generic_hint)
 
+    def _glob(pattern: str) -> list[str] | None:
+        try:
+            return sorted(str(p) for p in Path(verify_root).glob(pattern) if p.is_dir())
+        except OSError as exc:
+            notes.append(
+                DiscoveryNote(
+                    field="qrc.dir_expr",
+                    rule="R5",
+                    reason=f"cannot search under {verify_root}: {exc}",
+                    fix_hint=generic_hint,
+                )
+            )
+            return None
+
+    # Narrow first: if this PDK happens to name the LVS and QRC subdirectories
+    # alike, a single hit here settles the version with no question asked.
     pattern = QRC_DECK_GLOB.format(pdk_subdir=pdk_subdir)
-    try:
-        hits = sorted(str(p) for p in Path(verify_root).glob(pattern) if p.is_dir())
-    except OSError as exc:
-        return _give_up(f"cannot search under {verify_root}: {exc}", generic_hint)
+    hits = _glob(pattern)
+    if hits is None:
+        return QrcDeck()
+
+    if len(hits) != 1:
+        # Widen. On the real tree the two subdirectory names are unrelated, so
+        # the narrow glob returns nothing and everything depends on this.
+        pattern = QRC_DECK_GLOB_WIDE
+        wide = _glob(pattern)
+        if wide is None:
+            return QrcDeck()
+        hits = wide
 
     if not hits:
         return _give_up(
@@ -485,10 +531,14 @@ def _scan_corners(
 
     expr = DEFAULT_TECH_LIBRARY_FILE
     fix_hint = (
-        "Run `grep -i corner $SETUP_ROOT/assura_tech.lib` on the server and add one "
-        "`corners:` entry per corner (name: is the semantic name a Recipe writes, "
-        "technology_corner: is the literal Quantus expects). Until then no Recipe can "
-        "name a corner."
+        "Open the Quantus GUI and copy the RuleSet list -- that, not the technology "
+        "library, is where this PDK's corner names actually live: on the first real "
+        "assura_tech.lib anyone checked, `grep -i corner` came back empty. Add one "
+        "`corners:` entry per RuleSet entry (name: is the semantic name a Recipe "
+        "writes, technology_corner: is the literal Quantus expects). Expect ONE "
+        "generation of naming, not both -- either the plain CBEST/CWORST/RCBEST/"
+        "RCWORST family or the CBEST_CCBEST family, never the union. Until then no "
+        "Recipe can name a corner."
     )
 
     def _give_up(reason: str) -> tuple[list[CornerSpec], str | None]:

@@ -884,19 +884,24 @@ options:
     owner: recipe
     type: enum
     choices: [wodio, widio]
-    choices_confidence: likely
+    choices_confidence: certain
     default: wodio
     currently: manifest_knob
     observed: true
     source_ref: examples/legacy/templates/calibre/calibre_lvs.qci.j2.manifest.yaml:5
-    question: Does the LVS deck directory hold suffixes other than wodio and widio?
     notes: >-
-      One of the 7 knobs that exist today. Only "wodio" has ever been seen in
-      a real path (docs/calibre_raw.txt:2); "widio" exists only in the
-      hand-written manifest and in core/importer.py:415-416, so the value SET
-      is likely, not certain. WHICH variants exist is a PDK fact and lives on
+      One of the 7 knobs that exist today. RESOLVED 2026-08-24: an `ls` of the
+      real deck directory shows both `<basename>.wodio.qcilvs` and
+      `<basename>.widio.qcilvs`, so "widio" -- which until then existed only in
+      the hand-written manifest and in core/importer.py -- is confirmed real,
+      and the deck directory holds no third suffix. The same listing also
+      showed a `.lvs` sibling beside each `.qcilvs`, plus an unsuffixed
+      `<basename>.lvs`; those are a different deck flavour and deliberately not
+      offered here.
+      WHICH variants exist is a PDK fact and lives on
       PdkProfile.lvs_decks.variants; which one this run uses is the recipe
-      choice recorded here.
+      choice recorded here. This row's list is one PDK's answer -- the profile
+      is what a second PDK overrides.
     lands_in:
       - {target: lvs.qci, section: lvs_rules, option: "*lvsRulesFile", line: 1}
     why: Picks the LVS rule deck, i.e. what LVS actually checks. The archetypal recipe choice.
@@ -2089,7 +2094,6 @@ options:
     currently: hardcoded_literal
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:34
-    question: Open <qrc_deck_dir>/query_cmd and confirm the basename it writes.
     notes: >-
       One of four appearances of the same basename: here, in
       query_layer_map_file, in query_device_properties_file, and in
@@ -2098,7 +2102,17 @@ options:
       choice and not ours -- core/importer.py:522,529 even bakes it into
       regexes. The draft called this one "likely exposable" while calling two
       of its derived paths untouchable, which cannot both be true. All four
-      are fixed, pending the deck check above.
+      are fixed.
+      RESOLVED 2026-08-24 by reading a real <qrc_deck_dir>/query_cmd, and it is
+      stronger than "the default happens to be right": the deck writes every one
+      of its ~13 outputs as `query_output/Design.<ext>`, and its own header
+      comment states the contract explicitly -- QRC's `input_db -run_name` MUST
+      equal the prefix (Design) and `input_db -directory_name` MUST equal the
+      directory (query_output). So this is not merely PDK-chosen, it is a value
+      that must stay in lockstep with two other rows or Quantus reads nothing.
+      That is exactly why owner is `fixed` and not a knob.
+      Checked against both QRC deck releases present on the real tree: the two
+      query_cmd files are byte-identical, so no per-release divergence to model.
     lands_in:
       - {target: quantus.ext.cmd, section: input_db, option: -run_name, line: 34}
       - {target: quantus.dspf.cmd, section: input_db, option: -run_name, line: 33}
@@ -2649,21 +2663,29 @@ options:
     template_var: technology_corner
     context_path: pdk.corner
     owner: profile
-    type: str
-    choices_confidence: guess
+    type: enum
+    choices: [TYPICAL, CBEST, CBEST_T, CWORST, CWORST_T, RCBEST, RCBEST_T, RCWORST, RCWORST_T]
+    choices_confidence: certain
     default: TYPICAL
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:60
-    question: Open this PDK assura_tech.lib and copy out the corner names it actually offers.
     notes: >-
       The tool literal lives here, on the profile; the Recipe only names a
       semantic corner (recipe.extraction.corner) and the profile maps it. That
-      seam is what lets one Recipe move between PDKs. The draft mixed two
-      generations of corner naming (CBEST/... and CBEST_CCBEST/...) in one
-      choices list; a real assura_tech.lib usually offers only one of the two,
-      so shipping the union would give a dropdown half full of invalid
-      entries. No choices are offered here at all until the office check.
+      seam is what lets one Recipe move between PDKs.
+      RESOLVED 2026-08-24 against the real PDK. The draft mixed two generations
+      of corner naming (CBEST/... and CBEST_CCBEST/...) in one choices list;
+      shipping the union would have given a dropdown half full of invalid
+      entries. The office check settled it: this PDK offers exactly the nine
+      above -- the plain family, each with a `_T` sibling -- and no
+      CBEST_CCBEST-style name exists at all.
+      Note the source: these were read off the Quantus GUI RuleSet list.
+      `grep -i corner $SETUP_ROOT/assura_tech.lib` returns NOTHING on this PDK,
+      so the tech library is the wrong place to look and the discovery scanner's
+      hint was corrected accordingly.
+      These nine are one PDK's answer, not a universal list -- the profile
+      corner table, not this catalog row, is what a second PDK overrides.
       Rendered with the option and the value on SEPARATE lines.
     lands_in:
       - {target: quantus.ext.cmd, section: process_technology, option: -technology_corner, line: 59, layout: value_on_next_line}
