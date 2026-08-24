@@ -64,6 +64,7 @@ __all__ = [
     "BUILTIN_CATALOG_PATH",
     "Catalog",
     "CatalogError",
+    "ChoicesSource",
     "Confidence",
     "Currently",
     "LandingSite",
@@ -77,6 +78,7 @@ __all__ = [
     "TemplateVarAudit",
     "audit_template_vars",
     "builtin_catalog",
+    "choices_for",
     "default_templates_root",
     "load_catalog",
 ]
@@ -146,6 +148,32 @@ class Confidence(StrEnum):
     GUESS = "guess"
 
 
+class ChoicesSource(StrEnum):
+    """A PDK-profile table that supplies this option's value set at run time.
+
+    ``choices`` in the catalog is one PDK's answer, frozen at authoring time.
+    For an option whose legal set is a *process fact* -- which corners this
+    technology defines, which LVS deck variants were released -- that frozen
+    list is right for exactly one PDK and quietly wrong for the next. A row
+    that names a source here keeps its static ``choices`` as the fallback for
+    when no profile is loaded, and the form fills the control from the loaded
+    profile instead. :func:`choices_for` is the one place that resolution
+    happens.
+
+    The member value is the dotted path from a ``PdkProfile``; every table it
+    names is a list of objects carrying a semantic ``name``, which is what the
+    Recipe stores.
+    """
+
+    #: ``PdkProfile.corners`` -> the semantic names ``recipe.extraction.corner``
+    #: chooses between. The tool literal each maps to is the separate
+    #: profile-owned ``technology_corner`` row.
+    PROFILE_CORNERS = "profile.corners"
+    #: ``PdkProfile.lvs_decks.variants`` -> the names
+    #: ``recipe.lvs.deck_variant`` chooses between.
+    PROFILE_LVS_VARIANTS = "profile.lvs_decks.variants"
+
+
 class Currently(StrEnum):
     """How the value reaches the generated file today."""
 
@@ -162,6 +190,13 @@ class Currently(StrEnum):
     #: A ProjectConfig / TaskSpec field that never reaches a template as a
     #: ``[[var]]``.
     CONFIG_FIELD = "config_field"
+    #: The value never reaches a file; it *selects* a PdkProfile entry, and
+    #: what gets written is that entry's literal through a different catalog
+    #: row. ``extraction_corner`` picks a ``PdkProfile.corners`` name and
+    #: ``technology_corner`` writes the literal it maps to. Distinct from
+    #: ``absent``, which means nothing is emitted on this value's account at
+    #: all, and from ``config_field``, which is plumbing rather than a choice.
+    PROFILE_SELECTOR = "profile_selector"
     #: Not emitted at all. Either a proposal (``observed: false``) or a line a
     #: real export carries that we drop (``observed: true``).
     ABSENT = "absent"
@@ -328,7 +363,21 @@ class OptionSpec(Frozen):
     type: OptionType
     default: Any = None
     choices: list[Any] | None = None
+    #: A PdkProfile table that supersedes ``choices`` once a profile is
+    #: loaded. ``choices`` stays as the no-profile fallback and as the record
+    #: of what one real PDK answered. See :class:`ChoicesSource`.
+    choices_from: ChoicesSource | None = None
     choices_confidence: Confidence
+    #: The model field accepts ``None``, and ``None`` means "resolve it from
+    #: somewhere else" -- the profile for a corner, the DUT for the view to
+    #: reduce. A form renders it as an explicit "(from the profile)" entry
+    #: rather than as an empty control, because the fallback is a choice and
+    #: not a blank the user forgot to fill in.
+    nullable: bool = False
+    #: Grey text for an empty control, when ``default`` is ``None`` and so
+    #: cannot supply one. Says what the tool will do with the field left
+    #: alone; never a fake value.
+    placeholder: str | None = None
     range: tuple[float, float] | None = None
     #: False on every row in the shipped catalog. A range is a guard rail
     #: somebody invented until a datasheet says otherwise.
@@ -361,6 +410,11 @@ class OptionSpec(Frozen):
                 raise ValueError(f"{self.key}: choices contains duplicates")
         if self.type is OptionType.ENUM and self.choices is None:
             raise ValueError(f"{self.key}: an enum option must list its choices")
+        if self.choices_from is not None and self.type is not OptionType.ENUM:
+            raise ValueError(
+                f"{self.key}: choices_from is only meaningful for an enum "
+                f"option (got type={self.type})"
+            )
 
         if self.range is not None:
             if self.type not in (OptionType.INT, OptionType.FLOAT):
@@ -483,6 +537,36 @@ class OptionSpec(Frozen):
         if not self.context_path.startswith("recipe."):
             return None
         return self.context_path[len("recipe.") :]
+
+
+def choices_for(spec: OptionSpec, profile: Any | None = None) -> list[str]:
+    """The value set to offer for ``spec``, given the loaded PDK profile.
+
+    Without a ``choices_from`` row, or without a profile, this is the
+    catalog's own ``choices``. With both, it is the semantic ``name`` of every
+    entry in the profile table the row names -- which corners *this* PDK
+    defines, which LVS deck variants *this* release shipped.
+
+    Duck-typed on purpose: a ``PdkProfile`` import here would make the catalog
+    depend on the model it is supposed to describe. A profile whose table is
+    missing or empty falls back to ``choices`` rather than offering nothing,
+    because an empty drop-down is indistinguishable from a broken one.
+    """
+
+    fallback = [str(choice) for choice in (spec.choices or [])]
+    if spec.choices_from is None or profile is None:
+        return fallback
+    node: Any = profile
+    for part in spec.choices_from.value.split(".")[1:]:
+        node = getattr(node, part, None)
+        if node is None:
+            return fallback
+    try:
+        names = [getattr(entry, "name", None) for entry in node]
+    except TypeError:  # pragma: no cover - a table that is not iterable
+        return fallback
+    found = [str(name) for name in names if name]
+    return found or fallback
 
 
 # ---- the catalog ------------------------------------------------------------

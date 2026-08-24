@@ -382,13 +382,26 @@ def test_the_two_dut_serialisations_are_both_recorded(catalog: Catalog) -> None:
     assert catalog.option("jivaro_input_view").default == "{library}/{cell}/{out_file}"
 
 
-def test_the_suspected_jivaro_view_bug_is_recorded_not_silently_fixed(
+def test_the_jivaro_view_bug_is_fixed_by_derivation_not_by_a_second_literal(
     catalog: Catalog,
 ) -> None:
+    """The catalog's most suspicious row, resolved 2026-08-24.
+
+    ``viewsToReduce`` used to be the literal ``av_extracted`` while
+    ``inputView`` and Quantus ``-view_name`` both used ``out_file`` (``av_ext``
+    in both shipped task tables), so Jivaro was pointed at a view that does not
+    exist. The fix is a derivation, not a corrected literal: after an
+    extraction the view to reduce IS the extraction output, so the row now
+    defaults to null and resolves against the DUT. It stays settable for a
+    standalone Jivaro run over a view an earlier run produced.
+    """
+
     views = catalog.option("reduction_views_to_reduce")
-    assert views.default == "av_extracted"
+    assert views.default is None
+    assert views.nullable is True
+    assert views.placeholder, "an unset control has to say what it falls back to"
+    assert not views.question, "the question this row carried has been answered"
     assert catalog.option("out_file").default == "av_ext"
-    assert views.question, "the mismatch must stay flagged as an open question"
 
 
 def test_the_impossible_coupling_threshold_is_flagged(catalog: Catalog) -> None:

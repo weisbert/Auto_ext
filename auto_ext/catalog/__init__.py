@@ -15,6 +15,7 @@ from auto_ext.catalog.spec import (
     BUILTIN_CATALOG_PATH,
     Catalog,
     CatalogError,
+    ChoicesSource,
     Confidence,
     Currently,
     LandingSite,
@@ -28,6 +29,7 @@ from auto_ext.catalog.spec import (
     TemplateVarAudit,
     audit_template_vars,
     builtin_catalog,
+    choices_for,
     default_templates_root,
     load_catalog,
 )

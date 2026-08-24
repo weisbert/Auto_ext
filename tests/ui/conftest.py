@@ -54,6 +54,7 @@ def _drain_qt_events():
     app = QApplication.instance()
     if app is None:
         return
+
     app.processEvents()
     app.sendPostedEvents(None, QEvent.DeferredDelete)
     gc.collect()

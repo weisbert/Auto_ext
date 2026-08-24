@@ -78,6 +78,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QPushButton,
     QScrollArea,
@@ -90,7 +91,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from auto_ext.catalog import Catalog, OptionSpec, Owner, builtin_catalog
+from auto_ext.catalog import Catalog, OptionSpec, Owner, builtin_catalog, choices_for
 from auto_ext.model.recipe import Recipe
 from auto_ext.ui import theme
 from auto_ext.ui.widgets.option_editor import (
@@ -140,6 +141,11 @@ LIST_HEADER_HEIGHT = theme.ROW_HEIGHT
 LIST_TOOLBAR_HEIGHT = theme.NAV_ITEM_HEIGHT
 #: The toolbar is two of those rows. See the module Assumptions.
 LIST_TOOLBAR_ROWS = 2
+
+#: Minimum width of the editable title field. A frameless QLineEdit sizes to
+#: its content, so without a floor a recipe called "rc" would be a two-
+#: character click target.
+_NAME_FIELD_MIN_WIDTH = 220
 
 OBJ_RECIPE_LIST = "recipeList"
 OBJ_LIST_HEADER = "recipeListHeader"
@@ -339,6 +345,8 @@ class RecipesScreen(QWidget):
         super().__init__(parent)
         self._catalog = catalog if catalog is not None else builtin_catalog()
         self._specs = {spec.key: spec for spec in recipe_specs(self._catalog)}
+        #: The loaded PdkProfile, or None. Only ``choices_from`` rows read it.
+        self._profile: Any = None
         self._groups: dict[str, OptionGroup] = {}
         self._editors: dict[str, OptionEditor] = {}
 
@@ -494,11 +502,26 @@ class RecipesScreen(QWidget):
         row.setContentsMargins(theme.SPACE_MD, theme.SPACE_SM, theme.SPACE_MD, theme.SPACE_SM)
         row.setSpacing(theme.SPACE_MD)
 
-        self._name_label = ElidedLabel("", parent=header)
-        self._name_label.setStyleSheet(
-            f"font-size: {theme.FONT_SIZE_TITLE}px; font-weight: {theme.FONT_WEIGHT_BOLD};"
+        # The title is an editable field, not a label. ``name`` is the only
+        # thing about a recipe a user can rename -- ``recipe_id`` names the
+        # file and the cell bindings, so it stays fixed and is shown in the
+        # meta line beside this. Drawn frameless so it reads as the heading it
+        # is until you click into it; the artboard's title block is unchanged.
+        self._name_edit = QLineEdit("", header)
+        self._name_edit.setFrame(False)
+        self._name_edit.setPlaceholderText("Recipe name")
+        self._name_edit.setToolTip(
+            "Rename this recipe. The file name and the cell bindings follow "
+            "recipe_id, which does not change."
         )
-        row.addWidget(self._name_label, 0)
+        self._name_edit.setStyleSheet(
+            f"font-size: {theme.FONT_SIZE_TITLE}px;"
+            f" font-weight: {theme.FONT_WEIGHT_BOLD};"
+            f" background: transparent; padding: 0px;"
+        )
+        self._name_edit.setMinimumWidth(_NAME_FIELD_MIN_WIDTH)
+        self._name_edit.textEdited.connect(self._on_name_edited)
+        row.addWidget(self._name_edit, 0)
 
         self._meta_label = ElidedLabel("", parent=header)
         self._meta_label.setStyleSheet(
@@ -612,6 +635,38 @@ class RecipesScreen(QWidget):
         else:
             self.select_recipe(wanted)
 
+    def set_profile(self, profile: Any | None) -> None:
+        """Point every ``choices_from`` control at this PDK profile's tables.
+
+        Which corners exist, and which LVS deck variants were released, are
+        process facts. The catalog's static ``choices`` are one PDK's answer
+        and would be quietly wrong on the next one, so the controls for those
+        rows are refilled here from the profile that is actually loaded --
+        :func:`auto_ext.catalog.spec.choices_for` decides what that means, and
+        falls back to the catalog list when there is no profile.
+
+        The working copy is re-pushed afterwards: rebuilding a combo's item
+        list resets its index, and a recipe must not have its corner silently
+        changed by a profile arriving.
+        """
+
+        self._profile = profile
+        self._loading = True
+        try:
+            for key, editor in self._editors.items():
+                spec = self._specs[key]
+                if spec.choices_from is None:
+                    continue
+                setter = getattr(editor, "set_choices", None)
+                if setter is None:  # pragma: no cover - enum rows are combos
+                    continue
+                setter(choices_for(spec, profile))
+                path = spec.recipe_field_path
+                if self._working is not None and path is not None:
+                    editor.set_value(_get_path(self._working, path))
+        finally:
+            self._loading = False
+
     def recipes(self) -> list[Recipe]:
         return list(self._recipes)
 
@@ -697,6 +752,11 @@ class RecipesScreen(QWidget):
 
     def save_button(self) -> QPushButton:
         return self._save_button
+
+    def name_edit(self) -> QLineEdit:
+        """The editable recipe title in the form header."""
+
+        return self._name_edit
 
     def revert_button(self) -> QPushButton:
         return self._revert_button
@@ -822,6 +882,9 @@ class RecipesScreen(QWidget):
                     continue
                 editor.setEnabled(True)
                 editor.set_value(_get_path(self._working, path))
+            self._name_edit.setText(
+                self._working.name if self._working is not None else ""
+            )
             self._patch_strip.set_patches(
                 self._working.patches if self._working is not None else []
             )
@@ -869,6 +932,33 @@ class RecipesScreen(QWidget):
         if editor is not None:
             editor.set_invalid(False)
         self._recompute_dirty()
+
+    def _on_name_edited(self, text: str) -> None:
+        """Rename the working copy as the user types, list row included.
+
+        An empty box is a half-typed name, not a rename: ``Recipe.name`` is
+        ``min_length=1``, so the old name is held until there is a new one
+        rather than raising on every backspace to empty.
+        """
+
+        if self._loading or self._working is None:
+            return
+        name = text.strip()
+        if not name:
+            return
+        self._working.name = name
+        item = self._item_for(self._working.recipe_id)
+        if item is not None:
+            item.setText(0, name)
+            item.setToolTip(0, self._working.description or name)
+        self._recompute_dirty()
+
+    def _item_for(self, recipe_id: str) -> QTreeWidgetItem | None:
+        for index in range(self._list.topLevelItemCount()):
+            item = self._list.topLevelItem(index)
+            if item.data(0, Qt.UserRole) == recipe_id:
+                return item
+        return None
 
     def _on_patch_strip_toggled(self, expanded: bool) -> None:
         self._summary_label.set_full_text(self.options_summary_text())
@@ -1002,7 +1092,10 @@ class RecipesScreen(QWidget):
 
     def _refresh_header(self) -> None:
         has = self._working is not None
-        self._name_label.set_full_text(self._working.name if has else "No recipe selected")
+        self._name_edit.setEnabled(has)
+        self._name_edit.setPlaceholderText(
+            "Recipe name" if has else "No recipe selected"
+        )
         self._meta_label.set_full_text(self.header_meta_text())
         self._duplicate_button.setEnabled(has)
         self._delete_button.setEnabled(has)

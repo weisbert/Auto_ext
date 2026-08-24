@@ -3,7 +3,7 @@
 <outputView value="av_ext_red"/>
 <logVerboseLevel value="trace"/>
 <cpu value="1"/>
-<viewsToReduce value="av_extracted"/>
+<viewsToReduce value="av_ext"/>
 
 <!-- Parsing options -->
 <rModel value="analogLib/presistor/symbol"/>

@@ -482,6 +482,74 @@ def _with_inserted_line(rendered: str, line: str = "; typed by hand") -> str:
 # ---- the escape hatch -------------------------------------------------------
 
 
+@pytest.fixture
+def picks_first_file(monkeypatch: pytest.MonkeyPatch):
+    """Answer the "which generated file?" modal with the first entry.
+
+    The button opens four files' worth of choice now (si.env, lvs.qci,
+    quantus.ext.cmd, jivaro.xml); before it silently took si.env. Stubbed
+    rather than driven for the same reason ``RenderedFileEditor.exec_`` is:
+    an unanswered modal hangs the run instead of failing the test.
+    """
+
+    from auto_ext.ui.main_window import MainWindow
+
+    seen: list[list[str]] = []
+
+    def fake_ask(self, _recipe, labels, current):
+        seen.append(list(labels))
+        return current
+
+    monkeypatch.setattr(MainWindow, "_ask_which_plan", fake_ask)
+    return seen
+
+
+def test_edit_rendered_asks_which_of_the_generated_files_to_edit(
+    loaded_window: MainWindow, profile_env, picks_first_file, monkeypatch
+) -> None:
+    """It used to open si.env and offer no way to reach the other three."""
+
+    from auto_ext.ui.widgets import rendered_editor
+
+    monkeypatch.setattr(
+        rendered_editor.RenderedFileEditor, "exec_", lambda self: self.reject() or 0
+    )
+    loaded_window.recipes_screen.edit_rendered_requested.emit("rc-coupled-typical")
+
+    assert picks_first_file, "the user was never asked which file"
+    offered = picks_first_file[-1]
+    assert len(offered) == 4
+    assert any("si.env" in label for label in offered)
+    assert any("quantus.ext.cmd" in label for label in offered)
+    assert any("lvs.qci" in label for label in offered)
+    assert any("jivaro.xml" in label for label in offered)
+
+
+def test_edit_rendered_does_not_ask_when_there_is_only_one_file(
+    loaded_window: MainWindow, profile_env, picks_first_file, monkeypatch
+) -> None:
+    """One target, no modal: there is nothing to choose."""
+
+    from auto_ext.ui.widgets import rendered_editor
+
+    monkeypatch.setattr(
+        rendered_editor.RenderedFileEditor, "exec_", lambda self: self.reject() or 0
+    )
+    from auto_ext.model.common import Stage
+
+    window = loaded_window
+    recipe = window.controller.recipe("rc-coupled-typical")
+    # model_copy skips validation, so the enum has to be the real one: a raw
+    # "jivaro" string reaches the renderer and blows up on ``stage.value``.
+    window.controller.stage_recipe(
+        recipe.model_copy(update={"stages": [Stage.JIVARO]})
+    )
+
+    window.recipes_screen.edit_rendered_requested.emit("rc-coupled-typical")
+
+    assert picks_first_file == [], "a single target must not raise a chooser"
+
+
 def test_edit_rendered_without_the_pdk_environment_refuses_and_names_the_vars(
     loaded_window: MainWindow, dialogs, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -514,7 +582,7 @@ def test_edit_rendered_without_the_pdk_environment_refuses_and_names_the_vars(
 
 
 def test_edit_rendered_stores_the_edit_on_the_recipe(
-    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env, dialogs
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env, picks_first_file, dialogs
 ) -> None:
     """The whole escape hatch, end to end: render, edit, capture, stage."""
 
@@ -535,12 +603,16 @@ def test_edit_rendered_stores_the_edit_on_the_recipe(
     assert dialogs == [], dialogs
     updated = window.controller.recipe("rc-coupled-typical")
     assert updated.manual_edit_count == 1
-    assert window.controller.pending_keys() == ["recipe:rc-coupled-typical"]
+    # Written, not merely staged: the screen reloads from the controller right
+    # after this and would otherwise go back to showing "saved" with its Save
+    # button disabled, i.e. claim the edit was safe while it was not.
+    assert window.controller.pending_keys() == []
+    assert window.controller.is_dirty is False
     assert "manual edit" in window.shell.status_left()
 
 
 def test_edit_rendered_with_no_change_stores_nothing(
-    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env, picks_first_file
 ) -> None:
     from auto_ext.ui.widgets import rendered_editor
 
@@ -556,7 +628,7 @@ def test_edit_rendered_with_no_change_stores_nothing(
 
 
 def test_a_stored_edit_survives_a_save_and_reload(
-    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env, picks_first_file
 ) -> None:
     from auto_ext.ui.widgets import rendered_editor
 
@@ -569,8 +641,12 @@ def test_a_stored_edit_survives_a_save_and_reload(
 
     window = loaded_window
     window.recipes_screen.edit_rendered_requested.emit("rc-coupled-typical")
-    assert window.save() is True
+    # No explicit save: storing the edit is what writes it now, and a second
+    # save has nothing left to do.
+    assert window.save() is False
+    assert window.controller.is_dirty is False
 
+    window.controller.reload()
     reloaded = window.controller.recipe("rc-coupled-typical")
     assert reloaded.manual_edit_count == 1
     assert reloaded.patches[0].hunks[0].after.strip() == "; typed by hand"
@@ -635,7 +711,11 @@ def test_opening_the_wizard_with_pending_edits_asks_first(
 
 
 def test_an_edit_the_patch_format_cannot_anchor_is_refused_in_plain_words(
-    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, profile_env, dialogs
+    loaded_window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    profile_env,
+    picks_first_file,
+    dialogs,
 ) -> None:
     """A line appended past the end of the file has no context after it.
 

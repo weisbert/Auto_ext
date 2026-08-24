@@ -54,7 +54,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtWidgets import QFileDialog, QMainWindow, QMessageBox
+from PyQt5.QtWidgets import (
+    QFileDialog,
+    QInputDialog,
+    QMainWindow,
+    QMessageBox,
+)
 
 from auto_ext.core.errors import AutoExtError
 from auto_ext.model.recipe import Recipe, recipe_from_catalog
@@ -191,6 +196,7 @@ class MainWindow(QMainWindow):
         cells.edit_rejected.connect(self._set_status)
         cells.import_requested.connect(self._open_init_wizard)
         cells.run_requested.connect(self._on_run_requested)
+        cells.save_requested.connect(self.save)
         cells.run_finished.connect(self._on_run_finished)
         cells.log_path_changed.connect(self._log_view.set_active_log)
         cells.open_log_requested.connect(self._open_path)
@@ -198,6 +204,12 @@ class MainWindow(QMainWindow):
         cells.selection_changed.connect(self._on_cells_selection_changed)
 
         recipes = self._recipes
+        # Every edit reaches the controller, not only the ones Save is pressed
+        # on. Without this the Recipes screen said "unsaved" while the
+        # controller was clean, so the window title had no star, File -> Save
+        # was greyed out, and closing the window threw the edit away with
+        # nothing to warn about -- the screen was the only thing that knew.
+        recipes.dirty_changed.connect(self._on_recipe_dirty_changed)
         recipes.save_requested.connect(self._on_recipe_save_requested)
         recipes.revert_requested.connect(self._on_recipe_revert_requested)
         recipes.new_requested.connect(self._on_recipe_new_requested)
@@ -252,7 +264,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         quit_action = file_menu.addAction("&Quit")
         quit_action.setShortcut("Ctrl+Q")
-        quit_action.triggered.connect(self.close)
+        quit_action.triggered.connect(self._on_quit)
 
         view_menu = self.menuBar().addMenu("&View")
         setup_action = view_menu.addAction("&Setup drawer")
@@ -287,6 +299,10 @@ class MainWindow(QMainWindow):
             self._cells.set_empty_state_hint(
                 "" if controller.can_run else self._cannot_run_hint()
             )
+            # Before set_recipes: the corner control's item list comes from
+            # the profile, and a recipe pushed into an empty list would show
+            # its corner as an unknown extra entry.
+            self._recipes.set_profile(controller.profile)
             self._recipes.set_recipes(controller.recipes)
         finally:
             self._pushing = False
@@ -321,6 +337,7 @@ class MainWindow(QMainWindow):
         self._set_status(f"error - {message.splitlines()[0]}")
 
     def _on_dirty_changed(self, dirty: bool) -> None:
+        self._cells.set_unsaved(dirty)
         self.setWindowTitle(f"{self._TITLE_BASE}{' *' if dirty else ''}")
         self._shell.set_status(right="unsaved changes" if dirty else "")
         self._save_action.setEnabled(dirty)
@@ -373,19 +390,59 @@ class MainWindow(QMainWindow):
         if recipe is not None:
             self._controller.stage_recipe(recipe)
 
-    def _on_recipe_save_requested(self, recipe: object) -> None:
-        if isinstance(recipe, Recipe):
-            self._controller.stage_recipe(recipe)
-            self._push_recipe_choices()
+    def _on_recipe_dirty_changed(self, dirty: bool) -> None:
+        """Stage the working copy the moment the screen reports an edit.
 
-    def _on_recipe_revert_requested(self, recipe_id: str) -> None:
-        """Throw the working copy away and reload from the controller.
-
-        A staged edit is *not* dropped here: Revert on the screen means
-        "undo what I typed since the last Save", and the controller's queue
-        is what Save means. Use File -> Revert pending edits for the queue.
+        Only on the rising edge: the screen also reports *clean*, and it does
+        so from ``_load`` while the host is pushing documents in, which would
+        otherwise stage the recipe that was just loaded and open the window
+        already dirty. Going clean is either a save (the queue is already
+        flushed) or a revert (handled by its own slot).
         """
 
+        if dirty and not self._pushing:
+            self._stage_current_recipe()
+
+    def _on_recipe_save_requested(self, recipe: object) -> None:
+        """The Recipes screen's Save button means Save: stage it AND write it.
+
+        This used to stage only. Two controls were called Save, they did
+        different things, and the visible one -- the primary button on the
+        screen the user is looking at -- was the one that never reached the
+        disk: it queued the recipe and left the screen still showing
+        ``unsaved``, so the edit came back missing on the next launch. Only
+        ``File -> Save`` wrote anything.
+
+        A ``save()`` here flushes the controller's whole queue, not this
+        recipe alone, because the queue is the unit the controller commits
+        and there is no per-document write. That matches the window title's
+        single dirty star and ``File -> Save``; it does mean a staged Cells
+        edit rides along, which is why the status line names what was written.
+        """
+
+        if not isinstance(recipe, Recipe):
+            return
+        self._controller.stage_recipe(recipe)
+        self._push_recipe_choices()
+        if not self.save():
+            return
+        # load() inside save() re-pushed every screen and dropped the
+        # selection back to the first row; put the user back where they were.
+        self._recipes.set_recipes(self._controller.recipes, select=recipe.recipe_id)
+        self._set_status(f"saved {recipe.recipe_id}")
+
+    def _on_recipe_revert_requested(self, recipe_id: str) -> None:
+        """Throw the working copy away and reload from disk.
+
+        The staged edit goes too. Revert on the screen means "undo what I
+        typed", and every keystroke stages now, so the queue entry IS what
+        was typed -- keeping it would redraw the screen from the very edit
+        being undone, i.e. a Revert button that does nothing.
+        ``File -> Revert pending edits`` is still the way to drop the whole
+        queue, this one recipe included.
+        """
+
+        self._controller.unstage_recipe(recipe_id)
         self._recipes.set_recipes(self._controller.recipes, select=recipe_id)
 
     def _on_recipe_new_requested(self) -> None:
@@ -491,8 +548,9 @@ class MainWindow(QMainWindow):
                 f"Recipe {recipe_id!r} declares no stage that generates a file.",
             )
             return
-        plan = self._preferred_plan(plans, recipe)
-
+        # Env first, picker second. Asking the user which of four files to
+        # edit and only then telling them the PDK is not sourced wastes the
+        # one decision they made; the refusal does not depend on the answer.
         resolution = patch_capture.resolve_render_env(profile, workspace)
         if resolution.missing:
             # Refused rather than rendered: an unset variable substitutes as
@@ -507,6 +565,10 @@ class MainWindow(QMainWindow):
                 + "\n\nSource the PDK setup and re-check in Setup, or pin the "
                 "values in the profile's env_overrides.",
             )
+            return
+
+        plan = self._choose_plan(plans, recipe)
+        if plan is None:
             return
         try:
             preview = patch_capture.build_preview(
@@ -548,10 +610,18 @@ class MainWindow(QMainWindow):
             return
         updated = patch_capture.with_patch(recipe, patch)
         self._controller.stage_recipe(updated)
+        # Write it. Staging alone left the controller dirty while the Recipes
+        # screen -- reloaded from the controller a line below -- went back to
+        # showing "saved" with its Save button DISABLED, so the screen said
+        # the edit was safe and offered no way to make it so. The user pressed
+        # "Store this edit" in a modal; that is the commit gesture, and the
+        # screen's own Save button means write since this round.
+        written = self.save()
         self._recipes.set_recipes(self._controller.recipes, select=recipe_id)
+        count = len(patch.hunks)
         self._set_status(
-            f"stored {len(patch.hunks)} manual edit(s) on {recipe_id} - "
-            f"Save writes them to the recipe file"
+            f"stored {count} manual edit(s) on {recipe_id}"
+            + ("" if written else " - File -> Save writes them to the recipe file")
         )
 
     @staticmethod
@@ -566,14 +636,67 @@ class MainWindow(QMainWindow):
         enabled = book.enabled_cells()
         return enabled[0] if enabled else book.cells[0]
 
-    @staticmethod
-    def _preferred_plan(plans: list[Any], recipe: Recipe) -> Any:
-        """The file to open: the one that already carries a patch, else the first."""
+    def _choose_plan(self, plans: list[Any], recipe: Recipe) -> Any | None:
+        """Ask which generated file to edit. ``None`` means the user cancelled.
 
-        for plan in plans:
-            if recipe.patch_for(plan.stage, plan.spec.template_id) is not None:
-                return plan
-        return plans[0]
+        This used to be :meth:`_preferred_plan`, which took ``plans[0]``
+        without asking. A recipe running the whole flow generates four files
+        -- ``si.env``, ``lvs.qci``, ``quantus.ext.cmd``, ``jivaro.xml`` --
+        and ``plans[0]`` is always ``si.env`` because the list is in stage
+        order, so the button opened the si netlister runset no matter which
+        file the user meant and offered no way to reach the other three.
+
+        One file, no dialog: with a single target there is nothing to choose
+        and a modal would be pure friction.
+        """
+
+        if len(plans) == 1:
+            return plans[0]
+        labels = [self._plan_label(plan, recipe) for plan in plans]
+        # Preselect the file that already carries manual edits -- with one
+        # patch mounted, that is nearly always the one being edited again.
+        current = next(
+            (
+                index
+                for index, plan in enumerate(plans)
+                if recipe.patch_for(plan.stage, plan.spec.template_id) is not None
+            ),
+            0,
+        )
+        index = self._ask_which_plan(recipe, labels, current)
+        return None if index is None else plans[index]
+
+    def _ask_which_plan(
+        self, recipe: Recipe, labels: list[str], current: int
+    ) -> int | None:
+        """The modal itself, alone, so a test can answer it in one line.
+
+        Separated from :meth:`_choose_plan` for the same reason
+        ``RenderedFileEditor.exec_`` is stubbed rather than driven: a modal
+        that nothing answers does not fail a test, it hangs the run.
+        """
+
+        chosen, ok = QInputDialog.getItem(
+            self,
+            "Edit rendered file",
+            f"Recipe {recipe.recipe_id!r} generates {len(labels)} files. "
+            "Which one do you want to edit?",
+            labels,
+            current,
+            False,
+        )
+        return labels.index(chosen) if ok else None
+
+    @staticmethod
+    def _plan_label(plan: Any, recipe: Recipe) -> str:
+        """``quantus.ext.cmd - quantus stage - 2 manual edits``."""
+
+        patch = recipe.patch_for(plan.stage, plan.spec.template_id)
+        parts = [str(plan.spec.id.value), f"{plan.stage.value} stage"]
+        if patch is not None:
+            count = len(patch.hunks)
+            parts.append(f"{count} manual edit" + ("" if count == 1 else "s"))
+        return "  -  ".join(parts)
 
     # ---- setup drawer ----------------------------------------------------
 
@@ -653,6 +776,69 @@ class MainWindow(QMainWindow):
         if choice != QMessageBox.Save:
             return False
         return controller.save(force=True)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt's name
+        """Guard a *spontaneous* close; accept a programmatic one.
+
+        Spontaneous means the window manager sent it -- the title-bar X, or
+        the desktop asking everything to quit. That is the path where a user
+        can lose work without meaning to, so it is the path that asks. A
+        programmatic ``close()`` is accepted as given: the only one this app
+        makes is ``File -> Quit``, which runs :meth:`request_close` first, and
+        a caller that closes the window without asking has said what it wants.
+
+        The distinction is not a testing convenience, though it does keep a
+        harness that closes widgets for cleanup from raising a modal nothing
+        can answer. It is what ``spontaneous`` is for: the difference between
+        "the user reached for the X" and "some code called close()".
+        """
+
+        if event.spontaneous() and not self.request_close():
+            event.ignore()
+            return
+        event.accept()
+
+    def _on_quit(self) -> None:
+        """File -> Quit: ask first, then close for real."""
+
+        if self.request_close():
+            self.close()
+
+    def request_close(self) -> bool:
+        """Everything that has to happen before the window may go away.
+
+        Returns whether closing may proceed. Cancels a running batch (after
+        asking) and offers to save pending edits. ``File -> Quit`` calls this
+        and then closes; the window manager's X reaches it through
+        :meth:`closeEvent`.
+
+        Order matters. The run question comes first because a run is the
+        expensive thing and cancelling it is the decision the user has to make
+        with a clear head; only then is it worth asking about files.
+        """
+
+        if self._cells.is_running():
+            choice = QMessageBox.question(
+                self,
+                "A run is still going",
+                "Closing cancels it. The stages already finished keep their "
+                "output; the one in flight does not.\n\nClose anyway?",
+                QMessageBox.Close | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if choice != QMessageBox.Close:
+                return False
+            if not self._cells.stop_run_and_wait():
+                # The runner is inside a subprocess that has not come back.
+                # Refuse rather than exit over a live thread.
+                self._warn(
+                    "The run has not stopped yet",
+                    "Cancellation was requested but the runner is still "
+                    "inside a tool call. Wait for it to come back, then "
+                    "close again.",
+                )
+                return False
+        return self._confirm_discard("Closing the window")
 
     def _confirm_discard(self, what: str) -> bool:
         """Save / discard / cancel when pending edits would be lost."""

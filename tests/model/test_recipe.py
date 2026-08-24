@@ -222,7 +222,9 @@ def test_recipe_from_catalog_reproduces_todays_values() -> None:
     assert recipe.extraction.max_fracture_length == "infinite"
     assert recipe.output.common.include_parasitic_res_model == "comment"
     assert recipe.output.dspf.output_xy[0] == "CANONICAL_RES"
-    assert recipe.reduction.views_to_reduce == "av_extracted"
+    # Unset, not "av_extracted": the literal was the live Jivaro bug, and the
+    # view to reduce now follows the DUT's out_file. See DUT_FALLBACK_FIELDS.
+    assert recipe.reduction.views_to_reduce is None
     assert recipe.lvs.report_options == "S"
 
 
@@ -236,9 +238,10 @@ def test_the_only_defaults_that_diverge_from_the_catalog_are_the_profile_fallbac
         if opt.recipe_field_path is not None
         and _get(bare, opt.recipe_field_path) != _get(from_catalog, opt.recipe_field_path)
     }
-    # extraction.corner is in PROFILE_FALLBACK_FIELDS too but has no catalog
-    # row of its own (the literal belongs to the profile), so it cannot show
-    # up as a divergence here.
+    # extraction.corner has a catalog row of its own now (extraction_corner,
+    # the recipe's semantic half of the corner seam), and its catalog default
+    # is null -- the same "ask the profile" the model default means -- so it
+    # is a profile fallback that does NOT diverge.
     assert diverged == PROFILE_FALLBACK_FIELDS - {"extraction.corner"}
 
 

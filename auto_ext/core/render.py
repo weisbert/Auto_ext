@@ -469,14 +469,25 @@ def _pdk_context(
     }
 
 
-def _recipe_tree(recipe: Recipe, corner: ResolvedCorner) -> dict[str, Any]:
-    """``recipe.*``: every field, with the corner translation folded in.
+def _recipe_tree(
+    recipe: Recipe, corner: ResolvedCorner, dut: DutSnapshot
+) -> dict[str, Any]:
+    """``recipe.*``: every field, with the corner and DUT fallbacks folded in.
 
     ``extraction.corner`` and ``extraction.temperature_c`` are the two fields
     allowed to be ``None`` in the model and resolved through the profile
     (``auto_ext.model.recipe.PROFILE_FALLBACK_FIELDS``). The tree carries the
     *resolved* values so no template needs to know about the fallback, while
     ``pdk.corner`` carries the tool literal.
+
+    ``reduction.views_to_reduce`` is the same idea against the DUT rather than
+    the profile (``auto_ext.model.recipe.DUT_FALLBACK_FIELDS``): unset means
+    "the view Quantus just wrote", which is ``out_file`` -- the same name
+    ``inputView`` and ``-view_name`` already carry. It resolves to ``None``
+    when the cell has no ``out_file``, exactly as the flat ``out_file`` alias
+    beside it does; a DUT with no extracted view is a reduction that should
+    not have been scheduled, and that belongs to the runner's stage gate, not
+    to a silent substitution here.
     """
 
     tree = _model_tree(recipe)
@@ -488,6 +499,8 @@ def _recipe_tree(recipe: Recipe, corner: ResolvedCorner) -> dict[str, Any]:
     tree["id"] = recipe.recipe_id
     tree["extraction"]["corner"] = corner.name
     tree["extraction"]["temperature_c"] = corner.temperature_c
+    if tree["reduction"].get("views_to_reduce") is None:
+        tree["reduction"]["views_to_reduce"] = dut.out_file
     return tree
 
 
@@ -568,7 +581,7 @@ def build_context(
             ),
         },
         "pdk": _pdk_context(profile, recipe, corner, env),
-        "recipe": _recipe_tree(recipe, corner),
+        "recipe": _recipe_tree(recipe, corner, dut),
         "run": {
             "id": run.run_id,
             "slug": run.run_slug,

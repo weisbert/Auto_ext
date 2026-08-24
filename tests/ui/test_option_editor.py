@@ -35,6 +35,8 @@ from auto_ext.ui.widgets.option_editor import (  # noqa: E402
     QUESTION_GLYPH,
     BoolOptionEditor,
     ChoiceOptionEditor,
+    FreeChoiceOptionEditor,
+    MultiChoiceOptionEditor,
     EditorKind,
     ElidedLabel,
     ListOptionEditor,
@@ -114,12 +116,14 @@ def test_a_likely_enum_is_still_a_dropdown(qtbot) -> None:
     assert isinstance(_make(qtbot, one), ChoiceOptionEditor)
 
 
-def test_a_guessed_enum_is_free_text_with_the_guesses_as_a_hint(qtbot) -> None:
-    """DECISIONS.md #19: never hand the user a menu of invented spellings.
+def test_a_guessed_enum_is_an_editable_dropdown(qtbot) -> None:
+    """DECISIONS.md #19, REVISED 2026-08-24 on the user's ruling.
 
-    The members are still shown, because a guess is worth more than nothing
-    -- but as a hint beside a text box, where being wrong costs the user one
-    correction rather than one hidden dead end.
+    The old rule was a bare text box: never hand the user a menu of invented
+    spellings. In use that was worse, not better -- a blank box gives no idea
+    what a legal value even looks like, so the user has to invent a spelling
+    from nothing. An editable combo is both halves: the guesses are on the
+    drop-down, and anything else can still be typed.
     """
 
     one = spec(
@@ -129,16 +133,18 @@ def test_a_guessed_enum_is_free_text_with_the_guesses_as_a_hint(qtbot) -> None:
         default="auCdl",
     )
     assert one.free_input is True
-    assert editor_kind(one) is EditorKind.TEXT
+    assert editor_kind(one) is EditorKind.COMBO_FREE
 
     editor = _make(qtbot, one)
-    assert isinstance(editor, TextOptionEditor)
-    assert isinstance(editor.line_edit(), QLineEdit)
+    assert isinstance(editor, FreeChoiceOptionEditor)
+    assert editor.combo().isEditable() is True
+    assert editor.choices() == ["auCdl", "spectre", "hspiceD"]
     assert editor.value() == "auCdl"
 
+    # The hint no longer repeats the members -- they are in the control now --
+    # but it must still say the list is not authoritative.
     hint = hint_text(one)
-    assert "guessed" in hint
-    assert "auCdl" in hint and "spectre" in hint
+    assert "guessed" in hint and "other values accepted" in hint
     assert "auCdl" in option_tooltip(one)
 
 
@@ -152,8 +158,10 @@ def test_a_guessed_enum_accepts_a_spelling_no_one_predicted(qtbot) -> None:
             default="auCdl",
         ),
     )
-    editor.line_edit().setText("auLvs")
+    editor.combo().setCurrentText("auLvs")
     assert editor.value() == "auLvs"
+    # Typed, not adopted: this recipe's value is not a new catalog member.
+    assert editor.choices() == ["auCdl"]
 
 
 def test_numbers_get_a_type_validator(qtbot) -> None:
@@ -693,7 +701,7 @@ def test_every_recipe_owned_catalog_row_builds_a_control(qtbot) -> None:
     assert grid.option_count() == len(rows)
 
 
-def test_the_catalog_has_guessed_enums_and_none_of_them_is_a_dropdown() -> None:
+def test_the_catalog_has_guessed_enums_and_every_one_is_an_editable_dropdown() -> None:
     catalog = builtin_catalog()
     guessed = [
         opt
@@ -701,4 +709,102 @@ def test_the_catalog_has_guessed_enums_and_none_of_them_is_a_dropdown() -> None:
         if opt.type is OptionType.ENUM and opt.choices_confidence is Confidence.GUESS
     ]
     assert guessed, "the fixture this rule exists for has disappeared"
-    assert all(editor_kind(opt) is EditorKind.TEXT for opt in guessed)
+    assert all(editor_kind(opt) is EditorKind.COMBO_FREE for opt in guessed)
+
+
+def test_a_closed_list_is_a_row_of_check_boxes(qtbot) -> None:
+    """"General里面的stage也是blank填写...应该是checkbox才对"."""
+
+    one = spec(
+        type=OptionType.LIST,
+        choices=["si", "strmout", "calibre"],
+        choices_confidence=Confidence.CERTAIN,
+        default=["si", "calibre"],
+    )
+    assert editor_kind(one) is EditorKind.CHECKS
+
+    editor = _make(qtbot, one)
+    assert isinstance(editor, MultiChoiceOptionEditor)
+    assert list(editor.check_boxes()) == ["si", "strmout", "calibre"]
+    assert editor.value() == ["si", "calibre"]
+    assert editor.other_edit() is None, "a closed set needs no escape hatch"
+
+    editor.check_boxes()["strmout"].setChecked(True)
+    # Catalog order, not click order: the runner reads stages as a sequence.
+    assert editor.value() == ["si", "strmout", "calibre"]
+
+
+def test_a_guessed_list_gets_boxes_plus_a_field_for_what_nobody_predicted(
+    qtbot,
+) -> None:
+    one = spec(
+        type=OptionType.LIST,
+        choices=["CANONICAL_RES", "DIODE"],
+        choices_confidence=Confidence.GUESS,
+        default=["CANONICAL_RES"],
+    )
+    editor = _make(qtbot, one)
+    assert isinstance(editor, MultiChoiceOptionEditor)
+    other = editor.other_edit()
+    assert other is not None
+
+    other.setText("MOSCAP, BIPOLAR")
+    assert editor.value() == ["CANONICAL_RES", "MOSCAP", "BIPOLAR"]
+
+    # And a value from a hand-written recipe round-trips into that field
+    # rather than being dropped or turned into a new box.
+    editor.set_value(["DIODE", "SOMETHING_ELSE"])
+    assert editor.value() == ["DIODE", "SOMETHING_ELSE"]
+    assert list(editor.check_boxes()) == ["CANONICAL_RES", "DIODE"]
+
+
+def test_a_list_with_no_member_table_stays_a_text_field(qtbot) -> None:
+    """There is nothing to draw boxes for, so free text is the honest control."""
+
+    one = spec(
+        type=OptionType.LIST,
+        choices=None,
+        choices_confidence=Confidence.LIKELY,
+        default=["auCdl", "schematic"],
+    )
+    assert editor_kind(one) is EditorKind.LIST
+    assert isinstance(_make(qtbot, one), ListOptionEditor)
+
+
+def test_a_nullable_row_says_what_leaving_it_empty_means(qtbot) -> None:
+    """The fallback existed in the model and was invisible in the form.
+
+    ``temperature_c`` shows 55.0 and nothing told the user that clearing the
+    box hands the decision to the corner.
+    """
+
+    one = spec(
+        type=OptionType.FLOAT,
+        choices_confidence=Confidence.CERTAIN,
+        default=55.0,
+        nullable=True,
+        placeholder="the temperature this corner suggests",
+    )
+    hint = hint_text(one)
+    assert "default 55" in hint
+    assert "empty = the temperature this corner suggests" in hint
+
+
+def test_an_empty_string_default_is_spelled_out_not_left_blank(qtbot) -> None:
+    """"default " with nothing after it is a blank hint beside a blank box."""
+
+    one = spec(type=OptionType.STR, choices_confidence=Confidence.CERTAIN, default="")
+    assert "default (empty)" in hint_text(one)
+
+
+def test_no_enum_anywhere_in_the_catalog_is_a_bare_text_box() -> None:
+    """The office report this rule was rewritten for.
+
+    "很多参数你选择的是 blank 填写" -- a value with a finite set of legal
+    spellings was being asked for as free text, so a user who does not already
+    know the spelling has no way to find it out from the form.
+    """
+
+    catalog = builtin_catalog()
+    enums = [opt for opt in catalog.options if opt.type is OptionType.ENUM]
+    assert [o.key for o in enums if editor_kind(o) is EditorKind.TEXT] == []

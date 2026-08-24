@@ -78,7 +78,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
@@ -104,6 +104,7 @@ from auto_ext.model.run import JivaroSnapshot, RecipeSnapshot
 
 __all__ = [
     "CATALOG_EXEMPT_FIELDS",
+    "DUT_FALLBACK_FIELDS",
     "PROFILE_FALLBACK_FIELDS",
     "RECIPE_SCHEMA_VERSION",
     "BaseFingerprint",
@@ -154,6 +155,19 @@ PROFILE_FALLBACK_FIELDS: frozenset[str] = frozenset(
     }
 )
 
+#: Recipe fields whose model default is ``None`` meaning "take it from the
+#: DUT". The profile equivalent is :data:`PROFILE_FALLBACK_FIELDS`; this set
+#: is separate because the resolution needs the cell row, not the profile, and
+#: therefore happens in :func:`auto_ext.core.render._recipe_tree` against the
+#: ``DutSnapshot`` rather than in ``resolve_corner``.
+DUT_FALLBACK_FIELDS: frozenset[str] = frozenset(
+    {
+        #: "the view Quantus just wrote" -- the cell's ``out_file``. See the
+        #: field's own comment for why the old literal was a bug.
+        "reduction.views_to_reduce",
+    }
+)
+
 #: Recipe fields with no catalog row, and why. Everything else must have one.
 CATALOG_EXEMPT_FIELDS: frozenset[str] = frozenset(
     {
@@ -168,8 +182,6 @@ CATALOG_EXEMPT_FIELDS: frozenset[str] = frozenset(
         "updated_at",
         # The escape hatch. By definition it holds what the catalog cannot.
         "patches",
-        # Selector for a profile-owned literal; see PROFILE_FALLBACK_FIELDS.
-        "extraction.corner",
     }
 )
 
@@ -447,16 +459,40 @@ class ReductionSettings(Base):
     reduce_floating_nets: bool = False
     decoupling_auto_threshold: bool = False
     log_verbose_level: str = "trace"
-    #: SUSPECTED LIVE BUG, deliberately preserved. Three places name the view
-    #: to work on: ``inputView`` uses ``out_file``, Quantus ``-view_name`` uses
-    #: ``out_file``, and this one is a separate literal while both shipped task
-    #: tables set ``out_file`` to "av_ext". Jivaro is probably being pointed at
-    #: a view that does not exist. Guessing the fix would be worse than leaving
-    #: it visible; see OFFICE_TODO.md.
-    views_to_reduce: str = "av_extracted"
+    #: Which view Jivaro reduces. ``None`` -- the default -- means "the view
+    #: Quantus just wrote", i.e. the cell's ``out_file``, which is also what
+    #: ``inputView`` and Quantus ``-view_name`` already use.
+    #:
+    #: RESOLVED 2026-08-24. This was the catalog's most suspicious row: it
+    #: held the separate literal ``"av_extracted"`` while both shipped task
+    #: tables set ``out_file`` to ``"av_ext"``, so Jivaro was being pointed at
+    #: a view that does not exist. In a run that has just extracted, the view
+    #: to reduce is *necessarily* the extraction output, so the two cannot
+    #: legitimately differ and the literal was never a setting.
+    #:
+    #: It stays overridable rather than being deleted: reducing a view some
+    #: earlier run produced, without re-extracting, is the one case where an
+    #: explicit name is right. Set it and it wins; leave it unset and it
+    #: follows the DUT. :func:`auto_ext.core.render._recipe_tree` resolves it.
+    views_to_reduce: str | None = None
     #: ``outputView`` = ``out_file`` + this. The reduced view is the one
     #: post-layout simulation actually runs on, so its name matters.
     output_view_suffix: str = "_red"
+
+    @field_validator("views_to_reduce", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: Any) -> Any:
+        """``""`` means unset, not a view called the empty string.
+
+        A GUI that clears a text box writes ``""``, and ``""`` stored here
+        would defeat the DUT fallback in
+        :func:`auto_ext.core.render._recipe_tree` and render an empty
+        ``viewsToReduce``. Same rule ``CellEntry`` applies to ``out_file``.
+        """
+
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class RunPolicy(Base):

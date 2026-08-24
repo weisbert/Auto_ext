@@ -419,6 +419,24 @@ class ConfigController(QObject):
             return
         self._stage(key, None)
 
+    def unstage_recipe(self, recipe_id: str) -> bool:
+        """Drop one recipe's staged edit. Returns whether there was one.
+
+        The per-document half of :meth:`revert`. The Recipes screen's Revert
+        button means "undo what I typed", and since every keystroke stages,
+        what was typed IS the queue entry -- leaving it there made Revert
+        redraw the screen from the very edit it was undoing.
+        """
+
+        key = f"recipe:{recipe_id}"
+        if key not in self._pending:
+            return False
+        was_dirty = self.is_dirty
+        del self._pending[key]
+        if was_dirty and not self.is_dirty:
+            self.dirty_changed.emit(False)
+        return True
+
     def revert(self) -> None:
         """Discard every staged edit; keep the loaded documents."""
 

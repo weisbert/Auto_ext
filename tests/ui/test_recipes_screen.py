@@ -52,6 +52,8 @@ from auto_ext.ui.screens.recipes_screen import (  # noqa: E402
 from auto_ext.ui.widgets.option_editor import (  # noqa: E402
     BoolOptionEditor,
     ChoiceOptionEditor,
+    FreeChoiceOptionEditor,
+    MultiChoiceOptionEditor,
     NumberOptionEditor,
     TextOptionEditor,
 )
@@ -207,10 +209,23 @@ def test_the_control_type_follows_the_catalog(qtbot) -> None:
     screen = _screen(qtbot)
     assert isinstance(screen.editor("min_res_ohm"), NumberOptionEditor)
     assert isinstance(screen.editor("exclude_self_cap"), BoolOptionEditor)
-    # The only enum in the catalog whose value set is better than a guess.
+    # A closed value set -> a closed drop-down.
     assert isinstance(screen.editor("lvs_deck_variant"), ChoiceOptionEditor)
-    # ... and one whose value set is a guess, which must stay free text.
-    assert isinstance(screen.editor("netlist_simulator"), TextOptionEditor)
+    # A guessed one -> still a drop-down, but editable: the guesses are worth
+    # offering, and they are not worth trapping the user inside.
+    simulator = screen.editor("netlist_simulator")
+    assert isinstance(simulator, FreeChoiceOptionEditor)
+    assert simulator.combo().isEditable() is True
+    # A closed LIST -> one check box per member, not a comma-separated string.
+    stages = screen.editor("stages")
+    assert isinstance(stages, MultiChoiceOptionEditor)
+    assert list(stages.check_boxes()) == [
+        "si",
+        "strmout",
+        "calibre",
+        "quantus",
+        "jivaro",
+    ]
 
 
 def test_unconfirmed_rows_are_marked(qtbot) -> None:

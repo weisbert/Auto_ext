@@ -27,9 +27,24 @@
 # type                str | int | float | bool | enum | list | path | structural
 # choices             candidate legal values. Read them WITH
 #                     choices_confidence: ``guess`` means "do not build a combo
-#                     box out of this" (DECISIONS.md #19) -- the UI renders
-#                     free text plus the default, and the choices stay here as
-#                     documented candidates.
+#                     box out of this" -- but see DECISIONS.md #19, REVISED
+#                     2026-08-24: it now means an EDITABLE combo box. The
+#                     members are offered so there is always something legal-
+#                     looking to pick, and anything else can still be typed,
+#                     so a wrong guess here cannot lock a user out of the
+#                     spelling their tool wants. A bare text box, which is
+#                     what this used to mean, told the user nothing at all.
+# choices_from        a PdkProfile table that supersedes ``choices`` once a
+#                     profile is loaded: profile.corners /
+#                     profile.lvs_decks.variants. ``choices`` stays as the
+#                     no-profile fallback and as the record of what one real
+#                     PDK answered. Which corners exist is a process fact, so
+#                     freezing them in this file is right for exactly one PDK.
+# nullable            the model field takes null, and null means "resolve it
+#                     elsewhere" (the profile for a corner, the DUT for the
+#                     view to reduce). The form shows an explicit
+#                     "(from the profile)" entry, not an empty control.
+# placeholder         grey text for an empty control when ``default`` is null.
 # choices_confidence  certain | likely | guess -- how sure the VALUE SET is.
 #                     Deliberately NOT the same column as ``observed``: a value
 #                     can be certainly hardcoded (observed) while its legal
@@ -85,7 +100,7 @@ schema_version: 1
 
 # Bumped whenever the DATA below changes. TemplatePatch.base.catalog_version
 # records it, so a conflict report can name the catalog that moved.
-catalog_version: "2026.08.21"
+catalog_version: "2026.08.24"
 
 targets:
   - id: si.env
@@ -884,6 +899,7 @@ options:
     owner: recipe
     type: enum
     choices: [wodio, widio]
+    choices_from: profile.lvs_decks.variants
     choices_confidence: certain
     default: wodio
     currently: manifest_knob
@@ -2659,6 +2675,41 @@ options:
       - {target: quantus.dspf.cmd, section: output_setup, option: -temporary_directory_name, line: 60}
     why: Determined by the PDK query_cmd, like the other three "Design" rows.
 
+  - key: extraction_corner
+    template_var: extraction_corner
+    context_path: recipe.extraction.corner
+    owner: recipe
+    type: enum
+    choices: [typical, typical_t, cbest, cbest_t, cworst, cworst_t, rcbest, rcbest_t, rcworst, rcworst_t]
+    choices_from: profile.corners
+    choices_confidence: certain
+    default: null
+    nullable: true
+    placeholder: the profile's default_corner
+    currently: profile_selector
+    observed: false
+    notes: >-
+      ADDED 2026-08-24. The recipe's half of the corner seam, and until this
+      row existed the GUI had no control for it at all: the form is generated
+      from recipe-owned catalog rows, this field had none, and the office
+      report was "I cannot find where to change TYPICAL / RCWORST". The only
+      way to pick a corner was to hand-edit the recipe YAML.
+      What a Recipe stores is the SEMANTIC name; the tool literal lives on the
+      profile-owned `technology_corner` row below and core/render.py::
+      resolve_corner translates one into the other. That is why this row has
+      no landing site: nothing writes `extraction_corner` into any file.
+      `choices` here mirrors the shipped profile's table, and `choices_from`
+      is what makes the drop-down follow whatever profile is actually loaded
+      -- which corners exist is a process fact, and freezing them in this file
+      would be right for exactly one PDK.
+      Null means "use profile.default_corner", which is the bare Recipe
+      default and keeps a recipe portable to a PDK that spells its corners
+      differently.
+    lands_in: []
+    why: >-
+      Which corner this recipe extracts at. The choice is a recipe act; the
+      literal it resolves to is a PDK fact, which is why they are two rows.
+
   - key: technology_corner
     template_var: technology_corner
     context_path: pdk.corner
@@ -2740,6 +2791,8 @@ options:
     choices_confidence: certain
     unit: C
     default: 55.0
+    nullable: true
+    placeholder: the temperature this corner suggests
     currently: manifest_knob
     observed: true
     source_ref: examples/legacy/templates/quantus/ext.cmd.j2.manifest.yaml:22
@@ -2868,22 +2921,31 @@ options:
     owner: recipe
     type: str
     choices_confidence: certain
-    default: av_extracted
+    default: null
+    nullable: true
+    placeholder: follows the cell's extracted view (out_file)
     currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:6
-    question: Should this always equal out_file? (Suspected live bug.)
     notes: >-
-      THE MOST SUSPICIOUS ROW IN THE CATALOG. Three places name the view to
-      work on: inputView uses out_file, the Quantus -view_name uses out_file,
-      and this one is a separate literal "av_extracted" while both shipped
-      task tables set out_file to "av_ext". Jivaro is probably being told to
-      reduce a view that does not exist. Left at the observed value on
-      purpose -- guessing the fix would be worse than leaving the bug visible
-      -- but it should be derived from out_file once confirmed.
+      RESOLVED 2026-08-24 by the user, and it WAS the live bug this row was
+      flagged for. Three places name the view to work on: inputView uses
+      out_file, the Quantus -view_name uses out_file, and this one used to be
+      a separate literal "av_extracted" while both shipped task tables set
+      out_file to "av_ext" -- so Jivaro was pointed at a view that does not
+      exist. The user's ruling: after a Quantus run the view to reduce is
+      NECESSARILY the extraction output, so the two cannot legitimately
+      differ and the literal was never a setting.
+      Default is now null, meaning "the cell's out_file", resolved in
+      core/render.py::_recipe_tree against the DutSnapshot. It stays
+      overridable rather than being deleted, because reducing a view an
+      earlier run produced -- Jivaro on its own, no extraction this time --
+      is the one case where naming it explicitly is right.
+      A recipe migrated from before this change still carries the literal
+      "av_extracted"; clearing the field is what adopts the fix.
     lands_in:
       - {target: jivaro.xml, section: general, option: viewsToReduce, line: 6}
-    why: Which view Jivaro reduces. Should almost certainly be derived, not literal.
+    why: Which view Jivaro reduces. Derived from the DUT, overridable for a standalone run.
 
   - key: parasitic_res_model
     template_var: jivaro_r_model

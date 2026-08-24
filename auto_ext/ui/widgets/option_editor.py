@@ -117,7 +117,9 @@ __all__ = [
     "ChoiceOptionEditor",
     "EditorKind",
     "ElidedLabel",
+    "FreeChoiceOptionEditor",
     "ListOptionEditor",
+    "MultiChoiceOptionEditor",
     "NumberOptionEditor",
     "OptionEditor",
     "OptionGrid",
@@ -178,6 +180,10 @@ _UNSET: Any = object()
 #: includes the frame and the padding the shared QSS adds.
 _NUMBER_FIELD_WIDTH = 96
 
+#: Width of the "other" field trailing a guessed member list. Narrow on
+#: purpose: it is the exception, and the check boxes are the answer.
+_OTHER_FIELD_WIDTH = 150
+
 #: Pixels of slack in an elided label's size hint, so the last glyph is not
 #: clipped into an ellipsis by a one-pixel rounding difference.
 _ELIDE_SLACK = 2
@@ -202,7 +208,13 @@ class EditorKind(StrEnum):
 
     CHECKBOX = "checkbox"
     COMBO = "combo"
+    #: An ``enum`` whose value set is guessed: the members are offered, and
+    #: anything else can still be typed. See :class:`FreeChoiceOptionEditor`.
+    COMBO_FREE = "combo_free"
     NUMBER = "number"
+    #: A ``list`` over a closed, trusted value set -> one check box per
+    #: member. See :class:`MultiChoiceOptionEditor`.
+    CHECKS = "checks"
     LIST = "list"
     TEXT = "text"
 
@@ -210,19 +222,27 @@ class EditorKind(StrEnum):
 def editor_kind(spec: OptionSpec) -> EditorKind:
     """Pick the control for one spec.
 
-    The guessed-enum rule lives in :attr:`OptionSpec.free_input`, so this
-    function cannot disagree with the catalog's own idea of what a closed set
-    is -- it asks rather than re-deriving.
+    Whether the value set is closed lives in :attr:`OptionSpec.free_input`, so
+    this function cannot disagree with the catalog's own idea of it -- it asks
+    rather than re-deriving. What changes with the answer is now whether the
+    combo box is *editable*, not whether there is one at all: an enum always
+    gets a list to pick from.
     """
 
     if spec.type is OptionType.BOOL:
         return EditorKind.CHECKBOX
     if spec.type is OptionType.ENUM:
-        return EditorKind.TEXT if spec.free_input else EditorKind.COMBO
+        return EditorKind.COMBO_FREE if spec.free_input else EditorKind.COMBO
     if spec.type in (OptionType.INT, OptionType.FLOAT):
         return EditorKind.NUMBER
     if spec.type is OptionType.LIST:
-        return EditorKind.LIST
+        # A member list to offer -> check boxes. With no ``choices`` at all
+        # (netlist_view_list, the two extra supply-name lists) there is
+        # nothing to draw boxes for and it stays a text field. A GUESSED
+        # member list still gets boxes, plus the "other" field that keeps a
+        # spelling nobody predicted reachable -- the same answer the editable
+        # combo gives an enum, for the same reason.
+        return EditorKind.CHECKS if spec.choices else EditorKind.LIST
     return EditorKind.TEXT
 
 
@@ -283,6 +303,12 @@ def group_label(name: str) -> str:
 def _format_value(value: Any) -> str:
     if value is None:
         return ""
+    if value == "":
+        # Two catalog rows default to the empty string. Rendering that as
+        # nothing produced the hint "default " with a trailing space and no
+        # information -- a blank box beside a blank hint, which is the worst
+        # thing a form can show.
+        return "(empty)"
     if isinstance(value, bool):
         return "on" if value else "off"
     if isinstance(value, (list, tuple)):
@@ -334,13 +360,23 @@ def hint_text(spec: OptionSpec) -> str:
     parts: list[str] = []
     if spec.default is not None or spec.type is OptionType.BOOL:
         parts.append(f"default {_format_value(spec.default)}")
+        if spec.nullable and spec.placeholder:
+            # A row that has BOTH a default and a meaning for empty has to say
+            # the second one out loud: temperature_c shows 55.0, and nothing
+            # told the user that clearing the box hands the decision to the
+            # corner. The fallback existed in the model and was unreachable in
+            # the only place it could have been used.
+            parts.append(f"empty = {spec.placeholder}")
+    elif spec.placeholder:
+        parts.append(f"unset {_EM_DASH} {spec.placeholder}")
     if spec.range is not None:
         suffix = "" if spec.range_verified else " (unverified)"
         parts.append(_range_text(spec) + suffix)
     if spec.free_input and spec.choices:
-        shown = [str(choice) for choice in spec.choices[:3]]
-        more = "" if len(spec.choices) <= 3 else ", ..."
-        parts.append("guessed: " + ", ".join(shown) + more)
+        # The members are in the drop-down now, so the hint no longer repeats
+        # them; what it has to say is that the list is not authoritative and
+        # the field will take anything the tool accepts.
+        parts.append("guessed list - other values accepted")
     if template_freezes(spec):
         # First, not last: this line elides, and the one part of it the user
         # has to read is the part that says the field does nothing.
@@ -815,12 +851,20 @@ class ChoiceOptionEditor(OptionEditor):
     opened in the editor without quietly changing meaning.
     """
 
+    #: First entry of a nullable combo. Shown instead of an empty row so the
+    #: fallback reads as a choice ("resolve it for me") rather than as a value
+    #: the user forgot to fill in. :meth:`value` maps it back to ``None``.
+    UNSET_LABEL = "(from the profile)"
+
     def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
+        self._unset_label = self.UNSET_LABEL if spec.nullable else None
         self._combo = QComboBox(self)
         self._combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLength)
         self._combo.setMinimumContentsLength(6)
         self._combo.setFont(_mono_font(self._combo))
+        if self._unset_label is not None:
+            self._combo.addItem(self._unset_label)
         for choice in spec.choices or []:
             self._combo.addItem(str(choice))
         if spec.default is not None:
@@ -837,28 +881,91 @@ class ChoiceOptionEditor(OptionEditor):
     def choices(self) -> list[str]:
         return [self._combo.itemText(i) for i in range(self._combo.count())]
 
-    def value(self) -> str:
-        return self._combo.currentText()
+    def set_choices(self, choices: Sequence[str]) -> None:
+        """Replace the offered value set, keeping the value on screen.
 
-    def _apply_value(self, value: Any) -> None:
-        text = "" if value is None else str(value)
+        This is what a ``choices_from`` row needs: the catalog's static list
+        is one PDK's answer, and the form swaps in the loaded profile's own
+        table (:func:`auto_ext.catalog.spec.choices_for`) once there is a
+        profile. The current value survives even when the new list does not
+        contain it -- a recipe naming a corner this PDK does not define must
+        show that fact, not be silently retargeted at the first entry.
+        """
+
+        current = self._combo.currentText()
 
         def apply() -> None:
-            index = self._combo.findText(text)
-            if index < 0:
-                self._combo.addItem(text)
-                index = self._combo.count() - 1
-            self._combo.setCurrentIndex(index)
+            self._combo.clear()
+            if self._unset_label is not None:
+                self._combo.addItem(self._unset_label)
+            for choice in choices:
+                self._combo.addItem(str(choice))
+            self._select(current)
 
         self._quietly(apply)
 
+    def value(self) -> str | None:
+        text = self._combo.currentText()
+        if self._unset_label is not None and text == self._unset_label:
+            return None
+        return text
+
+    def _select(self, text: str) -> None:
+        """Put ``text`` on screen, appending it when the list lacks it."""
+
+        index = self._combo.findText(text)
+        if index < 0:
+            self._combo.addItem(text)
+            index = self._combo.count() - 1
+        self._combo.setCurrentIndex(index)
+
+    def _apply_value(self, value: Any) -> None:
+        if value is None and self._unset_label is not None:
+            self._quietly(lambda: self._combo.setCurrentIndex(0))
+            return
+        text = "" if value is None else str(value)
+        self._quietly(lambda: self._select(text))
+
+
+class FreeChoiceOptionEditor(ChoiceOptionEditor):
+    """``enum`` with a GUESSED value set -> an *editable* combo box.
+
+    The catalog's ``choices_confidence: guess`` means the value set was
+    invented on a machine with no Cadence on it. DECISIONS.md #19 answered
+    that with a bare text box, on the reasoning that a closed list half full
+    of invalid entries hides the one spelling that works. In use that traded
+    one failure for a worse one: a blank box gives no idea what a legal value
+    even looks like, so the user has to guess a spelling from nothing and gets
+    it wrong in a way the form cannot see.
+
+    An editable combo box is both halves at once. The members are on the
+    drop-down, so there is always something correct-looking to pick; the field
+    still accepts anything typed into it, so a wrong catalog guess can never
+    lock the user out of the spelling their tool wants. ``NoInsert`` keeps a
+    typed value out of the list itself -- it is this recipe's value, not a new
+    catalog member -- and the hint line says the list is not authoritative.
+    """
+
+    def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
+        super().__init__(spec, parent)
+        self._combo.setEditable(True)
+        self._combo.setInsertPolicy(QComboBox.NoInsert)
+        line = self._combo.lineEdit()
+        if line is not None:
+            line.setFont(_mono_font(line))
+            if spec.default is not None:
+                line.setPlaceholderText(str(spec.default))
+            if self.is_frozen:
+                line.setReadOnly(True)
+        # An editable combo emits currentTextChanged for typing too, which the
+        # base class already connects; nothing further to wire.
+
 
 class TextOptionEditor(OptionEditor):
-    """``str`` / ``path`` / guessed ``enum`` / ``structural`` -> a free text box.
+    """``str`` / ``path`` / ``structural`` -> a free text box.
 
-    For a guessed enum this is DECISIONS.md #19 made visible: the members are
-    offered as a hint, the default fills the placeholder, and the tool -- not
-    the catalog -- gets the last word on what is legal.
+    Enums no longer land here: they get a combo box, closed or editable
+    (:class:`FreeChoiceOptionEditor`).
     """
 
     def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
@@ -868,6 +975,10 @@ class TextOptionEditor(OptionEditor):
         if spec.default is not None:
             self._edit.setPlaceholderText(str(spec.default))
             _set_text_from_start(self._edit, str(spec.default))
+        elif spec.placeholder:
+            # No default to echo, so the grey text says what the tool does
+            # with the field left alone rather than leaving it blank.
+            self._edit.setPlaceholderText(spec.placeholder)
         if spec.type is OptionType.STRUCTURAL:
             self._edit.setReadOnly(True)
             self._edit.setEnabled(False)
@@ -927,6 +1038,113 @@ class ListOptionEditor(OptionEditor):
         )
 
 
+class MultiChoiceOptionEditor(OptionEditor):
+    """``list`` over a CLOSED value set -> one check box per member.
+
+    ``stages`` is the case that forced this. It is the five stages of the
+    flow, it can only ever be a subset of those five, and it was rendered as a
+    comma-separated text box -- so turning Jivaro off meant knowing that the
+    separator is a comma, that the spelling is ``jivaro`` and not ``Jivaro``,
+    and retyping the other four without a typo. Nothing about a closed set of
+    five is served by making the user spell it.
+
+    Order is the catalog's, not the click order: for ``stages`` that is flow
+    order, and the runner reads the list as a sequence. A value arriving from
+    a recipe that names something outside the set gets its own check box
+    appended rather than being dropped -- the same rule
+    :class:`ChoiceOptionEditor` follows, and for the same reason.
+    """
+
+    #: Placeholder of the trailing free-text field on a guessed member list.
+    OTHER_PLACEHOLDER = "other, comma separated"
+
+    def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
+        super().__init__(spec, parent)
+        self._row = QWidget(self)
+        layout = QHBoxLayout(self._row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.SPACE_SM)
+        self._boxes: dict[str, QCheckBox] = {}
+        default = spec.default if isinstance(spec.default, list) else []
+        for choice in spec.choices or []:
+            self._add_box(str(choice), str(choice) in {str(d) for d in default})
+        layout.addStretch(1)
+
+        self._other: QLineEdit | None = None
+        if spec.free_input:
+            other = QLineEdit(self._row)
+            other.setFont(_mono_font(other))
+            other.setPlaceholderText(self.OTHER_PLACEHOLDER)
+            other.setMaximumWidth(_OTHER_FIELD_WIDTH)
+            other.textEdited.connect(lambda _text: self._emit())
+            if self.is_frozen:
+                other.setReadOnly(True)
+                other.setEnabled(False)
+            layout.addWidget(other)
+            self._other = other
+
+        self._add_control(self._row, stretch=1)
+        self._add_trailing()
+
+    def other_edit(self) -> QLineEdit | None:
+        """The trailing free-text field, or ``None`` on a closed member list."""
+
+        return self._other
+
+    def _other_values(self) -> list[str]:
+        if self._other is None:
+            return []
+        return [part.strip() for part in self._other.text().split(",") if part.strip()]
+
+    def _add_box(self, name: str, checked: bool) -> QCheckBox:
+        box = QCheckBox(name, self._row)
+        box.setChecked(checked)
+        box.toggled.connect(lambda _on: self._emit())
+        if self.is_frozen:
+            box.setEnabled(False)
+        layout = self._row.layout()
+        # Before the trailing stretch, so a late member joins the row rather
+        # than being pushed off the end of it.
+        layout.insertWidget(layout.count() - 1 if layout.count() else 0, box)
+        self._boxes[name] = box
+        return box
+
+    def check_boxes(self) -> dict[str, QCheckBox]:
+        return dict(self._boxes)
+
+    def value(self) -> list[str]:
+        checked = [name for name, box in self._boxes.items() if box.isChecked()]
+        # Typed members come after the catalog's, and never twice.
+        return checked + [v for v in self._other_values() if v not in self._boxes]
+
+    def _apply_value(self, value: Any) -> None:
+        if value is None:
+            wanted: list[str] = []
+        elif isinstance(value, (list, tuple)):
+            wanted = [str(item) for item in value]
+        else:
+            wanted = [str(value)]
+        known = set(self._spec.choices or [])
+        extra = [v for v in wanted if v not in {str(k) for k in known}]
+
+        def apply() -> None:
+            if self._other is None:
+                # No free field to hold them: an unknown member gets its own
+                # box rather than being dropped. A recipe written by hand must
+                # not quietly change meaning by being opened here.
+                for name in extra:
+                    if name not in self._boxes:
+                        self._add_box(name, True)
+                extras_here: set[str] = set()
+            else:
+                _set_text_from_start(self._other, ", ".join(extra))
+                extras_here = set(extra)
+            for name, box in self._boxes.items():
+                box.setChecked(name in set(wanted) - extras_here)
+
+        self._quietly(apply)
+
+
 class NumberOptionEditor(OptionEditor):
     """``int`` / ``float`` -> a validated text box with an advisory range.
 
@@ -962,6 +1180,8 @@ class NumberOptionEditor(OptionEditor):
         if spec.default is not None:
             _set_text_from_start(self._edit, _number_text(spec, spec.default))
             self._edit.setPlaceholderText(_number_text(spec, spec.default))
+        elif spec.placeholder:
+            self._edit.setPlaceholderText(spec.placeholder)
         self._edit.textEdited.connect(self._on_edited)
         self._add_control(self._edit, stretch=0)
         self._add_trailing()
@@ -1009,7 +1229,9 @@ class NumberOptionEditor(OptionEditor):
 _EDITOR_BY_KIND: dict[EditorKind, type[OptionEditor]] = {
     EditorKind.CHECKBOX: BoolOptionEditor,
     EditorKind.COMBO: ChoiceOptionEditor,
+    EditorKind.COMBO_FREE: FreeChoiceOptionEditor,
     EditorKind.NUMBER: NumberOptionEditor,
+    EditorKind.CHECKS: MultiChoiceOptionEditor,
     EditorKind.LIST: ListOptionEditor,
     EditorKind.TEXT: TextOptionEditor,
 }

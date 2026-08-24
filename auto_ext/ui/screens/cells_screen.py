@@ -15,14 +15,23 @@ element. The old Tasks tab's generator-plus-preview pair is exactly what
 
 Column modes
 ------------
-The same ten physical columns are shown in three arrangements:
+The same eleven physical columns are shown in three arrangements:
 
 ``wide`` (``1a``)
-    check, library, cell, layout, source, ground, recipe, last run, status
+    check, library, cell, layout, source, ground, out view, recipe, last run,
+    status
 ``compact`` (``1j``, concession 2, below :data:`TABLE_COMPACT_BELOW`)
-    check, library, cell, views, recipe, last run, status -- ``layout`` and
-    ``source`` merge into ``views`` and ``ground`` moves to the row tooltip.
-    The cell name is the one elastic column and never truncates first.
+    check, library, cell, views, out view, recipe, last run, status --
+    ``layout`` and ``source`` merge into ``views`` and ``ground`` moves to the
+    row tooltip. The cell name is the one elastic column and never truncates
+    first.
+
+``out view`` is not on artboard ``1a``. It is :attr:`CellEntry.out_file`, the
+extracted-view name Quantus writes with ``-view_name`` and Jivaro then reads
+as ``inputView`` -- the whole back half of the flow hangs off it, and until
+this column existed it appeared only in the row tooltip and could not be
+typed anywhere in the GUI. It stays in ``running`` mode's hidden set like
+every other editable column.
 ``running`` (``1b``)
     check (as a status glyph), library, cell, recipe, stages -- the stage
     chips need the width, and while a run is in flight nothing else on the
@@ -127,6 +136,7 @@ __all__ = [
     "COL_SOURCE",
     "COL_STAGES",
     "COL_STATUS",
+    "COL_OUT_VIEW",
     "COL_VIEWS",
     "CellsScreen",
     "EMPTY_STATE_WIDTH",
@@ -158,10 +168,15 @@ COL_LAYOUT = 3
 COL_SOURCE = 4
 COL_GROUND = 5
 COL_VIEWS = 6
-COL_RECIPE = 7
-COL_LAST_RUN = 8
-COL_STATUS = 9
-COL_STAGES = 10
+#: The extracted view this DUT produces. Per DUT, not per recipe -- it is
+#: Quantus ``-view_name`` and Jivaro ``inputView``, and it used to be visible
+#: only in the row tooltip, so the one name the whole back half of the flow
+#: hangs off could not be typed anywhere in the GUI.
+COL_OUT_VIEW = 7
+COL_RECIPE = 8
+COL_LAST_RUN = 9
+COL_STATUS = 10
+COL_STAGES = 11
 
 COLUMN_TITLES = (
     "",
@@ -171,6 +186,7 @@ COLUMN_TITLES = (
     "source",
     "ground",
     "views",
+    "out view",
     "recipe",
     "last run",
     "status",
@@ -184,6 +200,7 @@ EDITABLE_FIELDS = {
     COL_LAYOUT: "layout_view",
     COL_SOURCE: "source_view",
     COL_GROUND: "ground_net",
+    COL_OUT_VIEW: "out_file",
 }
 
 #: Column -> width, straight off the artboard. ``COL_CELL`` stretches
@@ -198,6 +215,7 @@ _WIDE_WIDTHS = {
     COL_LAYOUT: 62,
     COL_SOURCE: 74,
     COL_GROUND: 62,
+    COL_OUT_VIEW: 78,
     COL_RECIPE: 138,
     COL_LAST_RUN: 122,
     COL_STATUS: 84,
@@ -206,6 +224,7 @@ _COMPACT_WIDTHS = {
     COL_CHECK: 24,
     COL_LIBRARY: 112,
     COL_VIEWS: 96,
+    COL_OUT_VIEW: 74,
     COL_RECIPE: 130,
     COL_LAST_RUN: 118,
     COL_STATUS: 76,
@@ -225,6 +244,7 @@ _MODE_COLUMNS = {
         COL_LAYOUT,
         COL_SOURCE,
         COL_GROUND,
+        COL_OUT_VIEW,
         COL_RECIPE,
         COL_LAST_RUN,
         COL_STATUS,
@@ -234,6 +254,7 @@ _MODE_COLUMNS = {
         COL_LIBRARY,
         COL_CELL,
         COL_VIEWS,
+        COL_OUT_VIEW,
         COL_RECIPE,
         COL_LAST_RUN,
         COL_STATUS,
@@ -252,13 +273,24 @@ OBJ_FILTER = "cellsFilter"
 #: Reading width of the empty-state panel, from artboard ``1i``.
 EMPTY_STATE_WIDTH = 560
 
+#: Both tables must carry a key for every entry of ``self._buttons``: the
+#: fold loop in ``resizeEvent`` walks the buttons and indexes the table, so a
+#: missing key is a KeyError on resize rather than a long label. "Save" is
+#: four characters and has nothing to fold to, so it is the same in both.
 _LONG_LABELS = {
     "add": "Add cell",
     "duplicate": "Duplicate",
     "remove": "Remove",
     "import": "Import from tasks.yaml",
+    "save": "Save",
 }
-_SHORT_LABELS = {"add": "Add", "duplicate": "Dup", "remove": "Rm", "import": "Import"}
+_SHORT_LABELS = {
+    "add": "Add",
+    "duplicate": "Dup",
+    "remove": "Rm",
+    "import": "Import",
+    "save": "Save",
+}
 
 
 class RowStatus(NamedTuple):
@@ -500,6 +532,9 @@ class CellsScreen(QWidget):
     ``import_requested()``
         "Import from tasks.yaml" was pressed. Reading the old file is the
         host's job; the screen only asks.
+    ``save_requested()``
+        Save was pressed. The screen still writes nothing itself; the host
+        does, and calls :meth:`set_unsaved` back to say what happened.
     ``edit_rejected(str)``
         An in-place edit was refused by the model (duplicate row, empty
         field). The cell has already been put back.
@@ -517,6 +552,7 @@ class CellsScreen(QWidget):
     run_requested = pyqtSignal(object)
     run_finished = pyqtSignal(object)
     import_requested = pyqtSignal()
+    save_requested = pyqtSignal()
     edit_rejected = pyqtSignal(str)
     status_message = pyqtSignal(str)
     log_path_changed = pyqtSignal(object)
@@ -619,6 +655,20 @@ class CellsScreen(QWidget):
         button.clicked.connect(self.import_requested)
         layout.addWidget(button)
         self._buttons["import"] = button
+
+        # Save, on the screen the edit happens on. The cell table has no
+        # explicit commit moment -- you type into a cell and move on -- so
+        # before this the ONLY way to write cells.yaml was File -> Save, and
+        # the only sign anything was pending was a star in the title bar. The
+        # Recipes screen has meant "write it" since the office round found the
+        # same gap there; two screens that persist differently is worse than
+        # either rule on its own.
+        save = QPushButton("Save", bar)
+        save.setProperty("primary", "true")
+        save.setEnabled(False)
+        save.clicked.connect(self.save_requested)
+        layout.addWidget(save)
+        self._buttons["save"] = save
 
         layout.addStretch(1)
         self._filter = QLineEdit(bar)
@@ -768,6 +818,7 @@ class CellsScreen(QWidget):
             COL_SOURCE: entry.source_view,
             COL_GROUND: entry.ground_net,
             COL_VIEWS: f"{entry.layout_view}/{entry.source_view}",
+            COL_OUT_VIEW: entry.out_file or "",
             COL_RECIPE: self._recipe_name(key),
         }
         for column, text in values.items():
@@ -835,6 +886,20 @@ class CellsScreen(QWidget):
             button.setProperty("primary", empty)
             button.style().unpolish(button)
             button.style().polish(button)
+
+    def set_unsaved(self, unsaved: bool) -> None:
+        """Enable Save iff there is something to write.
+
+        The screen cannot know this on its own: it stages through
+        ``cells_changed`` and the host owns both the queue and the file, so
+        the host is the only thing that can tell a pending edit from a saved
+        one.
+        """
+
+        self._buttons["save"].setEnabled(bool(unsaved))
+
+    def save_button(self) -> QPushButton:
+        return self._buttons["save"]
 
     def set_empty_state_hint(self, text: str) -> None:
         """One extra line under the empty state (a Setup verdict, say)."""
@@ -1021,7 +1086,10 @@ class CellsScreen(QWidget):
         if key is None:
             return
         entry = self._book.entry(key)
-        if getattr(entry, field_name) == value:
+        # ``or ""`` on both sides: out_file is the one editable field that is
+        # nullable, and CellEntry normalises "" back to None, so a cleared box
+        # must compare equal to None rather than stage an identical book.
+        if (getattr(entry, field_name) or "") == value:
             return
         payload = entry.model_dump()
         payload[field_name] = value
@@ -1034,7 +1102,7 @@ class CellsScreen(QWidget):
             try:
                 item = self._table.item(row, _column_of_field(field_name))
                 if item is not None:
-                    item.setText(getattr(entry, field_name))
+                    item.setText(getattr(entry, field_name) or "")
             finally:
                 self._syncing = False
             self.edit_rejected.emit(_first_line(exc))
@@ -1531,6 +1599,22 @@ class CellsScreen(QWidget):
         self._worker.request_cancel()
         self.run_bar.mark_cancelling()
         self.status_message.emit("cancelling — the runner stops at its next check")
+
+    def stop_run_and_wait(self, timeout_ms: int = 5000) -> bool:
+        """Cancel a run and block until the thread is really gone.
+
+        For the window's ``closeEvent`` only. ``cancel_run`` returns
+        immediately and the runner notices at its next check; letting the
+        process exit in that window destroys the QThread's C++ object while
+        it is still running, which is the orphan-thread crash rather than a
+        clean stop. Returns whether the thread finished in time.
+        """
+
+        worker = self._worker
+        if worker is None:
+            return True
+        self.cancel_run()
+        return bool(worker.wait(timeout_ms))
 
     def _enter_running_state(self, request: RunRequest) -> None:
         self.set_column_mode(MODE_RUNNING)
