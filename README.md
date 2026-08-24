@@ -53,6 +53,19 @@ in `pip list`).
 PYTHONPATH=/abs/path/to/Auto_ext python3.11 -m auto_ext [args]
 ```
 
+**Relative paths mean what you expect.** The chdir above is not optional --
+`si -batch` reads `si.env` from cwd -- but it would otherwise silently
+reinterpret every relative path you typed against the workarea instead of
+against where you are standing, so `./run.sh check-env --config-dir config`
+died with "Directory 'config' does not exist" while `config/` sat right there.
+`run.sh` therefore absolutizes path arguments from your cwd *before* the
+chdir. Output *patterns* (`--to`, `--layout-out`) are left alone on purpose:
+they are workarea-relative by design and may carry `{cell}` placeholders.
+
+`AUTO_EXT_ARGV_DEBUG=1 ./run.sh ...` prints what the launcher would pass on
+and exits, without needing a working Python -- for when a path argument is not
+landing where you meant.
+
 ## Tests
 
 ```

@@ -70,15 +70,29 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "BASE_ENV_CANDIDATES",
+    "BUILTIN_PROFILE_PATH",
     "CALIBRE_LVS_DIR_EXPR",
     "DiscoveryNote",
     "DiscoveryResult",
     "SCAN_RULES",
+    "builtin_profile",
     "discover_profile",
     "profile_to_yaml",
     "read_profile_yaml",
     "write_profile_yaml",
 ]
+
+#: The profile shipped with this build, ``<repo>/config/profiles/default.yaml``.
+#: Absolute and derived from ``__file__`` for the same reason
+#: :data:`auto_ext.catalog.spec.BUILTIN_CATALOG_PATH` is: ``run.sh`` runs from
+#: the workarea, so nothing here may be cwd-relative.
+#:
+#: On a deployed box ``config/`` is seed-only -- shipped once so a fresh
+#: install has a starting point, never overwritten afterwards -- so this file
+#: is the package's copy until somebody edits it, and their edit afterwards.
+#: That is the right precedence for a fallback: a site that has curated its
+#: own tables should have those used, not the ones this build was cut with.
+BUILTIN_PROFILE_PATH = Path(__file__).resolve().parents[2] / "config" / "profiles" / "default.yaml"
 
 
 #: Every assumption this module makes about how a PDK lays its decks out.
@@ -791,3 +805,23 @@ def read_profile_yaml(path: Path) -> PdkProfile:
         return PdkProfile.model_validate(dict(data))
     except Exception as exc:  # pydantic ValidationError and anything it wraps
         raise ConfigError(f"{path}: not a valid PDK profile: {exc}") from exc
+
+
+def builtin_profile() -> PdkProfile | None:
+    """The profile at :data:`BUILTIN_PROFILE_PATH`, or ``None``.
+
+    ``None`` for both "not there" and "does not parse", deliberately: the
+    only caller is a *fallback* for tables a legacy config structurally
+    cannot supply, and a fallback that raises turns a cosmetic problem in a
+    file nobody asked about into a failed migration. The caller reports the
+    empty table it was left with instead, which is the pre-fallback
+    behaviour.
+    """
+
+    if not BUILTIN_PROFILE_PATH.is_file():
+        return None
+    try:
+        return read_profile_yaml(BUILTIN_PROFILE_PATH)
+    except ConfigError:
+        logger.warning("shipped profile at %s does not parse; ignoring", BUILTIN_PROFILE_PATH)
+        return None

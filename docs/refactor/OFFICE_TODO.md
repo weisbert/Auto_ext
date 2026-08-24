@@ -215,6 +215,10 @@ bash deploy/doctor.sh --test
 
 ## 1. 先体检 —— 它会告诉你能不能跑
 
+> 下面每条都在**安装目录里**敲（上面那个 `cd <install>` 之后）。`config` 这类相对路径按
+> 你站的位置解析 —— `run.sh` 会在 chdir 到 workarea 之前替你绝对化，理由见 README §Launch。
+> 路径没落到你想的地方时，`AUTO_EXT_ARGV_DEBUG=1` 加在命令前面能看到它到底传了什么。
+
 ```bash
 ./run.sh check-env --config-dir config
 ```

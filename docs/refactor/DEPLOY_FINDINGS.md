@@ -6,7 +6,7 @@
 
 ---
 
-## 1. 文档里 12 处 `--config-dir config` 全是错的 ⚠️ 优先级最高
+## 1. 文档里 12 处 `--config-dir config` 全是错的 ✅ 已修
 
 **现象**:在安装目录里敲 `./run.sh migrate --config-dir config`,报
 `Invalid value for '--config-dir': Directory 'config' does not exist.` —— 而 `config/` 明明在。
@@ -32,15 +32,20 @@ cd "${workarea}"
 ./run.sh check-env --config-dir $cwd/config
 ```
 
-**该怎么修**:两件事一起做才干净 ——
-① 文档全部改成不依赖 cwd 的写法;
-② `run.sh` 在 `cd` 之前把 `--config-dir` / `--out-root` / `--auto-ext-root` / `--workarea`
-这类相对路径先转成绝对路径,这样文档怎么写都能跑。
-只改文档是治标:下一个人照直觉敲相对路径,还是会撞。
+**怎么修的**:按上面第 ② 条做的 —— `run.sh` 在 `cd` 之前把路径型参数按**调用者的 cwd**
+绝对化,相对路径于是恢复了它本来的语义,文档里那 17 处原样就能跑。只改文档是治标:
+下一个人照直觉敲相对路径,还是会撞。
+
+`AUTO_EXT_PATH_FLAGS`(在 `run.sh` 里)是那份"哪些选项吃路径"的清单,
+`tests/test_run_sh.py` 拿 `cli.py` 的 AST 双向比对它 —— 这种手写清单会在
+"有人加了个新选项但没打开 shell 脚本"的那天悄悄失效,而且失效了没人看得出来。
+`--to` / `--layout-out` 故意不在清单里:它们是 workarea 相对的输出模板,带 `{cell}` 占位符。
+
+规则本身只写在 README §Launch 一处;操作文档里只放指针,不复述。
 
 ---
 
-## 2. `migrate` 产出的 profile 里 corner 表和 variant 表是空的
+## 2. `migrate` 产出的 profile 里 corner 表和 variant 表是空的 ✅ 已修
 
 **现象**:迁移成功,`check-env` 却有两个 blocking fail:`lvs.variants (empty)`、
 `pdk.corners (empty)`。
@@ -55,13 +60,24 @@ cd "${workarea}"
 `qrc.dir_expr` 单独贴回来 —— 因为**两份文件各有对方没有的东西**:
 seed 有 PDK 事实表,migrated 有站点真实路径。
 
-**该怎么修**:凡是 legacy 配置**结构上不可能提供**的表(corner / variant / 供电网名单),
-`migrate` 应该回落到 shipped profile 的值,并在报告里说明"这几项不是从你的模板来的"。
-让用户手工合并两个 YAML 是不可接受的。
+**怎么修的**:凡是 legacy 配置**结构上不可能提供**的表(corner / variant / 供电网名单),
+`migrate` 回落到 shipped profile(`config/profiles/default.yaml`,经
+`profile_discover.builtin_profile()`),并且**四个地方同时说**这几项不是用户的:
+报告里的 `shipped_fallbacks` 段、一条 `seeded_from_shipped_profile` disposition
+(所以"没有字段会悄悄消失"这条约定仍然成立)、一条 warning(于是 `migrate` 退出码是 1)、
+以及写出的 YAML 里那个字段头上的 `NOT FROM YOUR CONFIG` 注释 —— 报告不会一直留在手边,
+文件得自己会说话。
+
+**只在表为空时回落。** 模板能给出的值一律不替换:哪怕只读回一个 corner,比 shipped 的九个
+"差"在每一个维度上,除了唯一要紧的那个 —— 它是用户自己的。这条边界有专门的回归测试
+(`test_a_corner_the_templates_do_have_is_never_replaced`)。
+
+站点自己的路径这一半照旧从迁移里来 —— 当初逼着人手工合并两个 YAML 的正是这个:
+seed 有 PDK 事实,migrated 有真实路径,两边互不包含。
 
 ---
 
-## 3. `deploy.sh` 会替换 `templates/`,原件只靠 3 次轮转保命
+## 3. `deploy.sh` 会替换 `templates/`,原件只靠 3 次轮转保命 ✅ 已修
 
 **成因**:`SEED_ONLY=("config" "recipes")` —— `templates/` 不在保护名单里,
 所以换装时被包里那份覆盖,用户那套**用了几个月、验证过**的模板被移进
@@ -73,9 +89,18 @@ seed 有 PDK 事实表,migrated 有站点真实路径。
 
 **现场处置**:已抢救到 `<install>/templates_ORIGINAL`。
 
-**该怎么修**:要么把 `templates` 加进保护名单(但它确实是代码包的一部分,有点两难),
-要么在换装时**大声警告**"你的 templates/ 被替换了,原件在 <备份路径>,3 次部署后消失"。
-现在它是静默的。
+**怎么修的**:那个"两难"是真的,所以两边都不选 —— `templates/` **仍然被替换**
+(渲染路径在运行时解析它,留着旧的就是"这版代码跑上版流程"),但换装前把**要被顶掉的那份
+另存一份**到 `<install>/.deploy/yours/templates-<时间戳>/`,**这个目录轮转永远不碰**,
+并在结尾那段"不能滚过去的警告"里点名具体路径。
+
+只在它和包里那份**有差异**时另存(`diff -rq`),所以没动过模板的机器不会攒垃圾 ——
+这条有独立的反向测试。真正证明这个修法的测试是
+`test_the_keepsake_outlives_the_backup_that_used_to_be_its_only_home`:
+连部署 `KEEP_BACKUPS + 1` 次,原来那份备份已经被轮转掉,另存的那份还在。
+
+机制是通用的,不是给 `templates` 开的特例:`deploy.sh` 里的 `KEEPSAKE_DIRS`
+就是"包里发、又归用户改"的目录清单。
 
 ---
 

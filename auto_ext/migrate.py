@@ -48,6 +48,17 @@ module supplies four small parsers, one per target syntax. A value the parser
 cannot recover keeps the catalog default and is listed in
 :attr:`MigrationReport.warnings`.
 
+The one deliberate exception is a table the legacy config **structurally
+cannot hold**: the old script had no concept of a corner table, a deck-variant
+table or a supply-net list, so there is no user value to be neutral about --
+only the choice between an empty table (a blocking ``check-env`` failure on an
+otherwise successful migration) and the shipped profile's. It takes the
+shipped one, and every such field is named in
+:attr:`MigrationReport.shipped_fallbacks`, in a ``seeded_from_shipped_profile``
+disposition, in a warning, and in a ``NOT FROM YOUR CONFIG`` comment on the
+field itself in the written YAML. A table the templates *can* show is never
+replaced, however incomplete it is.
+
 What is deliberately not implemented yet
 ----------------------------------------
 ``seed_patches`` in the schema pseudocode renders the old templates and the
@@ -111,7 +122,11 @@ from auto_ext.legacy_v1 import (
     load_tasks_v1_with_raw,
     resolve_knob_values_v1,
 )
-from auto_ext.core.profile_discover import read_profile_yaml
+from auto_ext.core.profile_discover import (
+    BUILTIN_PROFILE_PATH,
+    builtin_profile,
+    read_profile_yaml,
+)
 from auto_ext.model.cells import CELLS_FILENAME, CellBook, CellEntry, load_cells
 from auto_ext.model.common import RenderTarget, Stage, slugify, utcnow
 from auto_ext.model.pdk import (
@@ -200,7 +215,14 @@ class MigrationError(AutoExtError):
 
 # ---- report objects ----------------------------------------------------------
 
-DispositionAction = Literal["moved", "dropped", "folded", "seeded_from_template", "decision"]
+DispositionAction = Literal[
+    "moved",
+    "dropped",
+    "folded",
+    "seeded_from_template",
+    "seeded_from_shipped_profile",
+    "decision",
+]
 
 
 @dataclass(frozen=True)
@@ -276,6 +298,12 @@ class MigrationReport:
     #: Decision key -> the answer actually used (default, or the resolver's).
     answers: dict[str, Any] = field(default_factory=dict)
     open_questions: list[OpenQuestion] = field(default_factory=list)
+    #: Profile fields whose value came from the shipped profile because the
+    #: legacy config structurally could not supply one. Names as they appear
+    #: in the written YAML (``corners``, ``lvs_decks.variants``, ...). Kept
+    #: apart from :attr:`warnings` because the two ask for different things:
+    #: a warning says "look at this", these say "this is not yours".
+    shipped_fallbacks: list[str] = field(default_factory=list)
     #: Always empty in this build: see the module docstring on ``seed_patches``.
     seeded_patches: list[tuple[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -768,6 +796,7 @@ def migrate_v1_to_v2(
     dispositions: list[FieldDisposition] = []
     decisions: list[MigrationDecision] = []
     answers: dict[str, Any] = {}
+    shipped_fallbacks: list[str] = []
     warnings: list[str] = [
         "byte fidelity against the old templates was NOT verified: the "
         "catalog-driven renderer (C2) does not exist yet, so seed_patches is "
@@ -845,6 +874,7 @@ def migrate_v1_to_v2(
         decide=decide,
         dispositions=dispositions,
         warnings=warnings,
+        shipped_fallbacks=shipped_fallbacks,
         stamp=stamp,
     )
 
@@ -932,6 +962,7 @@ def migrate_v1_to_v2(
         decisions=decisions,
         answers=answers,
         warnings=warnings,
+        shipped_fallbacks=shipped_fallbacks,
     )
     report.open_questions = _collect_open_questions(catalog, report)
     for key, (was, now_value) in sorted(readback.diverged.items()):
@@ -1034,6 +1065,7 @@ def _build_profile(
     decide: Callable[..., Any],
     dispositions: list[FieldDisposition],
     warnings: list[str],
+    shipped_fallbacks: list[str],
     stamp: datetime,
 ) -> PdkProfile:
     paths = dict(project.paths)
@@ -1042,7 +1074,49 @@ def _build_profile(
 
     pid = slugify(profile_id or project.tech_name or "default", max_len=64)
 
+    # Tables a legacy config CANNOT supply, no matter how complete it is: the
+    # old script had no concept of a corner table, a deck-variant table or a
+    # supply-net list, so there is nothing in project.yaml or in the templates
+    # to read them back from. Writing them empty is honest but useless -- it
+    # is a blocking `check-env` failure on a migration that otherwise
+    # succeeded, and the only way out was to hand-merge two YAML files (the
+    # shipped profile has the PDK facts, the migrated one has the site's real
+    # paths; neither is a superset). So: fall back to the shipped profile, and
+    # say loudly that these rows are not the user's.
+    #
+    # Only ever when the table is EMPTY. A value read back from the user's own
+    # templates is never replaced -- value-neutrality is the whole point of
+    # the migration, and it still holds for everything the templates can show.
+    shipped = builtin_profile()
+
+    def _seeded_from_shipped(field_name: str, note: str) -> None:
+        """Record that ``field_name`` did not come from the user's config."""
+
+        shipped_fallbacks.append(field_name)
+        dispositions.append(
+            FieldDisposition(
+                f"(nothing in {project_yaml.name} or the legacy templates)",
+                "seeded_from_shipped_profile",
+                f"profile:{pid}.{field_name}",
+                note,
+            )
+        )
+
     variants, default_variant = _lvs_variants(templates_dir, template_set, warnings)
+    if not variants and shipped is not None and shipped.lvs_decks.variants:
+        variants = [v.model_copy(deep=True) for v in shipped.lvs_decks.variants]
+        default_variant = shipped.lvs_decks.default_variant
+        _seeded_from_shipped(
+            "lvs_decks.variants",
+            f"{len(variants)} variant(s) from {BUILTIN_PROFILE_PATH.name}: "
+            f"{', '.join(v.name for v in variants)}",
+        )
+        warnings.append(
+            "lvs_decks.variants came from the profile shipped with this build, not "
+            "from your config -- a legacy config has no deck-variant table to read. "
+            f"Check that {', '.join(v.rules_suffix for v in variants)} are the deck "
+            "suffixes this PDK actually has."
+        )
 
     lvs_decks = LvsDeckSet(
         dir_expr=lvs_dir,
@@ -1096,6 +1170,20 @@ def _build_profile(
                 f"literal {corner_literal!r} -> corner {default_corner!r}",
             )
         )
+    elif shipped is not None and shipped.corners:
+        corners = [c.model_copy(deep=True) for c in shipped.corners]
+        default_corner = shipped.default_corner
+        _seeded_from_shipped(
+            "corners",
+            f"{len(corners)} corner(s) from {BUILTIN_PROFILE_PATH.name}: "
+            f"{', '.join(c.name for c in corners)}",
+        )
+        warnings.append(
+            "no -technology_corner literal was found in the templates, so the corner "
+            f"table came from the profile shipped with this build ({len(corners)} "
+            f"corners, default {default_corner!r}) -- NOT from your config. Check the "
+            "names against this PDK before trusting a Recipe to be portable across them."
+        )
     else:
         warnings.append(
             "no -technology_corner literal was found in the templates; the profile "
@@ -1110,6 +1198,28 @@ def _build_profile(
         ind_model=readback.get("parasitic_ind_model", "analogLib/pinductor/symbol"),
         mutual_model=readback.get("parasitic_mutual_model", "analogLib/pmind/symbol"),
     )
+
+    # The supply-net lists usually DO come back from the templates' *lvsPowerNames
+    # / *lvsGroundNames lines. When they do not, the templates simply did not
+    # carry those lines, which is again nothing to be neutral about.
+    power_names = list(readback.get("power_names", []))
+    ground_names = list(readback.get("ground_names", []))
+    if shipped is not None:
+        for field_name, current, from_shipped in (
+            ("power_names", power_names, shipped.power_names),
+            ("ground_names", ground_names, shipped.ground_names),
+        ):
+            if current or not from_shipped:
+                continue
+            current.extend(from_shipped)
+            _seeded_from_shipped(
+                field_name, f"{len(from_shipped)} name(s) from {BUILTIN_PROFILE_PATH.name}"
+            )
+            warnings.append(
+                f"{field_name} came from the profile shipped with this build "
+                f"({len(from_shipped)} names), not from your templates, which carry no "
+                "such line. LVS treats these as the supply nets -- check them."
+            )
 
     cdl_includes = readback.get("cdl_include_file")
     profile = PdkProfile(
@@ -1130,8 +1240,8 @@ def _build_profile(
         extra_paths=paths,
         corners=corners,
         default_corner=default_corner,
-        power_names=list(readback.get("power_names", [])),
-        ground_names=list(readback.get("ground_names", [])),
+        power_names=power_names,
+        ground_names=ground_names,
         parasitics=parasitics,
         checks=[],
         discovered_from=[str(project_yaml), str(templates_dir)],
@@ -1911,18 +2021,42 @@ def _write_all(
         )
 
     profile_rel = f"config/profiles/{report.profile.profile_id}.yaml"
+    # A table seeded from the shipped profile must not carry the comment that
+    # says where the migration read it back from -- that comment would be a
+    # lie about provenance, on the one field where provenance is the whole
+    # question.
+    seeded = set(report.shipped_fallbacks)
     profile_comments = {
         **question_text.get(profile_rel, {}),
-        "corners": "NEEDS CONFIRMATION: only the corner the templates hardcode is here.\n"
-        "Add the rest of this PDK's corners; a Recipe is portable only across\n"
-        "corners this table names.",
+        "corners": (
+            "NOT FROM YOUR CONFIG: a legacy config has no corner table, so this one\n"
+            "came from the profile shipped with this build. Check the names against\n"
+            "this PDK -- a Recipe is portable only across corners this table names."
+            if "corners" in seeded
+            else "NEEDS CONFIRMATION: only the corner the templates hardcode is here.\n"
+            "Add the rest of this PDK's corners; a Recipe is portable only across\n"
+            "corners this table names."
+        ),
         "parasitics": "NEEDS CONFIRMATION: parasitic device names were read back from the\n"
         "templates and never checked against your PDK.",
         "cdl_include_files": "NEEDS CONFIRMATION: one CDL prelude is assumed. Multiple\n"
         "preludes are not supported yet.",
-        "lvs_decks": "NEEDS CONFIRMATION: deck variants come from the calibre manifest,\n"
-        "which is the only place they were ever written down.",
+        "lvs_decks": (
+            "NOT FROM YOUR CONFIG: the variant table came from the profile shipped\n"
+            "with this build -- your templates carry no deck-variant list. Everything\n"
+            "else in this block is yours."
+            if "lvs_decks.variants" in seeded
+            else "NEEDS CONFIRMATION: deck variants come from the calibre manifest,\n"
+            "which is the only place they were ever written down."
+        ),
     }
+    for net_field in ("power_names", "ground_names"):
+        if net_field in seeded:
+            profile_comments[net_field] = (
+                "NOT FROM YOUR CONFIG: your templates carry no supply-net line, so\n"
+                "this list came from the profile shipped with this build. LVS treats\n"
+                "these as the supply nets -- check them."
+            )
     resource_comments = {
         **question_text.get(f"config/{RESOURCES_FILENAME}", {}),
         "lvs_run_mt": "NEEDS CONFIRMATION: read back from the runset; nobody has confirmed\n"
@@ -2060,6 +2194,13 @@ def format_report(report: MigrationReport) -> str:
     for decision in report.decisions:
         lines.append(f"  {decision.describe()}")
         lines.append(f"      answered: {report.answers.get(decision.key)!r}")
+
+    lines.append("")
+    lines.append("=== NOT from your config (seeded from the shipped profile) ===")
+    if not report.shipped_fallbacks:
+        lines.append("  none")
+    for field_name in report.shipped_fallbacks:
+        lines.append(f"  profile.{field_name}")
 
     lines.append("")
     lines.append("=== needs confirmation (values carried over, nobody has checked them) ===")

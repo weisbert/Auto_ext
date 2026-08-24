@@ -547,6 +547,13 @@ def _make_install(tmp_path: Path) -> Path:
     (box / "config" / "workspace.yaml").write_text("site: real\n", encoding="utf-8")
     (box / "recipes").mkdir()
     (box / "recipes" / "mine.yaml").write_text("corner: RCWORST\n", encoding="utf-8")
+    # Shipped code the operator edits in place. Not preservable -- the render
+    # path resolves it at run time -- so the package's copy wins and this one
+    # has to be archived instead.
+    (box / "templates" / "calibre").mkdir(parents=True)
+    (box / "templates" / "calibre" / "calibre_lvs.qci.j2").write_text(
+        "validated by hand over months\n", encoding="utf-8"
+    )
     return box
 
 
@@ -562,6 +569,10 @@ def _make_package(tmp_path: Path, name: str = "Auto_ext_pro_abc1234.tar.gz") -> 
     (staging / "config" / "workspace.yaml").write_text("site: PACKAGE DEFAULT\n", encoding="utf-8")
     (staging / "recipes").mkdir()
     (staging / "recipes" / "rc-typical-55c.yaml").write_text("shipped: true\n", encoding="utf-8")
+    (staging / "templates" / "calibre").mkdir(parents=True)
+    (staging / "templates" / "calibre" / "calibre_lvs.qci.j2").write_text(
+        "shipped default\n", encoding="utf-8"
+    )
 
     tarball = tmp_path / name
     with tarfile.open(tarball, "w:gz") as tar:
@@ -670,6 +681,98 @@ def test_an_unrelated_directory_is_swept_and_the_warning_comes_last(tmp_path: Pa
         "the data-moved warning must be the last thing on screen, not buried mid-report:\n" + out
     )
     assert any("scratch_notes" in ln for ln in tail)
+
+
+def _keepsakes(box: Path) -> list[Path]:
+    root = box / ".deploy" / "yours"
+    return sorted(root.iterdir()) if root.is_dir() else []
+
+
+def test_an_edited_templates_dir_is_archived_before_the_package_overwrites_it(
+    tmp_path: Path,
+) -> None:
+    """templates/ is shipped code the operator edits, so both claims are real.
+
+    The package's copy has to win -- the render path resolves templates at run
+    time, and a box left on last release's copy runs last release's flow with
+    this release's code. So the outgoing copy is archived instead of kept.
+    """
+
+    box = _make_install(tmp_path)
+    shutil.copy2(_make_package(tmp_path), box)
+
+    proc = _deploy(box)
+    out = proc.stdout.decode("utf-8", "replace")
+    assert proc.returncode == 0, out
+
+    installed = box / "templates" / "calibre" / "calibre_lvs.qci.j2"
+    assert installed.read_text(encoding="utf-8") == "shipped default\n"
+
+    kept = _keepsakes(box)
+    assert len(kept) == 1, out
+    assert (kept[0] / "calibre" / "calibre_lvs.qci.j2").read_text(
+        encoding="utf-8"
+    ) == "validated by hand over months\n"
+
+    assert "YOUR EDITED COPIES WERE REPLACED" in out
+    assert kept[0].name in out, "the warning must name the path, not just the fact"
+
+
+def test_an_untouched_templates_dir_leaves_no_keepsake(tmp_path: Path) -> None:
+    """Negative control: an unmodified box must not accumulate copies forever.
+
+    Without this, every deploy on every box would leave another archive that
+    nothing ever deletes, and the directory that is supposed to hold the one
+    irreplaceable thing fills with noise.
+    """
+
+    box = _make_install(tmp_path)
+    (box / "templates" / "calibre" / "calibre_lvs.qci.j2").write_text(
+        "shipped default\n", encoding="utf-8"
+    )
+    shutil.copy2(_make_package(tmp_path), box)
+
+    proc = _deploy(box)
+    out = proc.stdout.decode("utf-8", "replace")
+    assert proc.returncode == 0, out
+    assert _keepsakes(box) == []
+    assert "YOUR EDITED COPIES WERE REPLACED" not in out
+
+
+def test_the_keepsake_outlives_the_backup_that_used_to_be_its_only_home(
+    tmp_path: Path,
+) -> None:
+    """The actual bug: the originals survived on three backup rotations.
+
+    Four deploys is one more than KEEP_BACKUPS, so the backup holding the
+    edited templates is gone by the end. The archive must not be.
+    """
+
+    box = _make_install(tmp_path)
+    shutil.copy2(_make_package(tmp_path), box)
+
+    keep_backups = int(
+        DEPLOY_SH.read_text(encoding="utf-8").split("KEEP_BACKUPS=", 1)[1].split("\n", 1)[0]
+    )
+    for _ in range(keep_backups + 1):
+        proc = _deploy(box)
+        assert proc.returncode == 0, proc.stdout.decode("utf-8", "replace")
+
+    assert len(list((box / ".deploy" / "backups").iterdir())) == keep_backups
+
+    kept = _keepsakes(box)
+    assert len(kept) == 1, "only the first deploy had anything of the operator's to keep"
+    assert (kept[0] / "calibre" / "calibre_lvs.qci.j2").read_text(
+        encoding="utf-8"
+    ) == "validated by hand over months\n"
+
+    # and it really is out of rotation's reach
+    surviving = {
+        (backup / "templates" / "calibre" / "calibre_lvs.qci.j2").read_text(encoding="utf-8")
+        for backup in (box / ".deploy" / "backups").iterdir()
+        if (backup / "templates" / "calibre" / "calibre_lvs.qci.j2").is_file()
+    }
+    assert "validated by hand over months\n" not in surviving
 
 
 def test_a_corrupt_package_leaves_the_install_untouched(tmp_path: Path) -> None:

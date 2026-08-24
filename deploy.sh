@@ -14,6 +14,9 @@
 #   <install>/.deploy/backups/<timestamp>/  previous install (keeps last N)
 #   <install>/.deploy/seed/                 the package's config/ + recipes/,
 #                                           set aside when yours already exist
+#   <install>/.deploy/yours/<name>-<ts>/    the copy of a shipped-but-edited
+#                                           directory (templates/) that this
+#                                           deploy replaced. NEVER rotated.
 #   <install>/.deploy/tmp/                  scratch (doctor.sh)
 #   <install>/.deploy/preserve.list         optional: extra top-level names to
 #                                           KEEP across deploys
@@ -43,6 +46,13 @@
 #               under .deploy/seed/ so you can diff it at your leisure.
 #   * anything that looks like run data (a directory holding run.json), whatever
 #     it is called, and anything listed in .deploy/preserve.list
+#
+# templates/ is the one thing that is NOT in that list but is still yours in
+# part: the code resolves it at run time, so the package's copy has to win, or
+# a box runs last release's flow with this release's code. Instead of keeping
+# it, the outgoing copy is archived under .deploy/yours/ -- which rotation
+# never touches -- whenever it differs from what the package ships, and the
+# summary says so.
 #
 # Invoke via `bash` (not ./deploy.sh): the red zone's login shell is often
 # tcsh/csh, and an upload channel may drop the exec bit. `bash` needs neither.
@@ -88,6 +98,19 @@ INCOMING="$DEPLOY/incoming"
 STAGING="$DEPLOY/staging"
 BACKUPS="$DEPLOY/backups"
 SEEDDIR="$DEPLOY/seed"
+KEEPSAKES="$DEPLOY/yours"
+
+# Directories the package ships AND the operator is expected to edit in place.
+# They cannot be seed-only: the code resolves them at run time, so a box left
+# on last release's copy would run last release's flow with this release's
+# code. But replacing them silently is how a validated set of templates -- the
+# input to the frozen-defaults audit, months of work -- came to be surviving on
+# nothing but three backup rotations.
+#
+# So they ARE replaced, and the outgoing copy is additionally archived under
+# .deploy/yours/, which rotation never touches. Only when it differs from what
+# the package ships, so an untouched box accumulates nothing.
+KEEPSAKE_DIRS=("templates")
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 # Only the first four lines: the file is stamped by `git archive` via
@@ -400,6 +423,26 @@ if [[ ! -f "$TARGET/$SENTINEL" ]]; then echo "post-swap sentinel missing" >&2; f
 
 trap - ERR
 
+# --- archive the outgoing copy of anything the operator edits in place -------
+# At this point the OLD copy is in $BK and the NEW one is installed, so this is
+# the last moment both exist. `diff -rq` decides whether there was anything to
+# keep; if diff is missing (it is base RHEL, but an install can be stripped) the
+# copy is made unconditionally -- a few KB against the thing being lost.
+_keepsakes=()
+for _n in "${KEEPSAKE_DIRS[@]}"; do
+  [[ -d "$BK/$_n" ]] || continue
+  if command -v diff >/dev/null 2>&1 && diff -rq "$BK/$_n" "$TARGET/$_n" >/dev/null 2>&1; then
+    continue   # identical to what the package ships: nothing of yours in it
+  fi
+  mkdir -p "$KEEPSAKES"
+  _dest="$KEEPSAKES/$_n-$TS"
+  if cp -a "$BK/$_n" "$_dest" 2>/dev/null; then
+    _keepsakes+=("$_dest")
+  else
+    echo "!! could not archive $BK/$_n -- it survives only in the backup" >&2
+  fi
+done
+
 # --- warn about content that only exists in the backup now -------------------
 # Anything we moved out that the new package does NOT ship is the operator's own
 # material. It is safe in $BK today, but backup rotation deletes it after
@@ -500,9 +543,26 @@ echo
 echo "    NEXT -- check this box can actually run it (no network / no venv needed):"
 echo "       cd $TARGET && bash deploy/doctor.sh --test"
 
-# --- the one warning that must never scroll past ----------------------------
-# Everything above is routine; this is the only line that can mean "your data
-# moved". Printed last, on its own, with a blank line around it.
+# --- the warnings that must never scroll past -------------------------------
+# Everything above is routine; these are the only lines that can mean "your
+# data moved". Printed last, on their own, with a blank line around them.
+if (( ${#_keepsakes[@]} > 0 )); then
+  echo
+  echo "  ==================================================================="
+  echo "  !! YOUR EDITED COPIES WERE REPLACED BY THE PACKAGE'S"
+  echo "     These directories are shipped code AND yours to edit, so the new"
+  echo "     package's copy had to win. What you had differed from it, so it"
+  echo "     was archived first -- rotation never touches these:"
+  for _k in "${_keepsakes[@]}"; do
+    echo "       $_k"
+  done
+  echo "     (also in the backup at $BK, but rotation deletes that after"
+  echo "      $KEEP_BACKUPS more deploys.)"
+  echo "     Diff them against what is installed now before you re-apply"
+  echo "     anything: some differences are this release's, not yours."
+  echo "  ==================================================================="
+fi
+
 if (( ${ORPHAN_NOTE:-0} )); then
   echo
   echo "  ==================================================================="

@@ -305,6 +305,8 @@ OK  self-test passed -- the package landed intact and this interpreter runs it.
 ./run.sh runs list
 ```
 
+三条都从安装目录里敲；`config` 这种相对路径按你站的位置解析（README §Launch）。
+
 ---
 
 ## wheels 是独立的一条通道

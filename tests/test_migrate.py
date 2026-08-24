@@ -15,6 +15,7 @@ template resolution must not be able to fall through to the repository's own
 
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from typing import Any
 import pytest
 
 from auto_ext.catalog import Owner, builtin_catalog
+from auto_ext.core.profile_discover import builtin_profile
 from auto_ext.legacy_v1 import (
     load_manifest_v1,
     load_project_v1,
@@ -1117,3 +1119,173 @@ def test_an_excluded_combination_another_spec_produces_does_not_duplicate_the_ro
     assert report.cells.keys == ["LIB__inv__layout__schematic", "LIB__buf__layout__schematic"]
     assert report.cells.entry("LIB__buf__layout__schematic").enabled is True
     assert any("already in the table" in warning for warning in report.warnings)
+
+
+# ---- tables a legacy config structurally cannot hold -------------------------
+#
+# The first real red-zone migration succeeded and then failed `check-env` on
+# two blocking rows -- `pdk.corners (empty)` and `lvs.variants (empty)` --
+# because the old script had no such tables to migrate. The only way out was
+# to hand-merge the shipped profile (which has the PDK facts) with the
+# migrated one (which has the site's real paths); neither is a superset of the
+# other. `docs/refactor/DEPLOY_FINDINGS.md` section 2 is the incident.
+
+
+def _templates_without(root: Path, *, corner: bool = False, variants: bool = False) -> Path:
+    """A copy of the v1 template tree with one unmigratable table removed.
+
+    Removing rather than synthesising: the point is a tree that genuinely
+    cannot answer the question, which is what a real legacy tree looks like.
+    """
+
+    dest = root / "templates"
+    shutil.copytree(V1_TEMPLATES, dest)
+    if corner:
+        # The literal spans two continued lines in the .cmd; dropping both is
+        # what a template that never named a corner looks like.
+        corner_lines = '              -technology_corner \\\n              "TYPICAL" \\\n'
+        for cmd in (dest / "quantus").glob("*.cmd.j2"):
+            text = cmd.read_text(encoding="utf-8")
+            assert corner_lines in text, cmd
+            cmd.write_text(text.replace(corner_lines, ""), encoding="utf-8")
+    if variants:
+        # No `choices:` means no variant table, which is how _lvs_variants
+        # reads "this manifest cannot tell you the alternatives".
+        manifest = dest / "calibre" / "calibre_lvs.qci.j2.manifest.yaml"
+        text = manifest.read_text(encoding="utf-8")
+        choices = "    choices: [wodio, widio]\n"
+        assert choices in text, manifest
+        manifest.write_text(text.replace(choices, ""), encoding="utf-8")
+    return dest
+
+
+def _migrate_with_templates(config_dir: Path, out_root: Path, templates: Path) -> MigrationReport:
+    return migrate_v1_to_v2(
+        config_dir / "project.yaml",
+        config_dir / "tasks.yaml",
+        template_root=templates,
+        out_root=out_root,
+    )
+
+
+def test_the_real_config_needs_no_shipped_fallback(tmp_path: Path, elsewhere: None) -> None:
+    """The guard for every other test here: fallback fires only when needed.
+
+    A migration that quietly reached for the shipped profile while the user's
+    own templates could answer would break value-neutrality, and every
+    assertion below would still pass.
+    """
+
+    report = run_migration(REAL_CONFIG, tmp_path)
+    assert report.shipped_fallbacks == []
+
+
+def test_a_missing_corner_table_comes_from_the_shipped_profile(
+    tmp_path: Path, elsewhere: None
+) -> None:
+    templates = _templates_without(tmp_path, corner=True)
+    report = _migrate_with_templates(REAL_CONFIG, tmp_path / "out", templates)
+
+    shipped = builtin_profile()
+    assert shipped is not None and shipped.corners, "the shipped profile lost its corners"
+    assert report.shipped_fallbacks == ["corners"]
+    assert [c.name for c in report.profile.corners] == [c.name for c in shipped.corners]
+    assert report.profile.default_corner == shipped.default_corner
+
+
+def test_a_missing_variant_table_comes_from_the_shipped_profile(
+    tmp_path: Path, elsewhere: None
+) -> None:
+    templates = _templates_without(tmp_path, variants=True)
+    report = _migrate_with_templates(REAL_CONFIG, tmp_path / "out", templates)
+
+    shipped = builtin_profile()
+    assert shipped is not None and shipped.lvs_decks.variants
+    assert report.shipped_fallbacks == ["lvs_decks.variants"]
+    assert [v.name for v in report.profile.lvs_decks.variants] == [
+        v.name for v in shipped.lvs_decks.variants
+    ]
+    assert report.profile.lvs_decks.default_variant == shipped.lvs_decks.default_variant
+
+
+def test_the_seeded_table_still_carries_the_sites_own_deck_path(
+    tmp_path: Path, elsewhere: None
+) -> None:
+    """The half the shipped profile does NOT have must survive the fallback.
+
+    This is exactly what made the hand-merge necessary: the seed profile has
+    the PDK facts and the migrated profile has the site's real paths.
+    """
+
+    templates = _templates_without(tmp_path, corner=True, variants=True)
+    report = _migrate_with_templates(REAL_CONFIG, tmp_path / "out", templates)
+    project = load_project_v1(REAL_CONFIG / "project.yaml")
+    assert report.profile.lvs_decks.dir_expr == project.paths.get("calibre_lvs_dir")
+    assert report.profile.qrc.dir_expr == project.paths.get("qrc_deck_dir")
+
+
+def test_a_seeded_table_is_reported_four_ways(tmp_path: Path, elsewhere: None) -> None:
+    """Silence is the failure mode here: a value that is not the user's."""
+
+    templates = _templates_without(tmp_path, corner=True)
+    out = tmp_path / "out"
+    report = _migrate_with_templates(REAL_CONFIG, out, templates)
+
+    # 1. named on the report
+    assert "corners" in report.shipped_fallbacks
+    # 2. a disposition, so "no field disappears silently" still holds
+    seeded = [d for d in report.dispositions if d.action == "seeded_from_shipped_profile"]
+    assert [d.target for d in seeded] == [f"profile:{report.profile.profile_id}.corners"]
+    # 3. a warning, which is what makes `migrate` exit 1
+    assert any("NOT from your config" in warning for warning in report.warnings)
+    # 4. its own section in the plain-text report
+    assert "NOT from your config" in format_report(report)
+
+
+def test_the_written_yaml_says_the_table_is_not_the_users(
+    tmp_path: Path, elsewhere: None
+) -> None:
+    """The file has to say so on its own -- nobody keeps the report around."""
+
+    templates = _templates_without(tmp_path, corner=True, variants=True)
+    out = tmp_path / "out"
+    report = migrate_v1_to_v2(
+        REAL_CONFIG / "project.yaml",
+        REAL_CONFIG / "tasks.yaml",
+        template_root=templates,
+        out_root=out,
+        write=True,
+    )
+    text = (out / "config" / "profiles" / f"{report.profile.profile_id}.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert "NOT FROM YOUR CONFIG" in text
+    assert "only the corner the templates hardcode" not in text
+
+
+def test_an_empty_table_survives_when_there_is_no_shipped_profile(
+    tmp_path: Path, elsewhere: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No shipped profile is not a migration failure -- it is the old behaviour."""
+
+    monkeypatch.setattr("auto_ext.migrate.builtin_profile", lambda: None)
+    templates = _templates_without(tmp_path, corner=True, variants=True)
+    report = _migrate_with_templates(REAL_CONFIG, tmp_path / "out", templates)
+    assert report.shipped_fallbacks == []
+    assert report.profile.corners == []
+    assert report.profile.lvs_decks.variants == []
+
+
+def test_a_corner_the_templates_do_have_is_never_replaced(
+    tmp_path: Path, elsewhere: None
+) -> None:
+    """Value-neutrality still holds wherever the templates can answer.
+
+    One corner read back from the user's templates is *worse* than the nine in
+    the shipped profile by every measure except the one that matters: it is
+    theirs.
+    """
+
+    report = run_migration(REAL_CONFIG, tmp_path)
+    assert [c.technology_corner for c in report.profile.corners] == ["TYPICAL"]
+    assert "corners" not in report.shipped_fallbacks

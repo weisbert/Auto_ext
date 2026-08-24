@@ -2080,6 +2080,18 @@ def _print_migration_report(console, report, *, write: bool, out_root: Path) -> 
                 + "[/]"
             )
 
+    if report.shipped_fallbacks:
+        # Louder than "needs confirmation": those are the user's own values
+        # nobody has checked. These are not the user's values at all.
+        console.print()
+        console.print("[bold red]NOT from your config -- seeded from the shipped profile[/]")
+        console.print(
+            "[dim]  A legacy config has no table for these, so there was nothing to "
+            "migrate. Check them before the first real run.[/]"
+        )
+        for field_name in report.shipped_fallbacks:
+            console.print(f"  [red]profile.{field_name}[/]")
+
     if report.open_questions:
         console.print()
         console.print("[bold yellow]Needs confirmation[/]")
