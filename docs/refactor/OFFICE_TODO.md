@@ -255,8 +255,29 @@ bash deploy/doctor.sh --test
 ./run.sh gui --config-dir config
 ```
 
-左侧三个界面：Cells（主画面）/ Recipes（配方）/ Runs（历史）。
-Setup 不是 tab —— 是标题栏那个 ✓/✗ 徽章，点开是抽屉。
+左侧**四**个界面：Cells（主画面）/ Recipes（配方）/ Runs（历史）/ Project（这个项目的配置）。
+Setup 不是 tab —— 是标题栏那个 ✓/✗ 徽章，点开是抽屉；抽屉里一条检查指向某个字段时，
+"Edit the field" 会直接跳到 Project 屏的那一行。
+
+## 5.5 `check-env` 说某个环境变量没有 —— 而这台机器就是给不出来
+
+这正是 `check-env` 结构上答不了的那一半：它只会问 shell，shell 没有的它没有第二个地方可查。
+但**这个项目自己产出过的文件里，那个值是以解析好的形式写着的**。拿一份来喂它：
+
+```bash
+./run.sh profile read-env <runset 或 .cmd 或 si.env> [更多文件...]
+```
+
+它会逐条列出：变量名、从文件里读出的值、**现在生效的是什么**（已 pin 的 > shell 的 > 没有）、
+以及是从哪个文件的哪个表达式反推出来的。看着没问题再加 `--write` 写进
+profile 的 `env_overrides`。
+
+- 只报告不写盘；`--write` 才写。
+- 退出码：有东西会变 = 1，什么都不会变 = 0。
+- **两份文件对同一个变量给出不同答案时，两个都列出来、`--write` 跳过它。**
+  这是要你自己裁决的事，错的那个答案和对的那个一样像真的。
+
+GUI 里同一件事在 Project 屏的 "Read environment from a file..."。
 
 ## 6. 想把自己手上的 .cmd / .qci 变成配方
 

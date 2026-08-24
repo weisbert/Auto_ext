@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
         project.revert_requested.connect(self._on_project_revert_requested)
         project.open_project_requested.connect(self._open_config_dir)
         project.project_chosen.connect(self._on_project_chosen)
+        project.env_import_requested.connect(self._open_env_import)
         project.status_changed.connect(self._set_status)
 
         setup = self._setup
@@ -844,6 +845,45 @@ class MainWindow(QMainWindow):
             self._project.set_known_projects(self._project.known_projects())
             return
         self._load_and_report(Path(config_dir))
+
+    def _open_env_import(self) -> None:
+        """Read this project's environment out of files this project produced.
+
+        The dialog writes nothing. What it hands back goes into the profile's
+        ``env_overrides`` through the Project screen, so it is a staged edit
+        the user still has to Save -- the same rule the Setup drawer's pin
+        follows, and for the same reason: a value read out of a file must not
+        rewrite the PDK profile behind the user's back.
+        """
+
+        from auto_ext.ui.widgets.env_import_dialog import EnvImportDialog
+
+        profile = self._project.profile()
+        if profile is None:
+            self._set_status("no profile loaded, so there is nothing to read into")
+            return
+        dialog = EnvImportDialog(
+            profile=profile,
+            start_dir=self._controller.workarea or self._controller.config_dir,
+            parent=self,
+        )
+        dialog.values_accepted.connect(self._on_env_values_accepted)
+        dialog.exec_()
+
+    def _on_env_values_accepted(self, values: object) -> None:
+        accepted = dict(values)  # type: ignore[arg-type]
+        if not accepted:
+            return
+        profile = self._project.profile()
+        if profile is None:  # pragma: no cover - the dialog cannot open without one
+            return
+        overrides = dict(profile.env_overrides)
+        overrides.update(accepted)
+        self._project.apply_edit("env_overrides", overrides)
+        self._shell.set_current_page("project")
+        self._set_status(
+            f"{len(accepted)} value(s) pinned in the profile - Save to write them"
+        )
 
     def _on_edit_field_requested(self, path: str) -> None:
         """A Setup row asked for the field its fix hint names.

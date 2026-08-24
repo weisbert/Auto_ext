@@ -3666,6 +3666,135 @@ def profile_health(
     raise typer.Exit(code=report.exit_code)
 
 
+@profile_app.command("read-env")
+def profile_read_env(
+    files: Optional[list[Path]] = typer.Argument(
+        None,
+        metavar="[FILE]...",
+        help="Files this project generated: a runset, a .cmd, an si.env.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        resolve_path=True,
+    ),
+    profile_id: Optional[str] = typer.Option(
+        None, "--profile", help="Read against this profile instead of the only one."
+    ),
+    auto_ext_root: Optional[Path] = typer.Option(
+        None, "--auto-ext-root", help=_PROFILE_ROOT_HELP
+    ),
+    config_dir: Optional[Path] = typer.Option(
+        None,
+        "--config-dir",
+        help=_RUNS_CONFIG_HELP,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=True,
+    ),
+    profiles_dir: Optional[Path] = typer.Option(
+        None, "--profiles-dir", help=_PROFILES_DIR_HELP
+    ),
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Pin every recovered value that would change something into the "
+        "profile's env_overrides. Without it, this only reports.",
+    ),
+) -> None:
+    """Recover this project's environment values from files it produced.
+
+    The half ``check-env`` cannot do. It asks the shell; where the shell has
+    nothing to say there is no second place to look -- except in the files
+    this project has already written, which carry every path in resolved form.
+    Matching them against the expressions the profile holds gives the value
+    back: ``$env(SETUP_ROOT)/assura_tech.lib`` against
+    ``/pdk/hn001/setup/assura_tech.lib`` yields ``SETUP_ROOT``.
+
+    Exits 0 when nothing would change, 1 when something would, so a wrapper
+    can branch on "a human should look". ``--write`` pins the changes into
+    ``env_overrides`` -- the field that already means "used instead of the
+    shell", which the health checks already mark as a deliberate deviation.
+    """
+    from rich.console import Console
+    from rich.table import Table
+
+    from auto_ext.core.env_import import EnvImportError, import_env
+    from auto_ext.core.profile_discover import write_profile_yaml
+
+    if not files:
+        typer.secho(
+            "name at least one file this project generated.", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(code=2)
+
+    loaded = _require_profile(auto_ext_root, config_dir, profiles_dir, profile_id)
+    try:
+        result = import_env(list(files), profile=loaded.profile)
+    except EnvImportError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    console = Console()
+    console.print(result.summary())
+    for item in result.unreadable:
+        console.print(f"[yellow]could not read {item.label}: {item.reason}[/]")
+
+    if result.solved:
+        table = Table(title="Recovered from your files", expand=True)
+        table.add_column("variable", style="cyan", no_wrap=True)
+        table.add_column("value", overflow="fold", ratio=3)
+        table.add_column("in effect now", overflow="fold", ratio=3)
+        table.add_column("read from", overflow="fold", ratio=3)
+        for var in result.solved:
+            current = (
+                f"{var.pinned_value} (pinned)"
+                if var.pinned_value is not None
+                else (f"{var.shell_value} (shell)" if var.shell_value else "-- nothing --")
+            )
+            table.add_row(
+                var.name,
+                var.value + ("  [!]" if var.disagreements else ""),
+                current,
+                f"{var.source}: {var.via}",
+            )
+        console.print(table)
+
+    for var in result.solved:
+        for value, source in var.disagreements:
+            console.print(
+                f"[yellow]{var.name}: {source} says {value} instead. Decide which "
+                f"is right before pinning it.[/]"
+            )
+    if result.unanswered:
+        console.print(
+            "not in these files: "
+            + ", ".join(result.unanswered)
+            + " -- a different generated file may carry them"
+        )
+
+    changes = result.changes
+    if write and changes:
+        # Disagreements are excluded on purpose: an unattended --write must
+        # not silently pick a side in a question the files themselves raise.
+        safe = [var for var in changes if not var.disagreements]
+        skipped = [var.name for var in changes if var.disagreements]
+        overrides = dict(loaded.profile.env_overrides)
+        overrides.update({var.name: var.value for var in safe})
+        write_profile_yaml(
+            loaded.path, loaded.profile.model_copy(update={"env_overrides": overrides})
+        )
+        console.print(f"wrote {len(safe)} value(s) into {loaded.path}")
+        if skipped:
+            console.print(
+                f"[yellow]left alone (the files disagree): {', '.join(skipped)}[/]"
+            )
+    elif write:
+        console.print("nothing to write: every recovered value is already in effect")
+
+    raise typer.Exit(code=1 if changes else 0)
+
+
 # ---- catalog ----------------------------------------------------------------
 
 

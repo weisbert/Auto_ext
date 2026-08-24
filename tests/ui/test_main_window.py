@@ -924,3 +924,39 @@ def test_switching_project_with_unsaved_edits_asks_first(
 
     assert loaded_window.controller.config_dir == before
     assert any(kind == "question" for kind, _t, _m in dialogs)
+
+
+def test_reading_the_environment_from_a_file_stages_it_as_an_edit(
+    loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End to end for the half check-env cannot answer.
+
+    The dialog reports; accepting reaches the profile as a STAGED edit, which
+    the user still has to Save. A value read out of a file must not be able to
+    rewrite the PDK profile behind their back.
+    """
+
+    from auto_ext.ui.widgets import env_import_dialog
+
+    accepted = {"SETUP_ROOT": "/read/from/the/file"}
+
+    def fake_exec(self) -> int:
+        self.values_accepted.emit(accepted)
+        return 1
+
+    monkeypatch.setattr(env_import_dialog.EnvImportDialog, "exec_", fake_exec)
+
+    before = dict(loaded_window.project_screen.profile().env_overrides)
+    loaded_window.project_screen.env_import_requested.emit()
+
+    profile = loaded_window.project_screen.profile()
+    assert profile.env_overrides["SETUP_ROOT"] == "/read/from/the/file"
+    assert set(before) <= set(profile.env_overrides), "other pins must survive"
+    assert loaded_window.controller.is_dirty is True
+    assert loaded_window.shell.current_page_key() == "project"
+
+
+def test_the_read_environment_button_needs_a_profile(window: MainWindow) -> None:
+    """Without one there is no expression to match the file's paths against."""
+
+    assert window.project_screen._read_env_btn.isEnabled() is False

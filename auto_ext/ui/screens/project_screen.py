@@ -528,6 +528,10 @@ class ProjectScreen(QWidget):
     open_project_requested = pyqtSignal()
     #: The user picked a known project. Carries its config directory as a str.
     project_chosen = pyqtSignal(str)
+    #: The user wants this project's environment read out of files it produced.
+    #: The host owns the dialog: it needs a file chooser and the profile, and
+    #: this screen does no I/O.
+    env_import_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -587,6 +591,14 @@ class ProjectScreen(QWidget):
         self._open_btn.setToolTip("Open a config directory that is not in the list.")
         self._open_btn.clicked.connect(self.open_project_requested.emit)
         layout.addWidget(self._open_btn)
+
+        self._read_env_btn = QPushButton("Read environment from a file...", header)
+        self._read_env_btn.setToolTip(
+            "Recover this project's environment values from a runset, .cmd or "
+            "si.env it generated -- including the ones the shell cannot supply."
+        )
+        self._read_env_btn.clicked.connect(self.env_import_requested.emit)
+        layout.addWidget(self._read_env_btn)
 
         self._revert_btn = QPushButton("Revert", header)
         self._revert_btn.clicked.connect(self.revert_requested.emit)
@@ -912,6 +924,9 @@ class ProjectScreen(QWidget):
         loaded = self._workspace is not None or self._profile is not None
         self._save_btn.setEnabled(loaded and self._dirty)
         self._revert_btn.setEnabled(loaded and self._dirty)
+        # Reading the environment back needs a profile to invert expressions
+        # against; without one there is nothing to match the file's paths to.
+        self._read_env_btn.setEnabled(self._profile is not None)
 
     def _refresh_status(self) -> None:
         if self._workspace is None and self._profile is None:

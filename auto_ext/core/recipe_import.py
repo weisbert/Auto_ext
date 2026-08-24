@@ -136,6 +136,7 @@ __all__ = [
     "MIN_SITE_COVERAGE",
     "MIN_SITE_HITS",
     "QUANTUS_MARGIN",
+    "EnvSolution",
     "ImportSource",
     "ImportedFile",
     "MappedValue",
@@ -149,6 +150,7 @@ __all__ = [
     "env_vars_solvable_from_files",
     "import_recipe",
     "score_targets",
+    "solve_env_from_file",
     "solve_template_vars",
     "write_imported_recipe",
 ]
@@ -1376,6 +1378,81 @@ def _env_from_profile(
         for name, bound in _invert_env(expression, ref, solved).items():
             found.setdefault(name, bound)
     return found
+
+
+@dataclass(frozen=True)
+class EnvSolution:
+    """One environment variable recovered from a file the user's site produced."""
+
+    name: str
+    value: str
+    #: How it was recovered, in the user's terms -- the expression that was
+    #: inverted, or the template that spells the reference out. Shown next to
+    #: the value: an env value is a site fact, and a user asked to accept one
+    #: is entitled to know what it was read out of.
+    via: str
+
+
+def solve_env_from_file(
+    text: str,
+    *,
+    target: RenderTarget,
+    profile: PdkProfile | None,
+    catalog: Catalog | None = None,
+    templates_root: Path | None = None,
+) -> tuple[list[EnvSolution], list[str]]:
+    """Read environment values back out of one generated file.
+
+    Returns ``(solutions, notes)``. This is :func:`import_recipe`'s env half
+    on its own: same solver, same inversion, no Recipe, no baseline render and
+    no patch capture -- so a file that is a poor recipe (a different tool
+    vintage, a heavily hand-edited runset) still gives up whatever site facts
+    it does carry, instead of failing as a whole.
+
+    The two sources are the two :func:`_infer_env` uses, and the second is the
+    interesting one: a value the templates no longer spell as ``$env(X)``
+    because the parameterisation round moved it into a profile expression is
+    recovered by matching that expression against what the file actually says.
+    ``$env(SETUP_ROOT)/assura_tech.lib`` against
+    ``/pdk/hn001/setup/assura_tech.lib`` yields ``SETUP_ROOT``.
+
+    Nothing here reads ``os.environ``. What the shell says is a different
+    question -- and the whole point of this function is the variables about
+    which the shell has nothing to say.
+    """
+
+    cat = catalog if catalog is not None else builtin_catalog()
+    spec = cat.target(target)
+    solved = solve_template_vars(
+        _template_text(spec, templates_root), text, target=target, catalog=cat
+    )
+
+    found: dict[str, EnvSolution] = {}
+    notes = list(solved.conflicts)
+
+    # 1. references the template itself still spells out
+    for key, value in solved.values.items():
+        if not key.startswith(_ENV):
+            continue
+        name = key[len(_ENV) :]
+        found.setdefault(
+            name,
+            EnvSolution(name, value, f"written as $env({name}) in {spec.id.value}"),
+        )
+
+    # 2. references that now reach the file through a profile expression
+    if profile is not None:
+        for var, expression, ref in _invertible_sites(profile, cat):
+            rendered = _solved(solved.values, var)
+            if not rendered:
+                continue
+            for name, bound in _invert_env(expression, ref, rendered).items():
+                found.setdefault(
+                    name,
+                    EnvSolution(name, bound, f"{expression} matched against {rendered}"),
+                )
+
+    return [found[name] for name in sorted(found)], notes
 
 
 def env_vars_solvable_from_files(
