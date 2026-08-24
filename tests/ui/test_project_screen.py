@@ -407,3 +407,76 @@ def test_the_screen_writes_nothing(screen: ProjectScreen, tmp_path: Path) -> Non
     _type(screen.row("tech_name"), "HN002")
     screen._save_btn.click()
     assert list(tmp_path.iterdir()) == []
+
+
+# ---- switching projects -----------------------------------------------------
+
+
+def test_the_switcher_is_hidden_until_there_is_somewhere_to_switch_to(
+    screen: ProjectScreen,
+) -> None:
+    """A one-item picker is a control that cannot do anything."""
+
+    assert screen._project_picker.isVisibleTo(screen) is False
+    screen.set_known_projects([("config", "/work/wa/Auto_ext_pro/config")])
+    assert screen._project_picker.isVisibleTo(screen) is False
+    screen.set_known_projects(
+        [("a", "/work/wa/Auto_ext_pro/config"), ("b", "/work/other/config")]
+    )
+    assert screen._project_picker.isVisibleTo(screen) is True
+
+
+def test_the_switcher_shows_the_project_that_is_open(screen: ProjectScreen) -> None:
+    screen.set_known_projects(
+        [("other", "/work/other/config"), ("this", "/work/wa/Auto_ext_pro/config")]
+    )
+    assert screen._project_picker.currentData() == "/work/wa/Auto_ext_pro/config"
+
+
+def test_picking_another_project_asks_the_host_for_it(
+    screen: ProjectScreen, qtbot
+) -> None:
+    screen.set_known_projects(
+        [("other", "/work/other/config"), ("this", "/work/wa/Auto_ext_pro/config")]
+    )
+    with qtbot.waitSignal(screen.project_chosen) as caught:
+        screen._project_picker.setCurrentIndex(0)
+        screen._project_picker.activated.emit(0)
+    assert caught.args == ["/work/other/config"]
+
+
+def test_picking_the_project_already_open_is_not_a_switch(
+    screen: ProjectScreen, qtbot
+) -> None:
+    screen.set_known_projects(
+        [("other", "/work/other/config"), ("this", "/work/wa/Auto_ext_pro/config")]
+    )
+    with qtbot.assertNotEmitted(screen.project_chosen):
+        screen._project_picker.activated.emit(1)
+
+
+def test_loading_another_project_moves_the_selection(screen: ProjectScreen) -> None:
+    """The list is unchanged; which entry is current is not."""
+
+    screen.set_known_projects(
+        [("other", "/work/other/config"), ("this", "/work/wa/Auto_ext_pro/config")]
+    )
+    screen.set_project(
+        workspace=make_workspace(),
+        profile=make_profile(),
+        config_dir="/work/other/config",
+    )
+    assert screen._project_picker.currentData() == "/work/other/config"
+    assert screen.known_projects()[0] == ("other", "/work/other/config")
+
+
+def test_the_full_path_is_on_every_row(screen: ProjectScreen) -> None:
+    """The display name is a directory name and two projects can share one."""
+
+    from PyQt5.QtCore import Qt as _Qt
+
+    screen.set_known_projects(
+        [("a", "/work/one/config"), ("b", "/work/two/config")]
+    )
+    picker = screen._project_picker
+    assert picker.itemData(0, _Qt.ToolTipRole) == "/work/one/config"

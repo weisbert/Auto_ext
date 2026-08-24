@@ -47,9 +47,10 @@ Assumptions
   ``keep_runs`` raises while the user is still looking at what they typed. The
   control keeps the rejected text (retyping it from scratch is worse than
   seeing it marked) and the working copy keeps the old value.
-* **``profile_ids`` is supplied by the host**, not scanned here: the screen
-  does no I/O, and the set of profiles is a property of the config directory
-  the host loaded.
+* **``profile_ids`` and the known-project list are supplied by the host**, not
+  scanned here: the screen does no I/O, the set of profiles is a property of
+  the config directory the host loaded, and the project list lives in
+  ``QSettings``, which :mod:`auto_ext.ui.app` owns.
 * Groups render in the order ``project_fields`` declares; a group that gains a
   field later renders at the end rather than not at all.
 """
@@ -523,8 +524,10 @@ class ProjectScreen(QWidget):
     save_requested = pyqtSignal(object, object)
     #: Throw the working copies away and reload from the host.
     revert_requested = pyqtSignal()
-    #: The user wants to open a different project.
+    #: The user wants to open a project this screen has not been told about.
     open_project_requested = pyqtSignal()
+    #: The user picked a known project. Carries its config directory as a str.
+    project_chosen = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -534,6 +537,7 @@ class ProjectScreen(QWidget):
         self._profile_original: PdkProfile | None = None
         self._rows: dict[str, FieldRow] = {}
         self._profile_ids: list[str] = []
+        self._known: list[tuple[str, str]] = []
         self._config_dir: str = ""
         self._dirty = False
         self._loading = False
@@ -568,9 +572,19 @@ class ProjectScreen(QWidget):
             f"font-weight: {theme.FONT_WEIGHT_BOLD};"
         )
         layout.addWidget(self._title)
+
+        # Switching a project is picking one, not navigating to it again.
+        # Hidden until there is more than the current project to pick from: a
+        # one-item picker is a control that cannot do anything.
+        self._project_picker = QComboBox(header)
+        self._project_picker.setToolTip("Switch to another project you have opened.")
+        self._project_picker.activated.connect(self._on_project_picked)
+        self._project_picker.hide()
+        layout.addWidget(self._project_picker)
         layout.addStretch(1)
 
         self._open_btn = QPushButton("Open project...", header)
+        self._open_btn.setToolTip("Open a config directory that is not in the list.")
         self._open_btn.clicked.connect(self.open_project_requested.emit)
         layout.addWidget(self._open_btn)
 
@@ -669,8 +683,39 @@ class ProjectScreen(QWidget):
         self._set_dirty(False)
         self._reload_rows()
         self._refresh_header()
+        # Re-sync the switcher's selection: the list is unchanged but which
+        # entry is the current one is not.
+        self.set_known_projects(self._known)
         self._refresh_enabled()
         self._refresh_status()
+
+    def set_known_projects(self, projects: list[tuple[str, str]]) -> None:
+        """Fill the switcher. ``projects`` is ``(display name, config dir)``.
+
+        The host supplies the list for the same reason it supplies
+        ``profile_ids``: the screen does no I/O and knows nothing outside the
+        one project it was handed.
+        """
+
+        self._known = list(projects)
+        picker = self._project_picker
+        picker.blockSignals(True)
+        try:
+            picker.clear()
+            for name, path in self._known:
+                picker.addItem(name, path)
+                picker.setItemData(picker.count() - 1, path, Qt.ToolTipRole)
+            index = picker.findData(self._config_dir)
+            picker.setCurrentIndex(index if index >= 0 else -1)
+        finally:
+            picker.blockSignals(False)
+        # One entry is the project already open: nothing to switch to.
+        picker.setVisible(len(self._known) > 1)
+
+    def known_projects(self) -> list[tuple[str, str]]:
+        """What the switcher currently offers."""
+
+        return list(self._known)
 
     def workspace(self) -> WorkspaceConfig | None:
         """The working copy, or None when no project is loaded."""
@@ -845,6 +890,14 @@ class ProjectScreen(QWidget):
         self.save_requested.emit(self._changed_workspace(), self._changed_profile())
 
     # ---- chrome ----------------------------------------------------------
+
+    def _on_project_picked(self, index: int) -> None:
+        """A pick that is not a change is not a switch."""
+
+        chosen = self._project_picker.itemData(index)
+        if not chosen or chosen == self._config_dir:
+            return
+        self.project_chosen.emit(str(chosen))
 
     def _refresh_header(self) -> None:
         if self._workspace is None and self._profile is None:

@@ -6,7 +6,11 @@ passed, and enters the Qt event loop.
 
 Persists the last successfully-loaded ``config_dir`` via
 :class:`QSettings` so the next launch auto-loads it (skip with
-``--config-dir`` to override or ``--no-remember-config`` to disable).
+``--config-dir`` to override or ``--no-remember-config`` to disable),
+and the list of every project opened (:mod:`auto_ext.ui.project_registry`)
+so the Project screen can switch between them. This module is the only
+one that touches ``QSettings``: the window is handed the list rather
+than reading it, so a GUI test cannot pick up the developer's own.
 The settings file lives at the platform's default user-scope location
 (``~/.config/Auto_ext/Auto_ext.conf`` on Linux,
 ``HKCU\\Software\\Auto_ext\\Auto_ext`` on Windows). The path stored is
@@ -25,6 +29,7 @@ from PyQt5.QtWidgets import QApplication
 
 from auto_ext.model.workspace import WORKSPACE_FILENAME
 from auto_ext.ui.main_window import MainWindow
+from auto_ext.ui.project_registry import known_projects, remember_project
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +80,42 @@ def run_gui(
         # Persist every successful load — covers init-wizard accept,
         # "Open existing" file dialog, and the auto-load above.
         window._controller.config_loaded.connect(_write_last_config_dir)
+        window._controller.config_loaded.connect(
+            lambda config_dir: _remember_and_push(window, config_dir)
+        )
+        # Before the first load, so a window opened with no project still
+        # offers the ones this user has worked on.
+        _push_known_projects(window)
 
     window.show()
     return app.exec_()
+
+
+def _remember_and_push(window: MainWindow, config_dir: object) -> None:
+    """Record the loaded project and refresh the window's switcher."""
+
+    remember_project(None if config_dir is None else Path(str(config_dir)))
+    _push_known_projects(window)
+
+
+def _push_known_projects(window: MainWindow) -> None:
+    """Hand the window the project list, as ``(display name, config dir)``.
+
+    Names are made unique here rather than in the registry: two installs can
+    perfectly well both sit in a directory called ``Auto_ext_pro``, and a
+    picker with two identical rows is a picker you cannot use. The full path
+    is on every row as a tooltip either way.
+    """
+
+    projects = known_projects()
+    names = [entry.name for entry in projects]
+    rows: list[tuple[str, str]] = []
+    for entry in projects:
+        label = entry.name
+        if names.count(label) > 1:
+            label = f"{label}  ({entry.path.parent})"
+        rows.append((label, str(entry.path)))
+    window.set_known_projects(rows)
 
 
 def _read_last_config_dir() -> Path | None:

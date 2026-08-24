@@ -884,3 +884,43 @@ def test_a_field_the_project_screen_cannot_show_is_reported(
 
     loaded_window.setup_drawer.edit_field_requested.emit("nope.not.a.field")
     assert "nope.not.a.field" in loaded_window.shell.status_left()
+
+
+def test_switching_project_from_the_picker_loads_it(
+    loaded_window: MainWindow, tmp_path: Path, v2_config_dir: Path
+) -> None:
+    """The picker is a second door onto the same load path as File -> Open."""
+
+    import shutil
+
+    other = tmp_path / "other_project"
+    shutil.copytree(v2_config_dir, other)
+    other_config = other / "config"
+
+    loaded_window.set_known_projects(
+        [
+            ("this", str(v2_config_dir / "config")),
+            ("other", str(other_config)),
+        ]
+    )
+    loaded_window.project_screen.project_chosen.emit(str(other_config))
+
+    assert loaded_window.errors == [], loaded_window.errors
+    assert loaded_window.controller.config_dir == other_config
+
+
+def test_switching_project_with_unsaved_edits_asks_first(
+    loaded_window: MainWindow, tmp_path: Path, v2_config_dir: Path, dialogs
+) -> None:
+    """Same guard as File -> Open: the question fixture answers Cancel."""
+
+    row = loaded_window.project_screen.row("display_name")
+    row.control().setText("unsaved")
+    row.commit()
+    assert loaded_window.controller.is_dirty is True
+
+    before = loaded_window.controller.config_dir
+    loaded_window.project_screen.project_chosen.emit(str(tmp_path / "nowhere"))
+
+    assert loaded_window.controller.config_dir == before
+    assert any(kind == "question" for kind, _t, _m in dialogs)

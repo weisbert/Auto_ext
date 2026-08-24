@@ -248,6 +248,7 @@ class MainWindow(QMainWindow):
         project.save_requested.connect(self._on_project_save_requested)
         project.revert_requested.connect(self._on_project_revert_requested)
         project.open_project_requested.connect(self._open_config_dir)
+        project.project_chosen.connect(self._on_project_chosen)
         project.status_changed.connect(self._set_status)
 
         setup = self._setup
@@ -822,6 +823,27 @@ class MainWindow(QMainWindow):
             )
         finally:
             self._pushing = False
+
+    def set_known_projects(self, projects: list[tuple[str, str]]) -> None:
+        """Fill the Project screen's switcher with ``(display name, config dir)``.
+
+        Pushed in rather than read here: the list lives in ``QSettings``, and
+        :mod:`auto_ext.ui.app` is the one module that owns that store. A window
+        that read it directly would also read the developer's real settings
+        file in every GUI test that does not think to isolate it.
+        """
+
+        self._project.set_known_projects(projects)
+
+    def _on_project_chosen(self, config_dir: str) -> None:
+        """Switch projects from the picker. Same guard as File -> Open."""
+
+        if not self._confirm_discard("Switching project"):
+            # The picker is showing the project the user declined to leave, so
+            # put the selection back where it was.
+            self._project.set_known_projects(self._project.known_projects())
+            return
+        self._load_and_report(Path(config_dir))
 
     def _on_edit_field_requested(self, path: str) -> None:
         """A Setup row asked for the field its fix hint names.

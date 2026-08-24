@@ -119,10 +119,17 @@
 
 ## 落地顺序
 
-1. Project 屏 + 字段规格层 + Save/Revert（第二条）
-2. `test_reachability.py` 收编两个对象（第二条的验收）
-3. 项目登记表 + 切换（第一条）
-4. 从产出文件反推环境值（第三条）
+1. ✅ Project 屏 + 字段规格层 + Save/Revert（第二条）
+2. ✅ `test_reachability.py` 收编两个对象（第二条的验收）
+3. ✅ 项目登记表 + 切换（第一条）—— `auto_ext/ui/project_registry.py`，
+   存在 `QSettings` 里、和 `last_config_dir` 同一个 store。**`app.py` 是唯一碰
+   `QSettings` 的模块**，列表推给窗口而不是让窗口自己读：否则每个没想到要隔离
+   设置的 GUI 测试都会读到开发者本人的那份。
+4. ⬜ 从产出文件反推环境值（第三条）
 
 第二条先做，因为它是另外两条的**载体**：切项目切的是这一屏显示的对象，
 反推出来的值也要落到这一屏的某个字段上。
+
+第四条的落点已经就位：`ProjectScreen.apply_edit(path, value)`。Setup 抽屉的
+"pin 这个值"走的就是它 —— 从屏幕外面改项目的东西一律走这个口子，
+而不是在宿主那边另存一份，因为两份工作副本在任何一边 Revert 的那一刻就会打架。
