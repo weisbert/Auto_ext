@@ -106,6 +106,7 @@ from PyQt5.QtWidgets import (
 )
 
 from auto_ext.catalog import Currently, OptionSpec, OptionType
+from auto_ext.catalog.spec import Screen, Tier
 from auto_ext.ui import theme
 
 __all__ = [
@@ -123,6 +124,8 @@ __all__ = [
     "OBJ_OPTION_HINT",
     "OBJ_OPTION_LABEL",
     "OBJ_OPTION_UNIT",
+    "OBJ_POINTER_LINK",
+    "OBJ_POINTER_VALUE",
     "OBJ_QUESTION_MARKER",
     "QUESTION_GLYPH",
     "BoolOptionEditor",
@@ -195,6 +198,8 @@ OBJ_OPTION_LABEL = "optionLabel"
 OBJ_OPTION_HINT = "optionHint"
 OBJ_OPTION_UNIT = "optionUnit"
 OBJ_QUESTION_MARKER = "optionQuestionMarker"
+OBJ_POINTER_VALUE = "optionPointerValue"
+OBJ_POINTER_LINK = "optionPointerLink"
 OBJ_FROZEN_MARKER = "optionFrozenMarker"
 OBJ_GROUP_HEADER = "optionGroupHeader"
 
@@ -286,6 +291,10 @@ class EditorKind(StrEnum):
     CHECKS = "checks"
     LIST = "list"
     TEXT = "text"
+    #: Not a control at all: a row that names a setting this screen does not
+    #: own and points at the screen that does. See
+    #: :class:`PointerOptionEditor` and :attr:`Tier.ELSEWHERE`.
+    POINTER = "pointer"
 
 
 def editor_kind(spec: OptionSpec) -> EditorKind:
@@ -298,6 +307,12 @@ def editor_kind(spec: OptionSpec) -> EditorKind:
     gets a list to pick from.
     """
 
+    # Ownership beats type. An ``elsewhere`` row is a real setting with a
+    # real type, but not one this form may write, so it never resolves to a
+    # control -- checking this first is what keeps a bool owned by the Cells
+    # page from drawing an editable check box.
+    if spec.tier is Tier.ELSEWHERE:
+        return EditorKind.POINTER
     if spec.type is OptionType.BOOL:
         return EditorKind.CHECKBOX
     if spec.type is OptionType.ENUM:
@@ -1039,6 +1054,23 @@ class ChoiceOptionEditor(OptionEditor):
     def choices(self) -> list[str]:
         return [self._combo.itemText(i) for i in range(self._combo.count())]
 
+    def set_source_note(self, note: str) -> None:
+        """Append a clause to the grey hint saying where the list came from.
+
+        Only ``choices_from`` rows use it, and only once a profile is loaded.
+        A combo offering one item looks identical whether the source has one
+        answer or the control is stuck, and the two readings lead somewhere
+        very different -- the office report behind this was a corner list
+        that "looked broken" under the demo profile, which has exactly one
+        corner while the real PDK has nine.
+        """
+
+        if self._hint is None:
+            return
+        base = hint_text(self._spec)
+        self._hint.set_full_text(f"{base} {_DOT} {note}" if base else note)
+        self._hint.setToolTip(self._hint.full_text())
+
     def set_choices(self, choices: Sequence[str]) -> None:
         """Replace the offered value set, keeping the value on screen.
 
@@ -1440,6 +1472,100 @@ class NumberOptionEditor(OptionEditor):
         )
 
 
+class PointerOptionEditor(OptionEditor):
+    """A read-only row naming a setting another screen owns.
+
+    Draws the catalog default and a link saying where the real control is,
+    e.g. ``av_extracted   set per cell, not per recipe -- open the Cells
+    column``. Artboard ``A`` draws exactly this.
+
+    It binds to nothing. ``elsewhere`` rows carry no ``recipe_field_path``
+    (they are not Recipe fields), so there is no value to read or write here
+    and :meth:`value` answers with the catalog default, unchanging. It never
+    emits ``value_changed`` -- a form that reported an edit for a row it does
+    not own would put a star in the title bar that no Save could clear.
+
+    The whole reason it exists is discoverability. The office report was "I
+    cannot find where to rename the Quantus output view": the setting was
+    per-cell and correctly lived on the Cells page, and a person editing a
+    recipe had no way to learn that. Ownership was never the bug.
+    """
+
+    #: ``(screen, option key)`` -- the screen to open and the row to select.
+    navigate_requested = pyqtSignal(str, str)
+
+    def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
+        super().__init__(spec, parent)
+        self._value = spec.default
+
+        self._shown = ElidedLabel(_display_default(spec), parent=self)
+        self._shown.setObjectName(OBJ_POINTER_VALUE)
+        self._shown.setEnabled(False)
+        self._add_control(self._shown, stretch=0)
+
+        self._link = ElidedLabel(_pointer_text(spec), parent=self)
+        self._link.setObjectName(OBJ_POINTER_LINK)
+        self._link.setCursor(Qt.PointingHandCursor)
+        self._link.setToolTip(
+            f"{_pointer_text(spec)} — click to open that screen"
+        )
+        self._link.mouseReleaseEvent = self._on_link_clicked  # type: ignore[method-assign]
+        self._add_control(self._link, stretch=1)
+        self._add_trailing()
+
+    def _on_link_clicked(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.navigate_requested.emit(str(self.spec.screen), self.spec.key)
+            event.accept()
+
+    @property
+    def kind(self) -> EditorKind:
+        return EditorKind.POINTER
+
+    def value(self) -> Any:
+        return self._value
+
+    def _apply_value(self, value: Any) -> None:
+        # Kept so the base class contract holds; the row is never written to
+        # by the form, and a host pushing a value in only changes what the
+        # row *reports* the other screen holds.
+        self._value = value
+        self._shown.set_full_text("" if value is None else str(value))
+
+    def link_label(self) -> ElidedLabel:
+        """The clickable half, for tests and for the focus-detail pane."""
+
+        return self._link
+
+
+def _display_default(spec: OptionSpec) -> str:
+    value = spec.default
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(v) for v in value) or "—"
+    return str(value)
+
+
+def _pointer_text(spec: OptionSpec) -> str:
+    """Where the real control is. One sentence, per owning screen."""
+
+    return _POINTER_TEXT.get(
+        spec.screen, f"owned by another screen — {spec.screen}"
+    )
+
+
+#: Keyed by :class:`Screen` so a new owning screen is one entry, not a
+#: condition in the widget. ``RECIPES`` has no entry: a recipes-owned row is
+#: never a pointer row, it is a control.
+_POINTER_TEXT: dict[Screen, str] = {
+    Screen.CELLS: "set per cell, not per recipe — open the Cells column",
+    Screen.PROJECT: "set once per project — open the Project page",
+}
+
+
 _EDITOR_BY_KIND: dict[EditorKind, type[OptionEditor]] = {
     EditorKind.CHECKBOX: BoolOptionEditor,
     EditorKind.COMBO: ChoiceOptionEditor,
@@ -1448,6 +1574,7 @@ _EDITOR_BY_KIND: dict[EditorKind, type[OptionEditor]] = {
     EditorKind.CHECKS: MultiChoiceOptionEditor,
     EditorKind.LIST: ListOptionEditor,
     EditorKind.TEXT: TextOptionEditor,
+    EditorKind.POINTER: PointerOptionEditor,
 }
 
 

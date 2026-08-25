@@ -261,7 +261,7 @@ options:
   # ---- identity: the DUT. Owner is the Cells table, never a Recipe. --------
 
   - key: library
-    tier: elsewhere
+    tier: identity
     screen: cells
     template_var: library
     context_path: library
@@ -284,7 +284,7 @@ options:
       being portable, which is the one property a Recipe has to keep.
 
   - key: cell
-    tier: elsewhere
+    tier: identity
     screen: cells
     template_var: cell
     context_path: cell
@@ -309,7 +309,7 @@ options:
     why: One column of the cell table; the primary axis of a run.
 
   - key: layout_view
-    tier: elsewhere
+    tier: identity
     screen: cells
     template_var: lvs_layout_view
     context_path: lvs_layout_view
@@ -332,7 +332,7 @@ options:
     why: One column of the cell table.
 
   - key: source_view
-    tier: elsewhere
+    tier: identity
     screen: cells
     template_var: lvs_source_view
     context_path: lvs_source_view
@@ -1777,19 +1777,42 @@ options:
     context_path: recipe.extraction.extract_type
     owner: recipe
     type: enum
-    choices: [rc_coupled, rc_decoupled, r_only, c_only]
-    choices_confidence: guess
+    choices:
+      - none
+      - substrate_only
+      - r_only
+      - c_only_decoupled
+      - c_only_coupled
+      - c_only_decoupled_to_substrate
+      - rc_decoupled
+      - rc_coupled
+      - rc_decoupled_to_substrate
+      - rlc_decoupled
+      - rlc_coupled
+      - rlc_decoupled_to_substrate
+      - rlck_decoupled
+      - rlck_coupled
+      - rlck_decoupled_to_substrate
+    choices_confidence: certain
     default: rc_coupled
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:12
-    question: Which extraction types do you actually use, and what are the exact spellings your QRC accepts?
     notes: >-
-      That the file says rc_coupled is certain; that the other three spellings
-      are what QRC accepts is a guess. The draft also listed rcc and rlck --
-      dropped here rather than shipping four unverified spellings, since RLCK
-      would additionally require the inductor half of the parasitic device
-      contract, which no template mentions.
+      Fifteen values, from the extract syntax table, and every one of them is
+      usable in our flow: the members restricted to LVS input are exactly the
+      ones a Calibre-svdb run qualifies for.
+      Three of the four spellings this row used to carry were wrong. c_only
+      does not exist -- it is c_only_coupled or c_only_decoupled, and which
+      one you mean is the whole question. The earlier draft listed rcc and
+      rlck, which do not exist either; they were dropped as unverified before
+      the table was read, which turned out to be right for the wrong reason.
+      This also answers "only resistance" (r_only) and "only capacitance"
+      (c_only_coupled with coupling, c_only_decoupled without).
+      RLCK still needs the inductor half of the parasitic device contract
+      (-ind_component / -mutual_ind_component), which neither template emits,
+      so choosing an rlc or rlck member today gets an incomplete deck. That
+      is a template gap, not a value-set one.
     lands_in:
       - {target: quantus.ext.cmd, section: extract, option: -type, line: 12}
       - {target: quantus.dspf.cmd, section: extract, option: -type, line: 12}
@@ -1797,6 +1820,215 @@ options:
       The single most important extraction condition. C-only for early
       iteration, RC-coupled for signoff -- and today it cannot be changed.
 
+
+  - key: use_field_solver
+    tier: common
+    groups_with: extract_type
+    template_var: use_field_solver
+    context_path: null
+    owner: recipe
+    type: enum
+    choices: [none, default_accuracy, high_accuracy]
+    choices_confidence: certain
+    nullable: true
+    default: null
+    placeholder: (tool default -- we emit no line)
+    currently: absent
+    observed: false
+    question: >-
+      Which of the three -use_field_solver levels does an omitted line
+      actually give us, and what does default_accuracy cost in runtime
+      against high_accuracy?
+    notes: >-
+      Common tier because this is an accuracy knob on the critical path, not
+      a curiosity. Nearly every official example in the manual sets it, all
+      of them to default_accuracy, and our templates omit the line entirely
+      -- so we run whatever the tool defaults to, and nobody here knows what
+      that is. That gap is the reason the row exists at absent rather than
+      not existing.
+    why: The accuracy lever the vendor always sets and we never do.
+
+  - key: extract_via_cap
+    groups_with: extract_type
+    template_var: extract_via_cap
+    context_path: null
+    owner: recipe
+    type: bool
+    choices_confidence: likely
+    nullable: true
+    default: null
+    placeholder: (tool default)
+    currently: absent
+    observed: false
+    question: What is the default of extract -extract_via_cap, and does it interact with -use_field_solver?
+    why: Via and contact capacitance, which is not negligible in dense RF routing.
+
+  - key: extract_gate_diffusion_fringing_cap
+    groups_with: extract_type
+    template_var: extract_gate_diffusion_fringing_cap
+    context_path: null
+    owner: recipe
+    type: bool
+    choices_confidence: likely
+    nullable: true
+    default: null
+    placeholder: (tool default)
+    currently: absent
+    observed: false
+    question: >-
+      What is the default of -extract_gate_diffusion_fringing_cap, and is it
+      superseded when the PDK device model already carries fringing?
+    notes: >-
+      Double-counting risk, which is why it is worth asking rather than
+      simply enabling: if the device model already includes gate-diffusion
+      fringing, turning this on adds it twice.
+    why: Gate-diffusion fringing capacitance, and the risk of counting it twice.
+
+  - key: inductance_nets_file
+    groups_with: extract_type
+    template_var: inductance_nets_file
+    context_path: null
+    owner: recipe
+    type: path
+    choices_confidence: guess
+    nullable: true
+    default: null
+    currently: absent
+    observed: false
+    question: >-
+      What is the format of the inductance nets file, and is it mandatory for
+      the rlc and rlck extract types?
+    notes: >-
+      This is the inductor half of the parasitic device contract that the
+      extract_type notes flag as missing. Choosing an rlc or rlck member
+      almost certainly needs this file, so the fifteen-value extract_type set
+      is not fully usable until this row is.
+    why: Gates whether the RLC and RLCK extraction types are usable at all.
+
+  - key: substrate_nets_file
+    groups_with: extract_type
+    template_var: substrate_nets_file
+    context_path: null
+    owner: recipe
+    type: path
+    choices_confidence: guess
+    nullable: true
+    default: null
+    currently: absent
+    observed: false
+    question: >-
+      Is -substrate_nets_file required for the substrate_only and
+      decoupled_to_substrate extract types?
+    notes: >-
+      Pairs with the substrate_only and *_decoupled_to_substrate members of
+      the extract_type set. Substrate coupling is a first-order RF effect and
+      today we cannot express it at all.
+    why: Substrate coupling, which for RF is not a detail.
+
+  - key: selection_layers
+    groups_with: extract_selection
+    template_var: selection_layers
+    context_path: null
+    owner: recipe
+    type: list
+    choices_confidence: guess
+    default: []
+    currently: absent
+    observed: false
+    notes: >-
+      Layer names are a PDK fact, so the value set cannot be frozen in this
+      file; the control stays an editable free-text list. Read together with
+      selection_dividing_layers_type.
+    why: Restricts extraction to nets touching named layers.
+
+  - key: selection_dividing_layers_type
+    groups_with: extract_selection
+    template_var: selection_dividing_layers_type
+    context_path: null
+    owner: recipe
+    type: enum
+    choices: [LT, LE, GT, GE]
+    choices_confidence: certain
+    nullable: true
+    default: null
+    placeholder: (not emitted)
+    currently: absent
+    observed: false
+    notes: >-
+      The comparison operator applied against the selection_layers list. We
+      emit neither today, and one without the other means nothing.
+    why: How the layer-based net selection compares against the layer list.
+
+  - key: global_nets_nets
+    groups_with: extract_selection
+    template_var: global_nets_nets
+    context_path: null
+    owner: recipe
+    type: list
+    choices_confidence: guess
+    default: []
+    currently: absent
+    observed: false
+    question: >-
+      What are the defaults and interaction rules of the four global_nets
+      options, and how do they relate to the power_names / ground_names
+      tables on the profile?
+    notes: >-
+      global_nets is LVS-input only, and it is what DEFINES the power and
+      ground nets that `extract -selection all` then excludes. So "all" does
+      not mean all, and what it leaves out is invisible today because we
+      model neither this command nor its file form.
+      For RF that is not a detail: whether supply parasitics are extracted
+      changes the answer. Siblings global_nets_file,
+      global_nets_import_from_lvs and global_nets_force are separate rows.
+    why: Decides what -selection all actually covers, which nothing else says.
+
+  - key: global_nets_file
+    groups_with: extract_selection
+    template_var: global_nets_file
+    context_path: null
+    owner: recipe
+    type: path
+    choices_confidence: guess
+    nullable: true
+    default: null
+    currently: absent
+    observed: false
+    notes: The file form of global_nets_nets. Format not captured.
+    why: The same list, supplied as a file instead of inline.
+
+  - key: global_nets_import_from_lvs
+    groups_with: extract_selection
+    template_var: global_nets_import_from_lvs
+    context_path: null
+    owner: recipe
+    type: bool
+    choices_confidence: guess
+    nullable: true
+    default: null
+    placeholder: (tool default)
+    currently: absent
+    observed: false
+    notes: >-
+      Takes the global-net list from the LVS run rather than from us, which
+      is likely what a Calibre-input flow wants -- but the default and the
+      precedence against an explicit list are not captured.
+    why: Whether the supply-net list comes from LVS instead of from the recipe.
+
+  - key: global_nets_force
+    groups_with: extract_selection
+    template_var: global_nets_force
+    context_path: null
+    owner: recipe
+    type: bool
+    choices_confidence: guess
+    nullable: true
+    default: null
+    placeholder: (tool default)
+    currently: absent
+    observed: false
+    notes: Precedence rule against the other three global_nets options not captured.
+    why: Forces the named nets to be treated as global.
   - key: array_vias_spacing
     template_var: array_vias_spacing
     context_path: recipe.extraction.array_vias_spacing
@@ -1840,8 +2072,8 @@ options:
     context_path: recipe.extraction.max_fracture_length_unit
     owner: recipe
     type: enum
-    choices: [MICRONS, MILS, MILLIMETERS, DBU]
-    choices_confidence: guess
+    choices: [MICRONS, SQUARES]
+    choices_confidence: likely
     default: MICRONS
     currently: jinja_var
     observed: true
@@ -1849,6 +2081,17 @@ options:
     notes: >-
       Missing from the Recipe sketch in 01-schema.md section 1.2, which is an
       omission: setting a fracture length without its unit is meaningless.
+      Two members, not four: MILS / MILLIMETERS / DBU were never legal for
+      this option; the real alternative to microns is squares.
+      Case is deliberately ours and deliberately not certain. The manual
+      spells both members lowercase; we emit MICRONS because that is what the
+      Cadence Quantus UI 18.21-s340 export itself wrote -- the golden deck
+      header records the tool -- so QRC demonstrably accepts the uppercase.
+      Keeping our spelling means the set stays uppercase to match, and the
+      confidence stays likely until one real run confirms SQUARES is accepted
+      in that case too. Lower-casing the set while leaving the default
+      uppercase would make the catalog refuse to load, since a default
+      outside its own choices is a load-time error.
     lands_in:
       - {target: quantus.ext.cmd, section: extraction_setup, option: -max_fracture_length_unit, line: 16}
       - {target: quantus.dspf.cmd, section: extraction_setup, option: -max_fracture_length_unit, line: 16}
@@ -1885,11 +2128,46 @@ options:
       extraction-owned. It is neither: the directory comes from the profile
       and the file name is a QRC deck convention, so both halves are profile
       facts and neither is a recipe choice.
+      What the option this file feeds actually does: coupling caps between
+      nets INSIDE one blocked cell are not extracted, but coupling caps
+      between the internal nets of two ADJACENT blocked cells still are --
+      which is the part people get wrong when they assume blocking is total.
+      Its companion -parasitic_blocking_device_cells_type is modelled at
+      parasitic_blocking_device_cells_type. The file FORMAT is not documented
+      anywhere we have looked and remains unconfirmed.
     lands_in:
       - {target: quantus.ext.cmd, section: extraction_setup, option: -parasitic_blocking_device_cells_file, line: 18}
       - {target: quantus.dspf.cmd, section: extraction_setup, option: -parasitic_blocking_device_cells_file, line: 18}
     why: A file the PDK QRC deck ships. Pure process fact.
 
+
+  - key: parasitic_blocking_device_cells_type
+    groups_with: qrc_preserve_cell_list_name
+    template_var: parasitic_blocking_device_cells_type
+    context_path: null
+    owner: recipe
+    type: enum
+    choices: [white, gray]
+    choices_confidence: certain
+    nullable: true
+    default: null
+    placeholder: (omitted -- the tool takes white)
+    currently: absent
+    observed: false
+    notes: >-
+      The documented companion to the -parasitic_blocking_device_cells_file
+      our templates DO emit (see qrc_preserve_cell_list_name), and the reason
+      it is worth a row is that the default changed between releases.
+      Omitting it yields `white`: parasitics of nets inside a blocked cell
+      still take part in coupling extraction. `gray` is the OLD behaviour --
+      blocked-cell net parasitics not extracted at all -- and in earlier
+      releases writing the file option alone implied it. So our templates are
+      not buggy, but a deck that used to mean one thing now means another,
+      and that belongs in front of the user as a choice rather than in a
+      release note nobody read.
+      Transistor-level flows only, and it works in both coupled and
+      decoupled modes.
+    why: Whether parasitics inside blocked device cells are extracted at all.
   - key: qrc_deck_dir
     template_var: qrc_deck_dir
     context_path: pdk.qrc_deck_dir
@@ -1945,6 +2223,12 @@ options:
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:19
+    notes: >-
+      Identical columns and the same open question as output_net_name_space:
+      edit the two together or the catalog stays half-corrected. See that row
+      for the deviation from the vendor default, the ixf/nxf prerequisite,
+      and why the confidence must not be raised while the case of the members
+      is unverified.
     lands_in:
       - {target: quantus.ext.cmd, section: extraction_setup, option: -net_name_space, line: 19}
       - {target: quantus.dspf.cmd, section: extraction_setup, option: -net_name_space, line: 19}
@@ -2001,11 +2285,41 @@ options:
       The live specimen of the four-layer knob problem: manifest says 5000,
       project.yaml says 100, tasks.yaml says 200, and --knob can say a fourth
       thing. One Recipe field replaces all four layers.
+      RULED 2026-08-25, do not "fix" this back: the vendor default is 2000
+      and ours is 5000 ON PURPOSE. 5000 is the real manifest value at this
+      site, and default in this file means the effective value today, so
+      lowering it would silently change every extraction and throw away the
+      four-layer evidence this row exists to record.
     lands_in:
       - {target: quantus.ext.cmd, section: filter_cap, option: -exclude_floating_nets_limit, line: 23, quoting: bare}
       - {target: quantus.dspf.cmd, section: filter_cap, option: -exclude_floating_nets_limit, line: 23, quoting: bare}
     why: Cap on how many floating nets are dropped. Already a knob; stays tunable.
 
+
+  - key: exclude_floating_decoupling_factor
+    groups_with: exclude_floating_nets_limit
+    template_var: exclude_floating_decoupling_factor
+    context_path: null
+    owner: recipe
+    type: float
+    choices_confidence: certain
+    range: [0.0, 1.0]
+    range_verified: false
+    nullable: true
+    default: null
+    placeholder: (1 when used with exclude_floating_nets)
+    currently: absent
+    observed: false
+    notes: >-
+      Scales how the capacitance of excluded floating nets is redistributed.
+      The valid range is 0 < value <= 1.0 and the LOWER BOUND IS EXCLUSIVE,
+      which the [lo, hi] range column cannot express -- a validator has to
+      reject 0 explicitly, and the range recorded here is therefore wrong by
+      one endpoint on purpose rather than by accident.
+      The manual recommends 1 when used together with -exclude_floating_nets,
+      which our templates do set.
+      Not the same option as the capacitance section's decoupling_factor.
+    why: How excluded floating-net capacitance is redistributed.
   - key: coupling_cap_threshold_absolute
     tier: common
     template_var: coupling_cap_threshold_absolute
@@ -2057,11 +2371,59 @@ options:
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:28
+    notes: >-
+      filter_res -merge_parallel_res is documented as flow LVS ONLY, not ALL
+      -- unlike its neighbour remove_dangling_res. Both templates feed
+      Quantus from a Calibre LVS svdb, so both emissions are inside the LVS
+      flow and legal today. If a non-LVS input_db is ever added, this line
+      has to become conditional; nothing currently would notice.
     lands_in:
       - {target: quantus.ext.cmd, section: filter_res, option: -merge_parallel_res, line: 28, quoting: bare}
       - {target: quantus.dspf.cmd, section: filter_res, option: -merge_parallel_res, line: 28, quoting: bare}
     why: Collapses parallel resistors. A reduction condition on the result.
 
+
+  - key: merge_parallel_via
+    groups_with: merge_parallel_res
+    template_var: merge_parallel_via
+    context_path: null
+    owner: recipe
+    type: bool
+    choices_confidence: guess
+    nullable: true
+    default: null
+    placeholder: (tool default)
+    currently: absent
+    observed: false
+    question: What is the documented default of filter_res -merge_parallel_via, and which flow is it?
+    notes: >-
+      The via counterpart to -merge_parallel_res. Neither template emits it,
+      so we take the tool default. Flow applicability not captured, which
+      matters here because its neighbour merge_parallel_res turns out to be
+      LVS-only while remove_dangling_res is ALL.
+    why: Affects the extracted resistor count the way -merge_parallel_res does.
+
+  - key: min_res_centering
+    groups_with: min_res_ohm
+    template_var: min_res_centering
+    context_path: null
+    owner: recipe
+    type: bool
+    choices_confidence: guess
+    nullable: true
+    default: null
+    placeholder: (tool default)
+    currently: absent
+    observed: false
+    question: >-
+      Is filter_res -min_res_centering a boolean or an enum, what is its
+      default, and which flow does it apply to?
+    notes: >-
+      Companion to -min_res (this catalog's min_res_ohm): it governs how a
+      resistor dropped by the min_res floor has its node collapsed, so it
+      moves where the remaining parasitics land. type: bool is a GUESS -- the
+      option may well be an enum.
+    why: Where parasitics end up when small resistors are dropped.
   - key: min_res_ohm
     tier: common
     template_var: min_res
@@ -2074,7 +2436,15 @@ options:
     currently: manifest_knob
     observed: true
     source_ref: examples/legacy/templates/quantus/ext.cmd.j2.manifest.yaml:18
-    notes: Catalog key carries the unit; the template variable is the bare "min_res".
+    notes: >-
+      Catalog key carries the unit; the template variable is the bare
+      "min_res". Our default 0.001 sits exactly ON the inductance-extraction
+      floor: with inductance extraction on, a smaller value is warned about
+      and clamped back up to 0.001, so anything below that is unreachable
+      rather than merely unusual.
+      Inductance extraction also does not support SPEF output. If
+      extract_type ever carries an rlc/rlck member in a real recipe, that is
+      a cross-row constraint against output_form, not a property of this row.
     lands_in:
       - {target: quantus.ext.cmd, section: filter_res, option: -min_res, line: 29, quoting: bare}
       - {target: quantus.dspf.cmd, section: filter_res, option: -min_res, line: 29, quoting: bare}
@@ -2090,6 +2460,11 @@ options:
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:30
+    notes: >-
+      filter_res -remove_dangling_res is documented as flow ALL, so it is
+      legal in every Quantus flow and emitting it in both command files is
+      correct. Contrast merge_parallel_res, which is LVS-only. Flow
+      applicability verified; the vendor default is not captured.
     lands_in:
       - {target: quantus.ext.cmd, section: filter_res, option: -remove_dangling_res, line: 30, quoting: bare}
       - {target: quantus.dspf.cmd, section: filter_res, option: -remove_dangling_res, line: 30, quoting: bare}
@@ -2111,6 +2486,13 @@ options:
       codes the LVS engine and the post-trigger hard codes "-query svdb", so a
       user who set this to pvs would only get a self-contradictory state. It
       is derived from "which LVS tool this pipeline runs", not chosen.
+      The vendor value set, recorded for reference and deliberately NOT
+      offered as choices: assura | pvs | calibre | def | oa | metal_fill,
+      plus gds and HPB in the fuller table. Note that metal_fill here is an
+      input_db TYPE (input_db -type metal_fill -gds_file <f>) and is a
+      different thing from the metal_fill command. Keeping choices at
+      [calibre] is not an oversight: a derived row must not present the
+      alternatives it cannot honour.
     lands_in:
       - {target: quantus.ext.cmd, section: input_db, option: -type, line: 31, layout: own_line, indent: 0}
       - {target: quantus.dspf.cmd, section: input_db, option: -type, line: 31, layout: own_line, indent: 0}
@@ -2131,7 +2513,8 @@ options:
       here it is space separated in the order cell / view / library, while the
       Jivaro inputView is slash separated in the order library / cell / view.
       Anyone assuming one shared render helper will produce a broken file.
-      Absent from dspf.cmd entirely -- see the question on dspf_top_cell.
+      Absent from dspf.cmd entirely, and correctly so: the DSPF output form
+      does not take -design_cell_name at all. See dspf_top_cell.
     lands_in:
       - {target: quantus.ext.cmd, section: input_db, option: -design_cell_name, line: 32}
     why: How the extracted-view flow identifies the top cell.
@@ -2141,26 +2524,29 @@ options:
     context_path: null
     owner: fixed
     type: structural
-    choices_confidence: guess
+    choices_confidence: certain
     default: null
     currently: absent
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:31
-    question: >-
-      dspf.cmd has no -design_cell_name. What determines the top cell in the
-      DSPF flow -- whatever the svdb in query_output happens to contain?
     notes: >-
-      A real hole, not a footnote: dspf.cmd is missing -design_cell_name,
-      -format and -device_properties_file all three. Recorded as its own row
-      so it cannot be lost.
-    why: The DSPF flow has no explicit top-cell binding and nobody has confirmed why.
+      CLOSED 2026-08-25, and it was not the hole this row was created to
+      record. -design_cell_name is required only for PVS or Calibre input
+      when the desired output is extracted_view or lvs_extracted_view. DSPF
+      output does not need it, so dspf.cmd.j2 omitting it is CORRECT, not a
+      gap; the top cell follows from the LVS run itself (-run_name plus the
+      query_output data).
+      Of the three options this row used to call missing, -format turns out
+      to be Assura-only (see input_db_format) and so must not be there
+      either. Only -device_properties_file is still open.
+    why: How the DSPF flow identifies the top cell -- it follows from the LVS run itself.
 
   - key: device_property_value
     template_var: device_property_value
     context_path: null
     owner: fixed
     type: int
-    choices_confidence: guess
+    choices_confidence: certain
     default: 7
     currently: hardcoded_literal
     observed: true
@@ -2171,6 +2557,11 @@ options:
     notes: >-
       A QRC property-selection bitmask whose meaning nobody here knows. Fixed
       because a value nobody understands must not be offered as a choice.
+      7 / 6 / 5 are confirmed as Cadence's own defaults for the three
+      -*_property_value options, so we are transcribing the vendor default
+      rather than a site choice. That settles the VALUE; the meaning of the
+      bitmask is still not documented anywhere we have seen, which is why
+      the row stays owner: fixed.
     why: Which device properties QRC reads out of the svdb. Meaning unknown; value transcribed.
 
   - key: input_db_run_name
@@ -2230,7 +2621,7 @@ options:
     context_path: null
     owner: fixed
     type: int
-    choices_confidence: guess
+    choices_confidence: certain
     default: 6
     currently: hardcoded_literal
     observed: true
@@ -2245,7 +2636,7 @@ options:
     context_path: null
     owner: fixed
     type: int
-    choices_confidence: guess
+    choices_confidence: certain
     default: 5
     currently: hardcoded_literal
     observed: true
@@ -2261,7 +2652,7 @@ options:
     context_path: recipe.output.dspf.input_hierarchy_delimiter
     owner: recipe
     type: str
-    choices_confidence: guess
+    choices_confidence: certain
     default: "/"
     currently: jinja_var
     observed: true
@@ -2271,6 +2662,13 @@ options:
       setting anywhere, because an extracted view goes back into the DFII
       hierarchy and never flattens a name -- worth writing down, or someone
       will helpfully "fix" the asymmetry by adding the row to ext.cmd.
+      Default "/" confirmed. One correction worth keeping straight, because
+      the obvious summary of it is wrong: -hierarchy_delimiter IS in the
+      Calibre input_db option table, and input_db options are not partitioned
+      by output type at all. This row is requires_emit: [dspf] purely because
+      ext.cmd.j2 does not emit it -- OUR choice, not a vendor restriction.
+      Its output_db counterpart is a different story: that one really is
+      absent from the extracted_view table.
     lands_in:
       - {target: quantus.dspf.cmd, section: input_db, option: -hierarchy_delimiter, line: 35}
     why: How hierarchical names are spelled on the way in. Must match the DSPF consumer.
@@ -2282,8 +2680,8 @@ options:
     context_path: recipe.extraction.metal_fill
     owner: recipe
     type: enum
-    choices: [none, virtual, actual]
-    choices_confidence: guess
+    choices: [floating, grounded, virtual, none]
+    choices_confidence: likely
     default: virtual
     currently: jinja_var
     observed: true
@@ -2295,6 +2693,13 @@ options:
       section absent, the behaviour is whatever the deck defaults to, which
       could equally be "real". Until the office check, "extracted view emits
       no section" is preserved as-is rather than normalised to none.
+      The member set is floating | grounded | virtual | none. actual was
+      never a legal value -- it is our own invention and is gone.
+      Confidence stays likely rather than certain for a specific reason: the
+      manual states that grounded and virtual apply to all input types, and
+      the sentence saying what floating and none apply to is cut off in the
+      extract we hold. So we do not yet know that floating and none are legal
+      for Calibre-LVS input. Default virtual is unaffected either way.
     lands_in:
       - {target: quantus.dspf.cmd, section: metal_fill, option: -type, line: 40, quoting: bare}
     why: >-
@@ -2320,12 +2725,26 @@ options:
       cannot produce both files today. Choosing between them is done by
       pointing a template path at a different file. Turning that into a list
       is the headline feature of removing the template slots.
+      The two forms differ in more than which options are legal. With LVS
+      input, output files are AUTO-SPLIT at 2 GB with numeric suffixes .1,
+      .2 and so on -- the only exception being compressed SPEF/DSPF, which
+      stay one file. extracted_view / lvs_extracted_view are neither split
+      nor compressible. So anything downstream that reads a DSPF must cope
+      with shards (an RF top level reaches 2 GB without trying), while the
+      extracted_view branch must not go looking for them. This is why
+      requires_emit is a real dimension on every output_db row rather than
+      bookkeeping.
+      One flow restriction worth recording: the DFII extracted-view output
+      form requires LVS INPUT and is unreachable from a DEF/OA input_db.
+      Satisfied vacuously while input_db_type is fixed to calibre; it becomes
+      a live constraint the moment that stops being true.
     lands_in:
       - {target: quantus.ext.cmd, section: output_db, option: -type, line: 41, layout: own_line, indent: 0}
       - {target: quantus.dspf.cmd, section: output_db, option: -type, line: 41, layout: own_line, indent: 0}
     why: Which artifacts the extraction produces. The defining choice of a recipe.
 
   - key: cap_component
+    requires_emit: [extracted_view]
     template_var: cap_component
     context_path: pdk.parasitics.cap_component
     owner: profile
@@ -2341,9 +2760,15 @@ options:
       the four Jivaro models: change one side without the other and Jivaro
       cannot read the devices Quantus wrote. Modelled on
       PdkProfile.parasitics, not in the Recipe, because the device names are a
-      property of the library. The asymmetry is itself a fact worth keeping:
-      Jivaro also names an inductor and a mutual, Quantus names neither,
-      because RLCK extraction is not enabled.
+      property of the library. On the inductor asymmetry, see
+      parasitic_ind_model -- Quantus does have the matching options and we
+      just do not emit them.
+      On confidence: the vendor default for the parasitic capacitor component
+      name is confirmed, but this row is owner: profile -- it models what THIS
+      PDK's library ships, which is exactly what the open question below
+      still asks. choices_confidence is about the value SET, never the current
+      value, so marking it certain while that question stands would be the
+      catalog contradicting itself. It stays likely on purpose.
     lands_in:
       - {target: quantus.ext.cmd, section: output_db, option: -cap_component, line: 42}
     why: Which analogLib device parasitic caps are instantiated as. A PDK/library fact.
@@ -2354,8 +2779,11 @@ options:
     context_path: recipe.output.extracted_view.cap_property_name
     owner: recipe
     type: str
-    choices_confidence: likely
+    choices_confidence: certain
     default: c
+    notes: >-
+      Default property name confirmed as `c`, documented in the same sentence
+      as cap_component's `pcapacitor`.
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:43
@@ -2383,7 +2811,7 @@ options:
     context_path: recipe.output.common.device_finger_delimiter
     owner: recipe
     type: str
-    choices_confidence: likely
+    choices_confidence: certain
     default: "@"
     currently: jinja_var
     observed: true
@@ -2394,10 +2822,18 @@ options:
     notes: >-
       Same value in both output forms, so it is ONE parameter with two landing
       sites and therefore one Recipe field (recipe.output.common), not a field
-      duplicated per output form.
+      duplicated per output form. Default confirmed as "@" from the dspf
+      output_db table.
+      OPEN, and not answerable from the manual: -device_finger_delimiter is
+      absent from the complete option table for output_db -type
+      extracted_view, yet ext.cmd.j2:45 emits it there. The templates came
+      from a Quantus GUI 18.21-s340 export and the tool we run is 18.12, so
+      the table's silence is not proof. One real run settles it -- the tool
+      either rejects the unknown option or does not.
     why: Separator in multi-finger device names. Must match what the simulator expects.
 
   - key: cdl_out_map_directory
+    requires_emit: [extracted_view]
     template_var: cdl_out_map_directory
     context_path: paths.output_dir
     owner: run
@@ -2420,9 +2856,10 @@ options:
     template_var: include_cap_model
     context_path: recipe.output.common.include_cap_model
     owner: recipe
-    type: bool
+    type: enum
+    choices: ["true", "false", "comment"]
     choices_confidence: certain
-    default: false
+    default: "false"
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:48
@@ -2436,12 +2873,28 @@ options:
     template_var: include_parasitic_cap_model
     context_path: recipe.output.common.include_parasitic_cap_model
     owner: recipe
-    type: bool
+    type: enum
+    choices: ["true", "false", "comment"]
     choices_confidence: certain
-    default: false
+    default: "false"
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:49
+    notes: >-
+      Three-valued, not boolean: the tool accepts true | false |
+      comment, exactly like its sibling include_parasitic_res_model,
+      which has been an enum all along and works.
+      This was a REAL BUG, not a data nit. The row said bool and both
+      templates rendered it as [[ 'true' if x else 'false' ]], so
+      `comment` was unreachable -- a third of the option was
+      unspellable from the GUI, which is the exact failure this
+      project exists to end.
+      Fixing it took four coordinated changes, and fewer would have
+      broken the golden decks: the render context comes from the
+      Recipe model, and the Jinja environment is StrictUndefined with
+      no finalize hook, so a Python False reaching the bare variable
+      renders as "False" with a capital F. Hence recipe.py holds a
+      str, not a bool.
     lands_in:
       - {target: quantus.ext.cmd, section: output_db, option: -include_parasitic_cap_model, line: 49}
       - {target: quantus.dspf.cmd, section: output_db, option: -include_parasitic_cap_model, line: 48}
@@ -2452,12 +2905,28 @@ options:
     template_var: include_res_model
     context_path: recipe.output.common.include_res_model
     owner: recipe
-    type: bool
+    type: enum
+    choices: ["true", "false", "comment"]
     choices_confidence: certain
-    default: false
+    default: "false"
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:50
+    notes: >-
+      Three-valued, not boolean: the tool accepts true | false |
+      comment, exactly like its sibling include_parasitic_res_model,
+      which has been an enum all along and works.
+      This was a REAL BUG, not a data nit. The row said bool and both
+      templates rendered it as [[ 'true' if x else 'false' ]], so
+      `comment` was unreachable -- a third of the option was
+      unspellable from the GUI, which is the exact failure this
+      project exists to end.
+      Fixing it took four coordinated changes, and fewer would have
+      broken the golden decks: the render context comes from the
+      Recipe model, and the Jinja environment is StrictUndefined with
+      no finalize hook, so a Python False reaching the bare variable
+      renders as "False" with a capital F. Hence recipe.py holds a
+      str, not a bool.
     lands_in:
       - {target: quantus.ext.cmd, section: output_db, option: -include_res_model, line: 50}
       - {target: quantus.dspf.cmd, section: output_db, option: -include_res_model, line: 49}
@@ -2485,6 +2954,7 @@ options:
     why: Emits, suppresses, or comments out parasitic resistor model statements.
 
   - key: res_component
+    requires_emit: [extracted_view]
     template_var: res_component
     context_path: pdk.parasitics.res_component
     owner: profile
@@ -2494,7 +2964,9 @@ options:
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:52
-    notes: Half of the parasitic-device contract; see cap_component.
+    notes: >-
+      Half of the parasitic-device contract; see cap_component, including why
+      the confidence stays likely rather than following the vendor default.
     lands_in:
       - {target: quantus.ext.cmd, section: output_db, option: -res_component, line: 52}
     why: Which analogLib device parasitic resistors are instantiated as. A PDK/library fact.
@@ -2505,8 +2977,11 @@ options:
     context_path: recipe.output.extracted_view.res_property_name
     owner: recipe
     type: str
-    choices_confidence: likely
+    choices_confidence: certain
     default: r
+    notes: >-
+      Default property name confirmed as `r`, same sentence as res_component's
+      `presistor`.
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:53
@@ -2537,9 +3012,16 @@ options:
     context_path: recipe.output.dspf.subtype
     owner: recipe
     type: enum
-    choices: [extended, standard]
-    choices_confidence: guess
+    choices: [standard, extended, compatible, compact]
+    choices_confidence: certain
     default: extended
+    notes: >-
+      Four members. standard / extended / compatible are unrestricted;
+      compact is tagged LVS, which our Calibre-input flow satisfies. The
+      two-member set this row used to carry came from a prose sentence rather
+      than the option table.
+      starN is NOT a member of this option -- it belongs to the SPEF output
+      form and is DEF/OA-restricted. Do not add it here.
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:42
@@ -2583,11 +3065,16 @@ options:
     context_path: recipe.output.dspf.hierarchy_delimiter
     owner: recipe
     type: str
-    choices_confidence: guess
+    choices_confidence: certain
     default: "/"
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:46
+    notes: >-
+      Default "/" confirmed from the dspf output_db table. Unlike its input_db
+      namesake, this option is genuinely absent from the extracted_view
+      output_db table, so requires_emit: [dspf] here reflects the tool rather
+      than only our templates.
     lands_in:
       - {target: quantus.dspf.cmd, section: output_db, option: -hierarchy_delimiter, line: 46}
     why: How hierarchical names are spelled on the way out. Must match the DSPF consumer.
@@ -2599,7 +3086,7 @@ options:
     owner: recipe
     type: list
     choices: [CANONICAL_RES, PARASITIC_RES, CANONICAL_CAP, PARASITIC_CAP, DIODE, MOS, BIPOLAR, GENERIC]
-    choices_confidence: guess
+    choices_confidence: certain
     default: [CANONICAL_RES, PARASITIC_RES, CANONICAL_CAP, PARASITIC_CAP, DIODE, MOS, BIPOLAR, GENERIC]
     currently: jinja_var
     observed: true
@@ -2608,6 +3095,13 @@ options:
       Nine physical lines: the option on one, then one quoted value per line,
       each with a continuation. The only value_per_line site in the catalog,
       and the reason the layout column exists.
+      All eight members are confirmed and the list is multi-valued
+      (space-separated in the manual, not an alternation), which is why this
+      row is type: list with a per-value loop rather than an enum.
+      Case is the one open point: we emit UPPERCASE and the manual spells the
+      members lowercase. Ours is what the Cadence Quantus UI 18.21-s340
+      export itself wrote -- the golden deck header records the tool -- so
+      QRC demonstrably accepts the uppercase spelling and it is kept.
     lands_in:
       - {target: quantus.dspf.cmd, section: output_db, option: -output_xy, line: 51, layout: value_per_line}
     why: Which element classes get coordinates in the DSPF. Affects file size and back-annotation.
@@ -2618,12 +3112,17 @@ options:
     context_path: recipe.output.dspf.netlist_coupling_values
     owner: recipe
     type: enum
-    choices: [double, single]
-    choices_confidence: guess
+    choices: [double, single, separate]
+    choices_confidence: certain
     default: double
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:60
+    notes: >-
+      Three members, not two: the output_db -type dspf table gives
+      double | single | separate, and its LVS restriction tag covers the whole
+      option, so `separate` is legal for our Calibre-input flow. Default
+      `double` unchanged and still inside the set.
     lands_in:
       - {target: quantus.dspf.cmd, section: output_db, option: -netlist_coupling_values, line: 60}
     why: How coupling caps are written into the DSPF. Changes what the simulator sees.
@@ -2658,6 +3157,25 @@ options:
       - {target: quantus.dspf.cmd, section: output_db, option: -sub_node_char, line: 62}
     why: Character introducing subnodes of a split net. Must match the simulator.
 
+
+  - key: disable_subnodes
+    requires_emit: [dspf]
+    groups_with: sub_node_char
+    template_var: disable_subnodes
+    context_path: null
+    owner: recipe
+    type: bool
+    choices_confidence: certain
+    nullable: true
+    default: null
+    placeholder: (tool default -- subnodes are written)
+    currently: absent
+    observed: false
+    notes: >-
+      Suppresses the split-net subnodes that sub_node_char names, so the two
+      rows are read together: with this on, sub_node_char has nothing left to
+      delimit.
+    why: Whether split-net subnodes appear in the DSPF, and so what can be back-annotated.
   - key: query_output_dir
     template_var: query_output_dir
     context_path: paths.query_output_dir
@@ -2674,6 +3192,18 @@ options:
       output_dir prefix is a Jinja variable; the rest of each of these
       derived paths is a literal repeated at every site, which is the
       coupling these rows exist to name.
+      output_setup -directory_name defaults to the CURRENT WORKING DIRECTORY
+      when omitted. We never omit it, so that default is inert -- but it is
+      exactly why the line must keep being emitted: dropping it would
+      silently relocate every output to wherever the runner happened to be
+      launched from, which is the kind of bug that looks like missing files.
+      The rule that "input directory should equal output directory, and
+      output_setup -directory_name defaults to input_db -directory_name" is
+      ASSURA-ONLY and does not apply to our Calibre input. All four landing
+      sites below do write the same path to both, so that equality is OUR
+      choice and nothing stops the two being split later.
+      Quantus auto-creates this directory if it is missing, which is the
+      opposite of -file_name -- see dspf_out_path.
     lands_in:
       - {target: quantus.ext.cmd, section: input_db, option: -directory_name, line: 35}
       - {target: quantus.ext.cmd, section: output_setup, option: -directory_name, line: 56}
@@ -2713,6 +3243,8 @@ options:
     why: A derived run path.
 
   - key: dspf_out_path
+    tier: elsewhere
+    screen: project
     template_var: dspf_out_path
     context_path: paths.dspf_out
     owner: run
@@ -2723,11 +3255,28 @@ options:
     observed: true
     source_ref: auto_ext/core/config.py:220
     notes: >-
-      The draft called this an existing knob. It is not -- it is a
-      ProjectConfig field with a per-task override, i.e. a different
-      configuration path entirely, so deleting the knob machinery will not
-      touch it. The pattern itself belongs to WorkspaceConfig; the resolved
-      value is a run fact.
+      The draft called this an existing knob. It is not -- the pattern
+      belongs to WorkspaceConfig (Project page, "DSPF output") and the
+      resolved value is a run fact, so deleting the knob machinery never
+      touched it. A DSPF is a file on disk and so needs a whole path, which
+      is a project convention; an extracted view is a cellview inside the
+      library, so only its name is left and that is per cell. Two different
+      mechanisms, both correct. The per-task override this note used to
+      mention is gone -- config.py refuses the key by name and points at the
+      workspace pattern, whose {cell} covers the one real use.
+      Drawn on the Recipes form as a pointer row (tier: elsewhere) because
+      "where does the DSPF go" is asked while editing a recipe.
+      HARD CONSTRAINT: a directory given as part of -file_name is NOT created
+      by Quantus and must already exist -- unlike -directory_name, which
+      Quantus does create. Since this row resolves to a full path, the runner
+      creates the parent before launching Quantus
+      (runner._ensure_dspf_parent) and --dry-run reports a missing one
+      instead of creating it. Before that existed the flow worked only by
+      luck: the default pattern writes straight into WORK_ROOT2, so any
+      pattern with a sub-directory in it died inside Quantus hours into a
+      run. Do not remove that call.
+      If -file_name were omitted entirely the output name would default to
+      the DEF design name plus .sp / .dspf / .spef.
     lands_in:
       - {target: quantus.dspf.cmd, section: output_setup, option: -file_name, line: 58}
     why: Where the DSPF lands. Derived from the workspace pattern per run.
@@ -2744,7 +3293,22 @@ options:
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:66
-    notes: DSPF only. Separate from the extraction_setup one, which both files carry.
+    notes: >-
+      DSPF only. Separate from the extraction_setup one, which both files
+      carry -- and the two must be edited together, since they have identical
+      columns and the same open question.
+      SCHEMATIC is not the vendor default; layout is. Ours is a deliberate
+      deviation and the right one for a post-layout netlist that has to run
+      against the original testbench.
+      One real hazard: SCHEMATIC requires the query_output ixf/nxf data to
+      exist, and a run without it fails. A full Calibre LVS produces it, so
+      we are safe today; an extract-only flow would not be. Worth a preflight
+      check rather than an hours-later failure.
+      Confidence deliberately NOT raised: the catalog holds the members
+      uppercase and the manual spells them lowercase, and that is unresolved.
+      Raising it would flip free_input to false and turn the control into a
+      CLOSED drop-down, locking the user into two spellings we have not
+      verified -- which is the lock-out DECISIONS #19 exists to prevent.
     lands_in:
       - {target: quantus.dspf.cmd, section: output_setup, option: -net_name_space, line: 59}
     why: Whether DSPF net names follow the schematic or the layout.
@@ -2766,6 +3330,7 @@ options:
     why: Determined by the PDK query_cmd, like the other three "Design" rows.
 
   - key: extraction_corner
+    groups_with: technology_corner
     tier: common
     template_var: extraction_corner
     context_path: recipe.extraction.corner
@@ -2817,7 +3382,13 @@ options:
       semantic corner (recipe.extraction.corner) and the profile maps it. That
       seam is what lets one Recipe move between PDKs.
       RESOLVED 2026-08-24 against the real PDK. The draft mixed two generations
-      of corner naming (CBEST/... and CBEST_CCBEST/...) in one choices list;
+      MULTI-CORNER is supported and we do not model it: -technology_corner
+      accepts a LIST of corner names and -temperature a matching list of
+      values. Our single-corner, single-temperature form is legal, and this
+      row stays type: enum until a Recipe actually needs the list -- at which
+      point technology_corner AND temperature_c have to become lists
+      together, because the two lists are positional.
+      Of corner naming (CBEST/... and CBEST_CCBEST/...) in one choices list:
       shipping the union would have given a dropdown half full of invalid
       entries. The office check settled it: this PDK offers exactly the nine
       above -- the plain family, each with a `_T` sibling -- and no
@@ -2908,15 +3479,29 @@ options:
     type: int
     range: [1, 64]
     range_verified: false
-    choices_confidence: guess
-    default: 1
+    choices_confidence: certain
+    default: 2
     currently: absent
     observed: false
-    question: Does your QRC support multiple cores, and which section spells that?
     notes: >-
-      No multi_cpu section exists in either template, so extraction is
-      single-threaded today. Nothing is emitted until the office answer names
-      the section.
+      ANSWERED 2026-08-25. The section is distributed_processing and the
+      option is -multi_cpu.
+      The note that stood here -- "no multi_cpu section exists in either
+      template, so extraction is single-threaded today" -- was FALSE, and it
+      is worth saying so plainly because a question to the office was about
+      to be built on that premise. With no distributed_processing section
+      Quantus defaults to TWO CPUs, not one. Hence default 2: this row
+      records what the tool actually does when we emit nothing.
+      Licensing is a hard ceiling, not a guideline: a run on N processors
+      consumes ceil(N/2) licences, which is exactly why two CPUs is the free
+      default.
+      Scheduler integration: only -multi_cpu, -lsf_number and -multi_machine
+      are supported in transistor-level flows. The -sge_number/-sge_command
+      and -drm_number/-drm_command pairs exist in Quantus but are explicitly
+      NOT supported here, so a future reader shopping for a grid scheduler
+      should stop looking for them.
+      No landing site yet: neither template carries a distributed_processing
+      section, so this row stays absent until one grows.
     why: A machine property, so it belongs to resources rather than to a portable Recipe.
 
   # ---- jivaro reduction xml -------------------------------------------------
@@ -3080,9 +3665,12 @@ options:
     observed: true
     source_ref: templates/jivaro/default.xml.j2:11
     notes: >-
-      Jivaro names an inductor and a mutual; Quantus names neither, because
-      RLCK extraction is off. The asymmetry is real and is recorded rather
-      than smoothed over.
+      CORRECTED 2026-08-25. Jivaro names an inductor and a mutual, and
+      Quantus HAS the matching -ind_component / -mutual_ind_component -- we
+      simply do not emit them, because RLCK extraction is off. The asymmetry
+      is in OUR TEMPLATES, not in what the two tools can do, which is the
+      opposite of what this note used to say. It matters because "Quantus
+      cannot" would close the question and "we do not" leaves it open.
     lands_in:
       - {target: jivaro.xml, section: parsing, option: lModel, line: 11}
     why: As parasitic_res_model, for inductors. Unused until RLCK is enabled.

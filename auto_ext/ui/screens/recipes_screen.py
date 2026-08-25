@@ -125,6 +125,7 @@ from auto_ext.catalog import (
 from auto_ext.model.recipe import Recipe
 from auto_ext.ui import theme
 from auto_ext.ui.widgets.option_editor import (
+    PointerOptionEditor,
     ElidedLabel,
     OptionEditor,
     OptionGroup,
@@ -239,6 +240,29 @@ def recipe_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
     return sorted(rows, key=lambda opt: opt.recipe_field_path or "")
 
 
+def pointer_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
+    """Rows another screen owns that this form still names. ``Tier.ELSEWHERE``.
+
+    They are drawn, not editable: see
+    :class:`~auto_ext.ui.widgets.option_editor.PointerOptionEditor`. Sorted by
+    key rather than by ``recipe_field_path``, which they do not have -- they
+    bind to no Recipe field, which is the whole reason they need a row type
+    of their own instead of a disabled control.
+
+    ``Tier.IDENTITY`` rows are deliberately absent. ``library`` / ``cell`` /
+    the two view names are what a DUT *is*, not something anyone sets while
+    tuning an extraction, so spending form height on pointing at them would
+    make the two rows that *are* settings harder to notice. Search still
+    finds them.
+    """
+
+    cat = catalog if catalog is not None else builtin_catalog()
+    return sorted(
+        (opt for opt in cat.options if opt.tier is Tier.ELSEWHERE),
+        key=lambda opt: opt.key,
+    )
+
+
 def frozen_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
     """Form rows the shipped templates still write as a literal.
 
@@ -291,6 +315,20 @@ def _tool_of(catalog: Catalog, spec: OptionSpec) -> tuple[str, str | None]:
     for site in spec.lands_in:
         if site.target is not None:
             return catalog.tool_of(site.target), site.section
+
+    # ``groups_with`` before the Flow fallback: the row reaches the tool, it
+    # just does so through a sibling's literal. See OptionSpec.groups_with --
+    # the catalog self-check guarantees the target exists and lands, so this
+    # neither chains nor cycles.
+    if spec.groups_with:
+        try:
+            target = catalog.option(spec.groups_with)
+        except KeyError:  # pragma: no cover - the catalog check forbids it
+            target = None
+        if target is not None:
+            for site in target.lands_in:
+                if site.target is not None:
+                    return catalog.tool_of(site.target), site.section
     return FLOW_TOOL, None
 
 
@@ -325,7 +363,7 @@ def form_layout(catalog: Catalog | None = None) -> list[FormTool]:
     tools: dict[str, dict[str, tuple[Any, list[OptionSpec]]]] = {}
     templates: dict[str, list[str]] = {}
 
-    for spec in recipe_specs(cat):
+    for spec in recipe_specs(cat) + pointer_specs(cat):
         tool, section = _tool_of(cat, spec)
         display = cat.section_display(None if tool == FLOW_TOOL else tool, section or FLOW_TOOL)
         bucket = display.group
@@ -615,6 +653,12 @@ class RecipesScreen(QWidget):
     recipe_imported = pyqtSignal(object)
     #: ``(stage, template_id, hunk_id)``, already applied to the working copy.
     patch_revert_requested = pyqtSignal(str, str, str)
+    #: ``(screen key, option key)`` -- a pointer row was clicked and wants
+    #: the host to open the screen that owns the setting. The screen key is
+    #: a :class:`~auto_ext.catalog.spec.Screen` value, which is spelled the
+    #: same as the shell's page keys ("cells", "project") on purpose: one
+    #: vocabulary, so a new owning screen needs no translation table.
+    navigate_requested = pyqtSignal(str, str)
     patch_delete_requested = pyqtSignal(str, str, str)
     #: ``recipe_id`` -- every hunk dropped from the working copy.
     patch_revert_all_requested = pyqtSignal(str)
@@ -626,7 +670,14 @@ class RecipesScreen(QWidget):
     ) -> None:
         super().__init__(parent)
         self._catalog = catalog if catalog is not None else builtin_catalog()
-        self._specs = {spec.key: spec for spec in recipe_specs(self._catalog)}
+        # Pointer rows are drawn, so they are in here too. Everything that
+        # walks the form -- density, emit gating, the focused-row lookup --
+        # asks this map for the spec behind a key, and a drawn row missing
+        # from it is a KeyError the moment a recipe loads.
+        self._specs = {
+            spec.key: spec
+            for spec in recipe_specs(self._catalog) + pointer_specs(self._catalog)
+        }
         #: The loaded PdkProfile, or None. Only ``choices_from`` rows read it.
         self._profile: Any = None
         self._groups: dict[str, OptionGroup] = {}
@@ -1062,7 +1113,15 @@ class RecipesScreen(QWidget):
         return _display_value(current) != _display_value(spec.default)
 
     def _shows_in_common(self, spec: OptionSpec) -> bool:
-        return spec.tier is Tier.COMMON or self._is_promoted(spec)
+        # ``ELSEWHERE`` draws in both densities. A pointer row exists to
+        # answer "where do I set this", and an answer only visible after the
+        # user finds and flips a density toggle is not an answer -- the
+        # person who needs it is the one who does not yet know the setting
+        # is on another page. Spec ``M`` section 3 says Common draws them.
+        return (
+            spec.tier in (Tier.COMMON, Tier.ELSEWHERE)
+            or self._is_promoted(spec)
+        )
 
     def visible_option_keys(self) -> list[str]:
         """Rows the current density draws, in form order."""
@@ -1185,7 +1244,9 @@ class RecipesScreen(QWidget):
     def _refresh_density_bar(self, shown: int) -> None:
         total = len(self._editors)
         common = sum(
-            1 for spec in recipe_specs(self._catalog) if spec.tier is Tier.COMMON
+            1
+            for spec in recipe_specs(self._catalog) + pointer_specs(self._catalog)
+            if spec.tier in (Tier.COMMON, Tier.ELSEWHERE)
         )
         self._density_buttons[DENSITY_COMMON].setText(f"Common {common}")
         self._density_buttons[DENSITY_ALL].setText(f"All {total}")
@@ -1228,6 +1289,10 @@ class RecipesScreen(QWidget):
                     if editor is not None:
                         self._editors[spec.key] = editor
                         self._section_of[spec.key] = section.key
+                        if isinstance(editor, PointerOptionEditor):
+                            editor.navigate_requested.connect(
+                                self.navigate_requested
+                            )
 
     def _build_tool_header(self, tool: FormTool) -> QWidget:
         """Level-1 heading: the tool, the files it writes, and its row count.
@@ -1332,7 +1397,17 @@ class RecipesScreen(QWidget):
                 setter = getattr(editor, "set_choices", None)
                 if setter is None:  # pragma: no cover - enum rows are combos
                     continue
-                setter(choices_for(spec, profile))
+                offered = choices_for(spec, profile)
+                setter(offered)
+                note = getattr(editor, "set_source_note", None)
+                if note is not None:
+                    count = len(offered)
+                    noun = "value" if count == 1 else "values"
+                    note(
+                        f"from the PDK profile {_EM_DASH} {count} {noun} available"
+                        if profile is not None
+                        else "no PDK profile loaded -- showing the catalog list"
+                    )
                 path = spec.recipe_field_path
                 if self._working is not None and path is not None:
                     editor.set_value(_get_path(self._working, path))
@@ -1567,6 +1642,12 @@ class RecipesScreen(QWidget):
                 spec = self._specs[key]
                 path = spec.recipe_field_path
                 editor.set_invalid(False)
+                if isinstance(editor, PointerOptionEditor):
+                    # Bound to nothing, and deliberately still live: the row
+                    # exists so its link can be clicked. Disabling it with
+                    # the rest of the form would grey out the one part of it
+                    # that still has something to offer.
+                    continue
                 if self._working is None or path is None:
                     editor.setEnabled(self._working is not None)
                     continue

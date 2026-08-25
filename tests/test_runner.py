@@ -25,7 +25,7 @@ from auto_ext.core.config import TaskConfig, load_project, load_tasks
 from auto_ext.core.env import substitute_env
 from auto_ext.core.errors import AutoExtError
 from auto_ext.core.run_store import read_events, read_record
-from auto_ext.core.runner import run_tasks
+from auto_ext.core.runner import StageStatus, run_tasks
 
 if TYPE_CHECKING:
     from auto_ext.model.pdk import PdkProfile
@@ -566,6 +566,128 @@ def test_dspf_out_path_is_one_pattern_for_the_whole_project(project_config) -> N
     assert first == "/w/cell_z.dspf"
     assert second == "/w/cell_q.dspf"
     assert "dspf_out_path" not in TaskConfig.model_fields
+
+
+# ---- the directory Quantus will not create ---------------------------------
+
+
+def test_ensure_dspf_parent_creates_a_missing_directory(tmp_path: Path) -> None:
+    from auto_ext.core.runner import _ensure_dspf_parent
+
+    target = tmp_path / "dspf" / "inv.dspf"
+    context = {"paths": {"dspf_out": str(target)}}
+
+    assert _ensure_dspf_parent(context, dry_run=False) is None
+    assert target.parent.is_dir()
+
+
+def test_ensure_dspf_parent_reports_rather_than_creates_on_a_dry_run(
+    tmp_path: Path,
+) -> None:
+    """``--dry-run`` says whether a real run would work.
+
+    A check that makes itself pass tells you nothing, so the dry run reports
+    the missing directory and leaves the filesystem alone.
+    """
+
+    from auto_ext.core.runner import _ensure_dspf_parent
+
+    target = tmp_path / "dspf" / "inv.dspf"
+    problem = _ensure_dspf_parent({"paths": {"dspf_out": str(target)}}, dry_run=True)
+
+    assert problem is not None
+    assert str(target.parent) in problem
+    assert "dspf_out_pattern" in problem, "the message must name the setting"
+    assert not target.parent.exists(), "a dry run created a directory"
+
+
+def test_ensure_dspf_parent_is_quiet_when_there_is_nothing_to_do(
+    tmp_path: Path,
+) -> None:
+    from auto_ext.core.runner import _ensure_dspf_parent
+
+    existing = tmp_path / "already.dspf"
+    assert _ensure_dspf_parent({"paths": {"dspf_out": str(existing)}}, dry_run=True) is None
+    assert _ensure_dspf_parent({"paths": {"dspf_out": None}}, dry_run=False) is None
+    assert _ensure_dspf_parent({}, dry_run=False) is None
+
+
+def test_ensure_dspf_parent_refuses_a_parent_that_is_a_file(tmp_path: Path) -> None:
+    from auto_ext.core.runner import _ensure_dspf_parent
+
+    blocker = tmp_path / "notadir"
+    blocker.write_text("", encoding="utf-8")
+    problem = _ensure_dspf_parent(
+        {"paths": {"dspf_out": str(blocker / "inv.dspf")}}, dry_run=False
+    )
+
+    assert problem is not None and "not a directory" in problem
+
+
+def test_a_dspf_pattern_with_a_subdirectory_gets_its_directory_made(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """The real bug: nobody created the DSPF file's parent, Quantus included.
+
+    extUser p.550 -- "If you specify a directory as part of the filename
+    option, the directory must already exist." The flow worked only because
+    the default pattern writes straight into ``WORK_ROOT2``. A pattern with a
+    sub-directory in it, which the Project page invites, died inside Quantus
+    at the last stage of a run that had already paid for si and Calibre.
+    """
+
+    project, tasks = _load(project_tools_config)
+    out_dir = tmp_path / "dspf_out" / "nested"
+    project.dspf_out_path = f"{out_dir.as_posix()}/{{cell}}.dspf"
+    assert not out_dir.exists()
+
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["quantus"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        recipe=_recipe(output={"emit": ["dspf"]}),
+        profile=_profile(workarea),
+    )
+
+    assert summary.passed == 1, [s.error for t in summary.tasks for s in t.stages]
+    assert out_dir.is_dir(), "the DSPF directory was still not created"
+
+
+def test_a_dry_run_names_the_missing_dspf_directory_instead_of_making_it(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+) -> None:
+    """Catch it before the hours are spent, without hiding it by fixing it."""
+
+    project, tasks = _load(project_tools_config)
+    out_dir = tmp_path / "dspf_out" / "nested"
+    project.dspf_out_path = f"{out_dir.as_posix()}/{{cell}}.dspf"
+
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["quantus"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        recipe=_recipe(output={"emit": ["dspf"]}),
+        profile=_profile(workarea),
+        dry_run=True,
+    )
+
+    # Emitting DSPF alone keeps the plain "quantus" key -- the same collapse
+    # that made keying the guard off ``step.key`` wrong in the first place.
+    dspf = [s for s in summary.tasks[0].stages if s.stage == "quantus"]
+    assert len(dspf) == 1 and dspf[0].key == "quantus"
+    assert dspf[0].status == StageStatus.FAILED
+    assert str(out_dir) in (dspf[0].error or "")
+    assert not out_dir.exists()
 
 
 def test_dspf_out_path_unknown_env_passthrough(project_config) -> None:

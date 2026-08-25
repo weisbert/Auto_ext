@@ -195,12 +195,38 @@ CATALOG_EXEMPT_FIELDS: frozenset[str] = frozenset(
 
 
 class ExtractType(StrEnum):
-    """``extract -type``. Spellings unconfirmed -- see OFFICE_TODO.md."""
+    """``extract -type``: the vendor's complete fifteen-value set.
 
-    RC_COUPLED = "rc_coupled"
-    RC_DECOUPLED = "rc_decoupled"
+    Every member is usable in our flow -- the ones the manual restricts to
+    LVS input are exactly the ones a Calibre-svdb run qualifies for.
+
+    This enum used to carry four spellings, three of them invented. ``c_only``
+    does not exist: the tool wants :attr:`C_ONLY_COUPLED` or
+    :attr:`C_ONLY_DECOUPLED`, and which one you mean is the entire question
+    for an RF block. A recipe that had been written against the old spelling
+    would have produced a deck Quantus rejects.
+
+    Choosing an ``RLC``/``RLCK`` member today gets an incomplete deck: those
+    need ``-ind_component`` / ``-mutual_ind_component`` in the output section
+    and neither template emits them. That is a template gap, tracked on the
+    catalog row, not a reason to hide legal values here.
+    """
+
+    NONE = "none"
+    SUBSTRATE_ONLY = "substrate_only"
     R_ONLY = "r_only"
-    C_ONLY = "c_only"
+    C_ONLY_DECOUPLED = "c_only_decoupled"
+    C_ONLY_COUPLED = "c_only_coupled"
+    C_ONLY_DECOUPLED_TO_SUBSTRATE = "c_only_decoupled_to_substrate"
+    RC_DECOUPLED = "rc_decoupled"
+    RC_COUPLED = "rc_coupled"
+    RC_DECOUPLED_TO_SUBSTRATE = "rc_decoupled_to_substrate"
+    RLC_DECOUPLED = "rlc_decoupled"
+    RLC_COUPLED = "rlc_coupled"
+    RLC_DECOUPLED_TO_SUBSTRATE = "rlc_decoupled_to_substrate"
+    RLCK_DECOUPLED = "rlck_decoupled"
+    RLCK_COUPLED = "rlck_coupled"
+    RLCK_DECOUPLED_TO_SUBSTRATE = "rlck_decoupled_to_substrate"
 
 
 class MetalFill(StrEnum):
@@ -210,11 +236,15 @@ class MetalFill(StrEnum):
     asks for virtual fill. That the missing section means "none" is an
     inference, not a fact: with the section absent the behaviour is whatever
     the deck defaults to, which could equally be real fill.
+
+    ``ACTUAL`` was never a legal value -- it was ours, not the vendor's, and
+    it is gone. The real set is floating / grounded / virtual / none.
     """
 
-    NONE = "none"
+    FLOATING = "floating"
+    GROUNDED = "grounded"
     VIRTUAL = "virtual"
-    ACTUAL = "actual"
+    NONE = "none"
 
 
 class OutputKind(StrEnum):
@@ -360,11 +390,21 @@ class CommonOutputSettings(Base):
     """
 
     device_finger_delimiter: str = "@"
-    include_cap_model: bool = False
-    include_parasitic_cap_model: bool = False
-    include_res_model: bool = False
-    #: Three-valued: "true" / "false" / "comment". That it is not a boolean is
-    #: certain (the template says "comment"); what the three do is unknown.
+    #: All four are three-valued: ``"true"`` / ``"false"`` / ``"comment"``.
+    #:
+    #: The first three were ``bool`` until 2026-08-25, which made ``comment``
+    #: unreachable: both templates rendered them through
+    #: ``[[ 'true' if x else 'false' ]]``, so a third of each option could not
+    #: be spelled from anywhere in the GUI. ``include_parasitic_res_model``
+    #: had been the odd one out and was the one that worked.
+    #:
+    #: They are ``str`` rather than ``bool`` because the value reaches Jinja
+    #: unconverted: the environment is ``StrictUndefined`` with no
+    #: ``finalize`` hook, so Python's ``False`` would render as ``"False"``
+    #: and the tool wants ``false``.
+    include_cap_model: str = "false"
+    include_parasitic_cap_model: str = "false"
+    include_res_model: str = "false"
     include_parasitic_res_model: str = "comment"
 
 

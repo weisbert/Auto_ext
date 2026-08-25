@@ -21,6 +21,7 @@ by hand, and the other hundred-odd were reachable only by editing a `.j2`.
 | `screen` | authored | 6 `cells` | which screen owns the value |
 | `requires_emit` | authored | 14 | which output formats the row applies to |
 | `sections` (table) | authored | 23 | the level-2 heading each template section gets |
+| `groups_with` | authored | 17 | where to draw a row that lands in no file |
 
 `tier` **defaults to `full`**, where spec `M` calls it required on every row.
 Deviation, and deliberate: `full` is the answer that hides nothing. An
@@ -29,6 +30,37 @@ Common the moment its value leaves the default. Requiring the column would be
 the safer choice only if the *unsafe* value were the silent one, and it is the
 other way round. The cost of the alternative was 85 mechanical YAML edits whose
 only effect would be to spell out the default.
+
+### 1.1 `groups_with` — added 2026-08-25
+
+Level 1 is the tool, read off the row's landing site, and a row with no
+landing site falls into the synthetic `Flow` bucket. That was right for the
+five rows Flow was built for — which stages, reduction on or off, the two
+policy flags, all decisions *about* the run rather than lines in a file — and
+wrong the moment a real setting had no site of its own.
+
+`extraction_corner` is the case that forced the column. What reaches Quantus
+is the profile-owned `technology_corner` literal, so the corner row lands
+nowhere and collected under Flow, while the person looking for it looks under
+Quantus beside the temperature. The user ruled on it directly: *it is a
+Quantus setting, put it in Quantus.*
+
+```yaml
+  - key: extraction_corner
+    groups_with: technology_corner   # no landing site of my own — draw me where that row lands
+```
+
+A column rather than an exception in `recipes_screen.py`, because the next
+such row then costs one line and no code. It resolves **one level only** and
+the catalog self-check enforces both halves: the named key must exist, and it
+must itself land somewhere. A row carrying both `groups_with` and its own
+`lands_in` is refused — one row, one place.
+
+The sixteen rows added by the catalog-correction round all use it. They are
+`currently: absent` (the tool has the option, we emit nothing, we take the
+tool default), so none of them has a landing site, and without this column
+every one of them would have piled into Flow. That is what "the grouping
+absorbs the new rows without a decision" turned out to require.
 
 ## 2. Grouping — two levels, identical in both densities
 

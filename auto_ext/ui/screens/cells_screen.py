@@ -926,6 +926,36 @@ class CellsScreen(QWidget):
                 self._empty.setGeometry(self._table.viewport().rect())
         return super().eventFilter(watched, event)
 
+    def focus_column_for(self, option_key: str) -> bool:
+        """Put the cursor on the column a Recipes pointer row points at.
+
+        The catalog keys of the per-cell settings (``out_file``,
+        ``ground_net``) are spelled exactly like the ``CellEntry`` fields, so
+        this is :func:`_column_of_field` and nothing else -- no second table
+        mapping catalog rows to columns, which would be a table that can
+        disagree with the first one.
+
+        Widens the table if the mode in force hides that column: arriving on
+        a page where the thing you were sent to find is not drawn is worse
+        than arriving on a wider table than you left. Returns whether it
+        found a column.
+        """
+
+        try:
+            column = _column_of_field(option_key)
+        except KeyError:
+            return False
+        if column not in _MODE_COLUMNS[self._mode]:
+            self.set_column_mode(MODE_WIDE)
+        row = 0 if self._table.rowCount() else -1
+        if row >= 0:
+            self._table.setCurrentCell(row, column)
+            item = self._table.item(row, column)
+            if item is not None:
+                self._table.scrollToItem(item)
+        self._table.setFocus(Qt.OtherFocusReason)
+        return True
+
     # ---- column modes ----------------------------------------------------
 
     def column_mode(self) -> str:

@@ -525,11 +525,19 @@ def _effective_knobs(
 # ---- recipe naming -----------------------------------------------------------
 
 
+#: Short id tokens for the extraction types a migrated recipe can carry.
+#: Not exhaustive over :class:`ExtractType` on purpose -- the fallback below
+#: is ``ext``, so a member with no token here still produces a usable id, and
+#: adding fifteen abbreviations nobody has ever typed would make the ids
+#: harder to read rather than easier. The two ``c_only`` spellings both get a
+#: token because telling them apart is the point of having them.
 _EXTRACT_TOKENS: dict[str, str] = {
     ExtractType.RC_COUPLED.value: "rc",
     ExtractType.RC_DECOUPLED.value: "rcd",
     ExtractType.R_ONLY.value: "r",
-    ExtractType.C_ONLY.value: "c",
+    ExtractType.C_ONLY_COUPLED.value: "c",
+    ExtractType.C_ONLY_DECOUPLED.value: "cd",
+    ExtractType.NONE.value: "noext",
 }
 
 

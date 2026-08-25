@@ -962,6 +962,80 @@ def test_picking_rcworst_writes_rcworst_into_the_quantus_command_file(
     assert "rcworst" not in text  # the semantic name must not leak into the tool
 
 
+def test_the_three_state_model_options_can_actually_say_comment(
+    tmp_path: Path, recipe: Recipe, profile: PdkProfile, context: dict[str, object]
+) -> None:
+    """``comment`` was unreachable, and that is what made this a bug.
+
+    ``include_cap_model`` / ``include_parasitic_cap_model`` /
+    ``include_res_model`` are three-valued (true | false | comment) like
+    their sibling ``include_parasitic_res_model``. They were typed ``bool``
+    and both templates rendered them through
+    ``[[ 'true' if x else 'false' ]]``, so a third of each option could not
+    be spelled from anywhere -- the GUI, the YAML, or the CLI.
+    """
+
+    picked = recipe.model_copy(deep=True)
+    picked.output.common.include_cap_model = "comment"
+    picked.output.common.include_parasitic_cap_model = "comment"
+    picked.output.common.include_res_model = "comment"
+
+    ctx = render.build_context(
+        dut=make_dut(),
+        recipe=picked,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    for target in (RenderTarget.QUANTUS_EXT, RenderTarget.QUANTUS_DSPF):
+        plan = [p for p in render.plan_targets(picked) if p.target is target]
+        if not plan:
+            continue
+        text = render.render_one(
+            plan[0],
+            context=ctx,
+            recipe=picked,
+            profile=profile,
+            resolved_env=ENV,
+            out_dir=tmp_path / target.value,
+            write=False,
+        ).text
+        for option in (
+            "-include_cap_model",
+            "-include_parasitic_cap_model",
+            "-include_res_model",
+        ):
+            line = next(ln for ln in text.splitlines() if option in ln)
+            assert f'{option} "comment"' in line, line
+
+
+def test_false_still_renders_lowercase_after_the_three_state_change(
+    tmp_path: Path, recipe: Recipe, profile: PdkProfile, context: dict[str, object]
+) -> None:
+    """The trap in the four-part change, pinned.
+
+    The render context is built from the Recipe model and the Jinja
+    environment is ``StrictUndefined`` with no ``finalize`` hook, so a Python
+    ``False`` reaching the bare variable renders ``"False"`` -- capital F --
+    and the deck is wrong in a way the goldens catch but nothing explains.
+    The fields are ``str`` for exactly this reason.
+    """
+
+    plan = [p for p in render.plan_targets(recipe) if p.target is RenderTarget.QUANTUS_EXT][0]
+    text = render.render_one(
+        plan,
+        context=context,
+        recipe=recipe,
+        profile=profile,
+        resolved_env=ENV,
+        out_dir=tmp_path / "rendered",
+        write=False,
+    ).text
+
+    assert '-include_cap_model "false"' in text
+    assert "False" not in text, "a Python bool leaked into the deck"
+
+
 def test_the_same_recipe_writes_typical_against_the_typical_corner(
     tmp_path: Path, recipe: Recipe, profile: PdkProfile, context: dict[str, object]
 ) -> None:

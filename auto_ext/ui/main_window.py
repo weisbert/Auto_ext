@@ -239,6 +239,7 @@ class MainWindow(QMainWindow):
         ):
             signal.connect(self._stage_current_recipe)
         recipes.patch_revert_all_requested.connect(self._stage_current_recipe)
+        recipes.navigate_requested.connect(self._on_navigate_requested)
 
         runs = self._runs
         runs.status_message.connect(self._set_status)
@@ -538,6 +539,24 @@ class MainWindow(QMainWindow):
         while f"{stem}-{index}" in taken:
             index += 1
         return f"{stem}-{index}"
+
+    def _on_navigate_requested(self, screen: str, option_key: str) -> None:
+        """A pointer row was clicked: open the screen that owns the setting.
+
+        ``Screen`` values and the shell's page keys are the same strings, so
+        this is a lookup rather than a mapping table. An unknown key is
+        ignored rather than raised: a catalog row naming a screen this build
+        does not have is a data problem, and taking the window down over it
+        would be a worse answer than the row simply not navigating.
+        """
+
+        try:
+            self._shell.set_current_page(screen)
+        except KeyError:
+            self._set_status(f"no screen named {screen!r} to open for {option_key}")
+            return
+        if screen == "cells":
+            self._cells.focus_column_for(option_key)
 
     def _push_recipe_choices(self) -> None:
         """``(recipe_id, name)`` to the Cells column and the run bar.

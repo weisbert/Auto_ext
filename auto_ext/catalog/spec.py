@@ -361,9 +361,25 @@ class Tier(StrEnum):
     COMMON = "common"
     #: Shown in All view, and in Common view when its value is non-default.
     FULL = "full"
-    #: Owned by another screen. Never rendered as an editable row here;
-    #: search finds it and offers to navigate. See :class:`Screen`.
+    #: Owned by another screen, but worth *naming* here: drawn as a
+    #: read-only pointer row that shows the catalog default and navigates to
+    #: the screen that owns it. Not editable, and it binds to no Recipe
+    #: field. See :class:`Screen`.
+    #:
+    #: The office report behind this was "I cannot find where to set the
+    #: extracted view name". The ownership was right -- it is per cell -- and
+    #: the discoverability was zero, because a person editing a recipe has no
+    #: reason to guess that one of the settings they are looking for lives on
+    #: a different page. A row that says "not here, and here is where"
+    #: costs two lines of form and answers the question on the spot.
     ELSEWHERE = "elsewhere"
+    #: Not a setting at all: an identity axis of the DUT (which library,
+    #: which cell, which views). Never drawn, on either screen -- search
+    #: still finds it, so a person who types "cell" learns where identity
+    #: lives without a row of the form being spent on something nobody
+    #: "sets". Distinct from :attr:`ELSEWHERE`, which is a real setting that
+    #: simply belongs to another page.
+    IDENTITY = "identity"
 
 
 class Screen(StrEnum):
@@ -378,6 +394,13 @@ class Screen(StrEnum):
 
     RECIPES = "recipes"
     CELLS = "cells"
+    #: The workspace's own settings -- one per project rather than per cell
+    #: or per recipe. ``dspf_out_pattern`` is the case that forced this
+    #: member: a DSPF is a file on disk, so it needs a whole path, and that
+    #: path is a project convention. Asking "where does the DSPF go" while
+    #: editing a recipe is the same question ``out_file`` raised for the
+    #: Cells page, and it gets the same answer -- a pointer row.
+    PROJECT = "project"
 
 
 class SectionDisplay(Frozen):
@@ -499,6 +522,25 @@ class OptionSpec(Frozen):
     #: form lie about what the tool can do, which is the misunderstanding the
     #: catalog exists to end.
     requires_emit: list[str] = Field(default_factory=list)
+    #: "I have no landing site of my own -- draw me where THAT row lands."
+    #:
+    #: The form groups by tool, read off each row's landing site, and a row
+    #: with none falls into the synthetic ``Flow`` bucket. Flow is the right
+    #: home for decisions *about* the run -- which stages, reduction on or
+    #: off, the two policy flags -- and the wrong home for a setting that
+    #: does reach the tool but arrives through something else's literal.
+    #:
+    #: ``extraction_corner`` is the case that forced the column: what reaches
+    #: Quantus is the profile-owned ``technology_corner``, so the corner row
+    #: has no site of its own and landed under Flow, while a person looking
+    #: for it looks under Quantus beside the temperature. Naming the sibling
+    #: is better than a hand-written exception in the screen because it is
+    #: data, so the next such row costs one line and no code.
+    #:
+    #: Resolution is ONE level deep and the catalog self-check enforces it:
+    #: the named key must exist and must itself have a landing site, so this
+    #: can neither chain nor cycle.
+    groups_with: str | None = None
 
     @model_validator(mode="after")
     def _check(self) -> OptionSpec:
@@ -751,6 +793,29 @@ class Catalog(Frozen):
                         )
                 elif site.target not in by_id:
                     raise ValueError(f"{opt.key}: unknown render target {site.target}")
+
+        by_key = {o.key: o for o in self.options}
+        for opt in self.options:
+            if not opt.groups_with:
+                continue
+            if opt.lands_in:
+                raise ValueError(
+                    f"{opt.key}: groups_with is for rows with NO landing site of "
+                    f"their own; this row has {len(opt.lands_in)}. Remove one or "
+                    f"the other -- a row cannot be drawn in two places."
+                )
+            target = by_key.get(opt.groups_with)
+            if target is None:
+                raise ValueError(
+                    f"{opt.key}: groups_with names {opt.groups_with!r}, which is "
+                    f"not an option key"
+                )
+            if not any(site.target is not None for site in target.lands_in):
+                raise ValueError(
+                    f"{opt.key}: groups_with names {opt.groups_with!r}, which has "
+                    f"no landing site itself, so there is nowhere to be drawn. "
+                    f"Point at a row that reaches a file."
+                )
 
         for target in self.targets:
             if target.header_option and target.header_option not in set(keys):

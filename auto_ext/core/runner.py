@@ -1107,6 +1107,15 @@ def _run_single_stage(
     if stage == "si" and rendered_record is not None:
         _archive_si_env(rendered_path, exec_ctx.paths.rendered)
 
+    # Keyed off the render target, not ``step.key``: with only one quantus
+    # form emitted, ``plan_targets`` keeps the plain "quantus" key so the log
+    # and the progress reporter read cleanly, and a run emitting DSPF alone
+    # is exactly the case this guard exists for.
+    if step.plan is not None and step.plan.target is render.RenderTarget.QUANTUS_DSPF:
+        problem = _ensure_dspf_parent(context, dry_run=dry_run)
+        if problem is not None:
+            return _finish(StageStatus.FAILED, error=problem, rendered=rendered_record)
+
     if dry_run:
         return _finish(StageStatus.DRY_RUN, rendered=rendered_record)
 
@@ -1941,6 +1950,52 @@ def _validate_tasks(
                 "reduction but out_file is not set "
                 "(jivaro inputView renders to library/cell/out_file)"
             )
+
+
+def _ensure_dspf_parent(context: dict[str, Any], *, dry_run: bool) -> str | None:
+    """Create the directory the DSPF is about to be written into.
+
+    Quantus does not. extUser p.550 is explicit: *"If you specify a directory
+    as part of the filename option, the directory must already exist."* It
+    creates ``output_setup -directory_name`` and nothing else, so a
+    ``-file_name`` with a sub-directory in it fails inside the tool, hours
+    into a run, after si and Calibre have already been paid for.
+
+    Nothing created it before this. The flow worked only because the default
+    pattern -- ``${WORK_ROOT2}/{cell}.dspf`` -- writes straight into a
+    directory that already exists. The moment anyone types
+    ``${WORK_ROOT2}/dspf/{cell}.dspf`` into the Project page, which is an
+    obvious thing to want, the run dies at the last stage.
+
+    Returns an error string, or ``None`` when the path is fine. A dry run
+    checks without creating: ``--dry-run`` exists to tell you a real run
+    would work, and a check that makes itself pass is not a check.
+    """
+
+    raw = (context.get("paths") or {}).get("dspf_out")
+    if not raw:
+        return None
+    parent = Path(str(raw)).parent
+    if parent.is_dir():
+        return None
+    if parent.exists():
+        return (
+            f"the DSPF output path's parent is not a directory: {parent}. "
+            "Quantus will not create it (extUser p.550) and neither can we."
+        )
+    if dry_run:
+        # Report rather than create. Naming the setting matters: the pattern
+        # lives on the Project page, not in the recipe the user was editing.
+        return (
+            f"the DSPF output directory does not exist: {parent}. Quantus "
+            "does not create it, so a real run would fail here. It comes from "
+            "the workspace's dspf_out_pattern (Project page, 'DSPF output')."
+        )
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"cannot create the DSPF output directory {parent}: {exc}"
+    return None
 
 
 def _publish_si_env_to_output_dir(rendered_si_env: Path, output_dir: Path) -> None:

@@ -46,7 +46,8 @@ from auto_ext.core.patch_models import (  # noqa: E402
     TemplatePatch,
 )
 from auto_ext.model.recipe import Recipe, recipe_from_catalog  # noqa: E402
-from auto_ext.ui.screens.recipes_screen import (  # noqa: E402
+from auto_ext.ui.screens.recipes_screen import (
+    pointer_specs,  # noqa: E402
     DENSITY_ALL,
     DENSITY_COMMON,
     FLOW_TOOL,
@@ -173,8 +174,18 @@ def test_a_new_catalog_row_becomes_a_new_form_row(qtbot) -> None:
 
 
 def test_every_recipe_bound_catalog_row_is_on_the_form(qtbot) -> None:
+    """Every bound row, plus the pointer rows that name another screen's.
+
+    ``pointer_specs`` is drawn but binds to nothing -- see
+    :class:`PointerOptionEditor`. It is on the form because "where do I set
+    the extracted view name" had no answer here, not because the form owns
+    the value.
+    """
+
     screen = _screen(qtbot)
-    expected = {spec.key for spec in recipe_specs()}
+    expected = {spec.key for spec in recipe_specs()} | {
+        spec.key for spec in pointer_specs()
+    }
     assert set(screen.option_keys()) == expected
     assert len(expected) > 50, "the catalog shrank unexpectedly"
 
@@ -215,7 +226,9 @@ def test_a_row_landing_in_two_files_is_drawn_once(qtbot) -> None:
 
     keys = [spec.key for tool in form_layout() for spec in tool.specs]
     assert len(keys) == len(set(keys))
-    assert set(keys) == {spec.key for spec in recipe_specs()}
+    assert set(keys) == {spec.key for spec in recipe_specs()} | {
+        spec.key for spec in pointer_specs()
+    }
 
 
 def test_level_two_is_the_generated_files_own_section(qtbot) -> None:
@@ -256,10 +269,94 @@ def test_output_db_splits_by_the_format_it_writes(qtbot) -> None:
 def test_rows_with_no_landing_site_collect_under_flow(qtbot) -> None:
     flow = next(tool for tool in form_layout() if tool.tool == FLOW_TOOL)
     assert not any(spec.lands_in for spec in flow.specs)
-    # The five decisions about the run rather than lines in a file.
-    assert {"extraction_corner", "stages", "reduction_enabled"} <= {
-        spec.key for spec in flow.specs
-    }
+    # Decisions about the run rather than lines in a file.
+    assert {"stages", "reduction_enabled"} <= {spec.key for spec in flow.specs}
+
+
+def test_a_profile_backed_list_says_where_it_came_from(qtbot, tmp_path) -> None:
+    """A one-entry combo and a stuck combo look identical. Artboard ``A``.
+
+    The office report was that the corner list "looks broken": the demo
+    profile defines exactly one corner while the real PDK has nine, and
+    nothing on screen said the list belongs to the loaded profile rather than
+    to the catalog.
+    """
+
+    from tests.support.v2 import make_profile, make_two_corners
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+
+    screen.set_profile(make_profile(corners=make_two_corners()))
+    hint = screen.editor("extraction_corner").hint_label().full_text()
+    assert "from the PDK profile" in hint
+    assert "2 values" in hint, hint
+
+    screen.set_profile(None)
+    assert "no PDK profile" in screen.editor("extraction_corner").hint_label().full_text()
+
+
+def test_a_landless_row_can_be_drawn_where_its_sibling_lands(qtbot) -> None:
+    """``groups_with``. Artboard ``A``, and the user ruling of 2026-08-25.
+
+    ``extraction_corner`` has no landing site: what reaches Quantus is the
+    profile-owned ``technology_corner`` literal. The grouping rule sent it to
+    Flow, which is where a person does not look for it -- they look under
+    Quantus, beside the temperature, because that is what the row is about.
+    """
+
+    corner = next(
+        spec
+        for tool in form_layout()
+        for spec in tool.specs
+        if spec.key == "extraction_corner"
+    )
+    assert not corner.lands_in, "the premise: this row reaches no file itself"
+    assert corner.groups_with == "technology_corner"
+
+    quantus = next(tool for tool in form_layout() if tool.tool == "quantus")
+    section = next(s for s in quantus.sections if "extraction_corner" in {
+        spec.key for spec in s.specs
+    })
+    assert "temperature_c" in {spec.key for spec in section.specs}, (
+        "corner and temperature must land in the same section -- that is the "
+        "whole point of putting it here"
+    )
+
+    flow = next(tool for tool in form_layout() if tool.tool == FLOW_TOOL)
+    assert "extraction_corner" not in {spec.key for spec in flow.specs}
+
+
+def test_groups_with_is_refused_when_it_cannot_resolve() -> None:
+    """The self-check, because one hand-written exception is how this rots."""
+
+    import pytest as _pytest
+    from auto_ext.catalog.spec import CatalogError, load_catalog
+
+    from auto_ext.catalog import builtin_catalog
+
+    cat = builtin_catalog()
+    payload = cat.model_dump(mode="json")
+
+    # (a) naming a key that does not exist
+    bad = {**payload}
+    bad["options"] = [
+        {**o, "groups_with": "no_such_row"} if o["key"] == "extraction_corner" else o
+        for o in payload["options"]
+    ]
+    with _pytest.raises(Exception) as caught:
+        type(cat).model_validate(bad)
+    assert "no_such_row" in str(caught.value)
+
+    # (b) naming a row that itself lands nowhere
+    bad2 = {**payload}
+    bad2["options"] = [
+        {**o, "groups_with": "stages"} if o["key"] == "extraction_corner" else o
+        for o in payload["options"]
+    ]
+    with _pytest.raises(Exception) as caught2:
+        type(cat).model_validate(bad2)
+    assert "no landing site" in str(caught2.value)
 
 
 def test_the_control_type_follows_the_catalog(qtbot) -> None:
@@ -857,9 +954,15 @@ def test_common_shows_only_the_common_tier(qtbot) -> None:
     shown = set(screen.visible_option_keys())
     every = set(screen.option_keys())
     assert shown < every
+    # Pointer rows draw in Common too: an answer to "where is this set"
+    # that only appears in All view is not an answer, because the person who
+    # needs it does not yet know the setting is on another page.
     assert len(shown) == sum(
-        1 for spec in recipe_specs() if spec.tier is Tier.COMMON
+        1
+        for spec in recipe_specs() + pointer_specs()
+        if spec.tier in (Tier.COMMON, Tier.ELSEWHERE)
     )
+    assert {"out_file", "ground_net", "dspf_out_path"} <= shown
     # The settings a person changes from job to job are all there.
     assert {"extract_type", "temperature_c", "lvs_deck_variant"} <= shown
     # And the ones nobody has ever touched are not.

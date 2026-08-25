@@ -356,9 +356,15 @@ def test_catalog_key_and_template_var_may_differ_and_the_mapping_is_recorded(
 def test_observation_and_confidence_are_separate_columns(catalog: Catalog) -> None:
     # The draft's single "confidence" column had to say both "this line is
     # certainly hardcoded" and "these are certainly the legal values" at once.
-    opt = catalog.option("extract_type")
+    # ``max_fracture_length_unit`` is the live specimen: the line is
+    # certainly in the file we ship (observed), while the CASE of its two
+    # members is not yet confirmed against the tool (likely, not certain).
+    # ``extract_type`` used to stand here and no longer can -- its value set
+    # was settled from the vendor syntax table, which is exactly the move
+    # from guess to certain this column exists to record.
+    opt = catalog.option("max_fracture_length_unit")
     assert opt.observed is True
-    assert opt.choices_confidence is Confidence.GUESS
+    assert opt.choices_confidence is not Confidence.CERTAIN
 
 
 def test_the_parasitic_device_contract_lives_on_the_profile(catalog: Catalog) -> None:
