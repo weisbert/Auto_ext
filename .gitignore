@@ -51,3 +51,8 @@ dist/
 
 # Packages built by deploy/pack.ps1
 deploy/dist/
+
+# Red-zone material carried off the server: vendor manual extracts, real logs,
+# anything with a real path or employee id in it. THIS REPO IS PUBLIC --
+# nothing under private/ may ever be committed.
+private/

@@ -3,8 +3,8 @@
 Live subcommands:
 
 - ``version`` — prints the package version (Phase 1).
-- ``run`` — loads ``project.yaml`` + ``tasks.yaml`` and drives
-  :func:`auto_ext.core.runner.run_tasks`.
+- ``run`` — loads ``workspace.yaml`` + ``cells.yaml`` + the named recipe and
+  drives :func:`auto_ext.core.runner.run_tasks`.
 - ``runs list / show / prune`` — the run history under
   ``<auto-ext-root>/runs/``: what ran, how long each stage took, what LVS
   said, how that compares with the previous run of the same cell, and what
@@ -525,7 +525,7 @@ def gui(
     config_dir: Optional[Path] = typer.Option(
         None,
         "--config-dir",
-        help="Directory containing project.yaml + tasks.yaml to preload.",
+        help="Config directory to preload: workspace.yaml + cells.yaml.",
         exists=True,
         file_okay=False,
         dir_okay=True,
