@@ -91,3 +91,37 @@ def loaded_controller(
     controller.load(v2_config_dir / "config")
     assert errors == [], errors
     return controller
+
+
+@pytest.fixture(autouse=True)
+def _no_unexpected_modal(monkeypatch: pytest.MonkeyPatch):
+    """A modal dialog in a test is a defect, never a wait.
+
+    ``QMessageBox.warning`` and friends call ``exec_``, which blocks forever
+    with no user to click it. That is not hypothetical: making the dispatch
+    stub in ``test_cells_screen`` honest about refusing to guess between two
+    recipes turned a passing file into a hung process, and a hung process
+    reports nothing at all -- the suite looked like it was still working.
+
+    So every static that can open one raises instead, naming the text it
+    would have shown. A test that *expects* a dialog patches these itself in
+    its own body; function-scoped ``monkeypatch`` applies after this fixture,
+    so the test's patch wins.
+    """
+
+    from PyQt5.QtWidgets import QMessageBox
+
+    def _refuse(kind: str):
+        def _raise(_parent=None, title: str = "", text: str = "", *a, **k):
+            raise AssertionError(
+                f"unexpected modal QMessageBox.{kind}: {title!r} -- {text!r}\n"
+                "Patch it in the test if the dialog is the thing being "
+                "asserted; otherwise this is the code opening one it should "
+                "not."
+            )
+
+        return staticmethod(_raise)
+
+    for kind in ("warning", "critical", "information", "question", "about"):
+        monkeypatch.setattr(QMessageBox, kind, _refuse(kind))
+    yield

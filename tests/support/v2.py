@@ -13,11 +13,21 @@ Three rules these builders keep
 deliberately fictional (``/w/...``): it is a *string* environment fed to the
 env resolver, never a location anything opens.
 
-**Two profiles, not one.** :func:`make_profile` and :func:`make_other_profile`
-describe two different technologies that name the same semantic corner and the
-same LVS deck variant. That pair is what makes "one Recipe, two PDKs" testable
-at all -- with a single profile, a recipe that had silently frozen a PDK
-literal would still pass.
+**Two of anything the code counts, not one.** :func:`make_profile` and
+:func:`make_other_profile` describe two different technologies that name the
+same semantic corner and the same LVS deck variant. That pair is what makes
+"one Recipe, two PDKs" testable at all -- with a single profile, a recipe that
+had silently frozen a PDK literal would still pass.
+
+The rule generalises, and the places it had *not* been applied are where two
+shipped bugs hid. A library holding exactly one recipe cannot reach
+``ConfigController.run_recipe``'s "there has to be exactly one candidate"
+branch, so a dispatch that refuses to start looks like a dispatch that works;
+a profile holding exactly one corner makes a broken choice list and a correct
+one draw identically. Hence :func:`make_second_recipe` and
+:func:`make_two_corners` below, and the ``*_multi`` fixtures over them in
+``tests/conftest.py``. **Anything the production code branches on a count of
+needs a builder that can produce two.**
 
 **Overrides are keyword pass-through.** Every builder ends with
 ``fields.update(overrides)``, so a test states only the field it is about.
@@ -143,6 +153,51 @@ def make_recipe(**overrides: Any) -> Recipe:
     }
     fields.update(overrides)
     return Recipe(**fields)
+
+
+def make_second_recipe(**overrides: Any) -> Recipe:
+    """A second, distinguishable Recipe -- see this module's second rule.
+
+    Two differences from :func:`make_recipe` and both are load-bearing:
+
+    * a different ``recipe_id``, so a library built from the pair trips every
+      "exactly one candidate" branch in the GUI's dispatch;
+    * a ``description``, because the Recipes list draws ``description or name``
+      on its second line. With every fixture recipe description-less, ``name``
+      was on screen by accident and a list that never shows ``name`` looked
+      correct.
+    """
+
+    fields: dict[str, Any] = {
+        "recipe_id": "rc-coupled-125c",
+        "name": "RC coupled, 125C",
+        "description": "coupled RC at the hot corner, no reduction",
+    }
+    fields.update(overrides)
+    return Recipe(**fields)
+
+
+def make_two_corners() -> list[CornerSpec]:
+    """The corner list a profile needs before its choice control is testable.
+
+    Pass as ``corners=make_two_corners()`` to :func:`make_profile` or
+    :func:`make_healthy_profile`; ``default_corner`` stays ``typical``, which
+    both builders already set.
+    """
+
+    return [
+        CornerSpec(
+            name="typical",
+            technology_corner="TYPICAL",
+            default_temperature_c=55.0,
+            aliases=["nominal"],
+        ),
+        CornerSpec(
+            name="hot",
+            technology_corner="FF_HOT",
+            default_temperature_c=125.0,
+        ),
+    ]
 
 
 def make_dut(**overrides: Any) -> DutSnapshot:

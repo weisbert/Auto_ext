@@ -574,6 +574,53 @@ def v2_config_dir(
     return root
 
 
+@pytest.fixture
+def second_recipe() -> "Recipe":
+    """A second Recipe, distinguishable from ``recipe``.
+
+    See ``tests/support/v2.py``'s second rule: one recipe cannot reach the
+    branch where the GUI refuses to guess which recipe a run should use.
+    """
+
+    from tests.support.v2 import make_second_recipe
+
+    return make_second_recipe()
+
+
+@pytest.fixture
+def v2_config_dir_multi(
+    v2_config_dir: Path,
+    healthy_profile: "PdkProfile",
+    second_recipe: "Recipe",
+) -> Path:
+    """:func:`v2_config_dir` with **two** recipes and **two** corners.
+
+    Additive on purpose. ``v2_config_dir`` is referenced from eight files and
+    a hundred-odd call sites, several of which are about the single-recipe
+    case (``recipe --list`` naming the search path, the CLI resolving a sole
+    recipe without ``--recipe``); widening it in place would have rewritten
+    those to say something they are not about.
+
+    Use this one for anything that draws a *choice* -- a combo box, a list, a
+    dispatch that has to pick. Under ``v2_config_dir`` those all have exactly
+    one candidate, which is the shape in which a control that offers nothing
+    and a control that offers the only answer look the same.
+    """
+
+    from auto_ext.core.profile_discover import write_profile_yaml
+    from auto_ext.model.recipe import save_recipe
+    from tests.support.v2 import make_two_corners
+
+    save_recipe(
+        second_recipe, v2_config_dir / "recipes" / f"{second_recipe.recipe_id}.yaml"
+    )
+    widened = healthy_profile.model_copy(update={"corners": make_two_corners()})
+    write_profile_yaml(
+        v2_config_dir / "config" / "profiles" / f"{widened.profile_id}.yaml", widened
+    )
+    return v2_config_dir
+
+
 # ---- Run fixtures (S1) -------------------------------------------------------
 
 #: Default instant for :class:`FrozenClock`. Arbitrary but fixed, and chosen
