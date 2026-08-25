@@ -29,7 +29,13 @@ pytest.importorskip("pytestqt")
 from PyQt5.QtCore import QPoint, Qt  # noqa: E402
 from PyQt5.QtWidgets import QDialog, QMenu  # noqa: E402
 
-from auto_ext.catalog import Currently, Owner, builtin_catalog  # noqa: E402
+from auto_ext.catalog import (  # noqa: E402
+    Currently,
+    Owner,
+    Screen,
+    Tier,
+    builtin_catalog,
+)
 from auto_ext.core.patch_models import (  # noqa: E402
     BaseFingerprint,
     HunkOutcome,
@@ -41,11 +47,14 @@ from auto_ext.core.patch_models import (  # noqa: E402
 )
 from auto_ext.model.recipe import Recipe, recipe_from_catalog  # noqa: E402
 from auto_ext.ui.screens.recipes_screen import (  # noqa: E402
-    GROUP_ORDER,
+    DENSITY_ALL,
+    DENSITY_COMMON,
+    FLOW_TOOL,
     RECIPE_LIST_WIDTH,
     RecipesScreen,
     frozen_specs,
-    grouped_specs,
+    form_layout,
+    _set_path,
     import_status_text,
     recipe_specs,
 )
@@ -184,25 +193,73 @@ def test_rows_that_bind_to_nothing_are_left_out() -> None:
     assert not (shown & {opt.key for opt in unbound})
 
 
-def test_groups_follow_the_recipe_field_path(qtbot) -> None:
-    groups = dict(grouped_specs())
-    assert {"extraction", "output", "lvs", "reduction", "netlist"} <= set(groups)
-    for spec in groups["extraction"]:
-        assert (spec.recipe_field_path or "").startswith("extraction.")
+def test_level_one_is_the_tool_in_pipeline_order(qtbot) -> None:
+    """Artboard ``M`` section 2.
+
+    The old grouping was the first component of the Recipe field path --
+    ``extraction`` / ``output`` / ``netlist`` -- which is the shape of our
+    data model and of nothing the user has ever seen. They think in tools,
+    and when a run fails the manual in their hand is that tool's.
+    """
+
+    tools = [tool.tool for tool in form_layout()]
+    assert tools == ["si", "calibre", "quantus", "jivaro", FLOW_TOOL]
+    assert [tool.label for tool in form_layout()][:3] == ["si", "Calibre LVS", "Quantus"]
 
 
-def test_group_order_follows_the_artboard(qtbot) -> None:
-    names = [name for name, _specs in grouped_specs()]
-    known = [name for name in names if name in GROUP_ORDER]
-    assert known == [name for name in GROUP_ORDER if name in names]
-    assert names[:3] == ["extraction", "output", "lvs"]
+def test_a_row_landing_in_two_files_is_drawn_once(qtbot) -> None:
+    """Twenty-three Quantus rows write both command files.
+
+    Drawing them twice would ask the user which copy is the real one.
+    """
+
+    keys = [spec.key for tool in form_layout() for spec in tool.specs]
+    assert len(keys) == len(set(keys))
+    assert set(keys) == {spec.key for spec in recipe_specs()}
 
 
-def test_a_group_header_names_the_files_its_options_land_in(qtbot) -> None:
-    screen = _screen(qtbot)
-    header = screen.group("extraction").header_text()
-    assert header.startswith("Extraction")
-    assert "quantus/ext.cmd.j2" in header
+def test_level_two_is_the_generated_files_own_section(qtbot) -> None:
+    quantus = next(tool for tool in form_layout() if tool.tool == "quantus")
+    labels = [section.label for section in quantus.sections]
+    # From the section map, artboard L: renamed, merged and ordered.
+    assert "extract" in labels
+    assert "capacitance" in labels
+    assert "extraction setup" in labels
+    # Merged: filter_cap and filter_coupling_cap share capacitance's heading,
+    # so the raw names never appear.
+    assert "filter cap" not in labels
+    # Ordered by the map, not alphabetically or by catalog order.
+    orders = [section.order for section in quantus.sections]
+    assert orders == sorted(orders)
+
+
+def test_output_db_splits_by_the_format_it_writes(qtbot) -> None:
+    """Artboard ``L``'s only ``split_by`` user, and section 5.3 of the brief.
+
+    The vendor documents four DIFFERENT option sets under the one name
+    ``output_db``. A single heading would promise the rows under it are
+    interchangeable, and they are not.
+    """
+
+    quantus = next(tool for tool in form_layout() if tool.tool == "quantus")
+    split = [s for s in quantus.sections if s.label.startswith("output_db")]
+    assert len(split) > 1
+    labels = {s.label for s in split}
+    assert "output_db — dspf" in labels
+    assert "output_db — extracted view" in labels
+    assert "output_db — every format" in labels
+
+    dspf = next(s for s in split if s.label.endswith("dspf"))
+    assert all(spec.requires_emit == ["dspf"] for spec in dspf.specs)
+
+
+def test_rows_with_no_landing_site_collect_under_flow(qtbot) -> None:
+    flow = next(tool for tool in form_layout() if tool.tool == FLOW_TOOL)
+    assert not any(spec.lands_in for spec in flow.specs)
+    # The five decisions about the run rather than lines in a file.
+    assert {"extraction_corner", "stages", "reduction_enabled"} <= {
+        spec.key for spec in flow.specs
+    }
 
 
 def test_the_control_type_follows_the_catalog(qtbot) -> None:
@@ -781,3 +838,145 @@ def test_the_status_line_carries_all_three_import_numbers(
     assert f"{result.hunk_count} manual edit" in line
     assert "left at the catalog default" in line
     assert import_status_text(result) == line
+
+
+# ---- the two densities ---------------------------------------------------
+
+
+def test_common_shows_only_the_common_tier(qtbot) -> None:
+    """Artboard ``M`` section 3.
+
+    Hiding is only allowable because nothing becomes unreachable: one
+    always-visible toggle, and search that covers the whole catalog.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+
+    assert screen.density() == DENSITY_COMMON
+    shown = set(screen.visible_option_keys())
+    every = set(screen.option_keys())
+    assert shown < every
+    assert len(shown) == sum(
+        1 for spec in recipe_specs() if spec.tier is Tier.COMMON
+    )
+    # The settings a person changes from job to job are all there.
+    assert {"extract_type", "temperature_c", "lvs_deck_variant"} <= shown
+    # And the ones nobody has ever touched are not.
+    assert "sub_node_char" not in shown
+
+    screen.set_density(DENSITY_ALL)
+    assert set(screen.visible_option_keys()) == every
+
+
+def test_a_non_default_value_is_never_hidden(qtbot) -> None:
+    """Rule 2, and the reason the split is safe.
+
+    A Common view that omits a non-default value is a form lying about what
+    the run will do. Tier does not get a vote.
+    """
+
+    recipe = make_recipe()
+    spec = next(s for s in recipe_specs() if s.key == "sub_node_char")
+    assert spec.tier is not Tier.COMMON
+    _set_path(recipe, spec.recipe_field_path, "%")
+
+    screen = _screen(qtbot)
+    screen.set_recipes([recipe])
+
+    assert "sub_node_char" in screen.promoted_keys()
+    assert "sub_node_char" in screen.visible_option_keys()
+
+
+def test_a_row_never_changes_parent_between_modes(qtbot) -> None:
+    """What the toggle's "keep the focused row" behaviour depends on."""
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    common = {key: screen._section_of[key] for key in screen.visible_option_keys()}
+    screen.set_density(DENSITY_ALL)
+    for key, section in common.items():
+        assert screen._section_of[key] == section
+
+
+def test_a_tool_with_nothing_common_still_says_so(qtbot) -> None:
+    """Artboard ``M`` section 5. si has no Common rows at all.
+
+    A tool that vanished would read as a stage that is not being run, which
+    is a different and much more alarming claim than "nothing here needs you".
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    header = screen._tool_headers["si"].text()
+    assert header.startswith("si")
+    assert "all at the catalog default" in header
+
+
+# ---- requires_emit -------------------------------------------------------
+
+
+def test_rows_for_a_format_this_recipe_skips_are_disabled_not_hidden(qtbot) -> None:
+    """Section 5.3 of the brief, and a correctness bug rather than a cosmetic one.
+
+    ``output_db`` documents four DIFFERENT option sets, one per format.
+    Rendering a dspf-only option into an extracted_view run writes a command
+    file the tool rejects, hours into the job.
+    """
+
+    recipe = make_recipe()
+    recipe.output.emit = ["extracted_view"]
+    screen = _screen(qtbot)
+    screen.set_recipes([recipe])
+
+    assert screen.emitted_formats() == {"extracted_view"}
+    off = screen.inapplicable_keys()
+    assert "sub_node_char" in off, "a dspf-only row should be greyed"
+    assert screen.editor("sub_node_char").isEnabled() is False
+    # Disabled, NOT hidden: the option exists and the tool accepts it.
+    screen.set_density(DENSITY_ALL)
+    assert "sub_node_char" in screen.visible_option_keys()
+
+    recipe.output.emit = ["extracted_view", "dspf"]
+    screen.set_recipes([recipe])
+    assert "sub_node_char" not in screen.inapplicable_keys()
+    assert screen.editor("sub_node_char").isEnabled() is True
+
+
+# ---- search --------------------------------------------------------------
+
+
+def test_search_covers_the_whole_catalog_from_either_mode(qtbot) -> None:
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    assert screen.density() == DENSITY_COMMON
+
+    keys = {spec.key for spec in screen.search_matches("delimiter")}
+    assert "busbit_delimiter" in keys, "search must reach rows Common is hiding"
+    assert "busbit_delimiter" not in screen.visible_option_keys()
+
+    # It matches on the model path and on the generated option name too, not
+    # only on the label -- those are what the user has in front of them when
+    # they are reading a recipe file or a tool manual.
+    assert "sub_node_char" in {
+        spec.key for spec in screen.search_matches("output.dspf.sub_node")
+    }
+    assert "min_res_ohm" in {spec.key for spec in screen.search_matches("-min_res")}
+
+
+def test_search_answers_for_settings_that_live_on_another_screen(qtbot) -> None:
+    """Defect 7. The office report was "I cannot find where to rename the view".
+
+    ``out_file`` is per-cell and belongs on the Cells screen. Returning
+    nothing would teach the user the setting does not exist.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+
+    matches = screen.search_matches("out_file")
+    elsewhere = [spec for spec in matches if spec.screen is Screen.CELLS]
+    assert [spec.key for spec in elsewhere] == ["out_file"]
+
+    screen.search_field().setText("out_file")
+    assert "Cells screen" in screen._density_note.full_text()

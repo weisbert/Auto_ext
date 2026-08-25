@@ -61,9 +61,12 @@ Assumptions
 -----------
 Collected here rather than scattered through the module:
 
-* ``LABEL_COLUMN_WIDTH`` (196) and the two-pair grid come from artboard
-  ``1f``; the artboard was drawn at 1280px and the column is a maximum, not a
-  minimum, so the same grid folds down to the 940px window floor.
+* The label column is ``minmax(LABEL_MIN_WIDTH, LABEL_COLUMN_WIDTH)`` and the
+  grid holds at most two pairs to a line, from artboard ``M`` section 4. The
+  fold to the 940px window floor is the *column count's* job, not the label's:
+  below :data:`PAIR_MIN_WIDTH` per pair the grid drops to one column, and a
+  label is never squeezed under its floor. The previous rule had a cap and no
+  floor, which folded by deleting whole label columns.
 * :data:`QUESTION_GLYPH` is ``?``. Artboard ``1f`` marks unconfirmed rows but
   does not fix the glyph; ``?`` is ASCII, present in DejaVu and in every
   fallback, and survives greyscale, which a colour-only difference does not.
@@ -90,6 +93,10 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QFrame,
     QGridLayout,
+    QLayout,
+    QMenu,
+    QPushButton,
+    QWidgetAction,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -104,6 +111,11 @@ from auto_ext.ui import theme
 __all__ = [
     "FROZEN_GLYPH",
     "LABEL_COLUMN_WIDTH",
+    "LABEL_MIN_WIDTH",
+    "PAIR_MIN_WIDTH",
+    "VALUE_WIDTH_FLOORS",
+    "VALUE_WIDTH_MAX",
+    "VALUE_WIDTH_MIN",
     "NEEDS_CONFIRMATION",
     "NOT_SETTABLE",
     "OBJ_FROZEN_MARKER",
@@ -135,11 +147,33 @@ __all__ = [
     "frozen_reason",
     "option_tooltip",
     "template_freezes",
+    "value_width",
 ]
 
-#: Maximum width of a label column. Artboard ``1f`` draws 196px; it is a cap
-#: rather than a floor so the grid can still fold into a 940px window.
-LABEL_COLUMN_WIDTH = 196
+#: Maximum width of a label column. Artboard ``1f`` drew 196px, on the
+#: reasoning that a cap is what lets the grid fold into a 940px window. The
+#: fold is now the column count's job (:data:`PAIR_MIN_WIDTH`), so the cap is
+#: free to be what artboard ``C`` measures instead: 292px, the width of the
+#: label column in a 436px pair at the window floor.
+#:
+#: 196 was not enough for the catalog's own longest names --
+#: ``include parasitic cap model`` and ``coupling cap threshold absolute``
+#: both elide at it, and those two elide in the middle, which is exactly
+#: where the word that tells them apart lives.
+LABEL_COLUMN_WIDTH = 292
+
+#: Floor of the label column, in pixels. Artboard ``M`` section 4:
+#: ``minmax(120px, 1fr)``, and the operative half is the 120.
+#:
+#: Without it the column has no minimum at all -- :class:`ElidedLabel` pins
+#: its ``minimumSizeHint`` to zero width so the screen can honour the 940px
+#: window floor -- and a squeezed grid does not elide the labels, it removes
+#: them: at 1280px the whole ``Output`` section rendered as a column of
+#: anonymous check boxes reading only "default off". A user who cannot see
+#: which value they are changing is worse off than one who has to scroll.
+#: Below this width the *column count* drops (see :class:`OptionGrid`); the
+#: label is never what gives way.
+LABEL_MIN_WIDTH = 120
 
 #: Marker on a row whose value nobody has confirmed against a real tool.
 QUESTION_GLYPH = "?"
@@ -179,6 +213,41 @@ _UNSET: Any = object()
 #: Width of a numeric field. Artboard ``1f`` draws a 74px content box; 96
 #: includes the frame and the padding the shared QSS adds.
 _NUMBER_FIELD_WIDTH = 96
+
+#: Width below which a ``label | control | annotation`` pair stops being one
+#: of two on a line. Artboard ``M`` section 4:
+#: ``columns = clamp(floor(available / 370), 1, 2)``. It is the number that
+#: makes :data:`LABEL_MIN_WIDTH` affordable -- the grid gives up a column
+#: before it gives up a label.
+PAIR_MIN_WIDTH = 370
+
+#: Bounds of :func:`value_width`, in characters. Artboard ``M`` section 4.
+VALUE_WIDTH_MIN = 4
+VALUE_WIDTH_MAX = 24
+
+#: Per-type floor for :func:`value_width`, in characters. A value set is
+#: evidence of how wide a control has to be; the *absence* of one is not
+#: evidence that a narrow control is enough. ``netlist.global_power_sig``
+#: defaults to the empty string and holds a supply-net name, so the formula
+#: sees zero characters for a field the user types ``vdd!`` into.
+#:
+#: ``enum`` and ``bool`` are deliberately absent: their value set is closed
+#: and known, so the computed width is already the right answer.
+VALUE_WIDTH_FLOORS: Mapping[OptionType, int] = {
+    OptionType.STR: 12,
+    OptionType.PATH: 24,
+    OptionType.LIST: 16,
+}
+
+#: Floor for a numeric field with no ``range`` to measure.
+_NUMBER_WIDTH_FLOOR = 6
+
+#: Pixels a framed control spends on border and padding, over and above its
+#: text. Measured against the shared QSS, which sets 3px of padding a side.
+_CONTROL_CHROME = 12
+
+#: Extra pixels a combo box spends on its drop-down arrow.
+_COMBO_ARROW = 20
 
 #: Width of the "other" field trailing a guessed member list. Narrow on
 #: purpose: it is the exception, and the check boxes are the answer.
@@ -400,8 +469,14 @@ def option_tooltip(spec: OptionSpec) -> str:
     sites = [f"{_site_file(site)} {site.option}" for site in spec.lands_in]
     if sites:
         lines.append("lands in: " + "; ".join(sites))
-    if spec.notes:
-        lines.append(spec.notes)
+    # ``notes`` is deliberately NOT here. Artboard ``M`` section 1 makes it
+    # ``internal: true`` -- never rendered in any widget, tooltip or status
+    # bar. It is developer archaeology addressed to whoever next edits the
+    # catalog, and it was reaching the user on mouse-over: the note on
+    # ``coupling_cap_threshold_absolute`` alone is 400 characters that open
+    # "DEFAULT AND UNIT DISAGREE WITH PHYSICS", and several rows carry more
+    # than a screen of it. ``why`` is the field written for the reader, and
+    # it is above.
     if spec.question:
         lines.append("")
         lines.append(f"{NEEDS_CONFIRMATION}: {spec.question}")
@@ -431,6 +506,68 @@ def in_advisory_range(spec: OptionSpec, value: Any) -> bool:
         return True
     low, high = spec.range
     return low <= value <= high
+
+
+def _type_floor(spec: OptionSpec) -> int:
+    """Per-type minimum for :func:`value_width`, in characters."""
+
+    if spec.type in (OptionType.INT, OptionType.FLOAT):
+        if spec.range is None:
+            return _NUMBER_WIDTH_FLOOR
+        return max(len(_trim_number(bound)) for bound in spec.range)
+    return VALUE_WIDTH_FLOORS.get(spec.type, 0)
+
+
+def value_width(spec: OptionSpec, current: Any = None) -> int:
+    """How wide one control has to be, in characters. Artboard ``M`` §4.
+
+    ``max`` over the choice members and the default (and the current value,
+    when the caller has one), clamped to
+    :data:`VALUE_WIDTH_MIN`--:data:`VALUE_WIDTH_MAX`, then raised to the
+    row's :data:`per-type floor <VALUE_WIDTH_FLOORS>`.
+
+    Two defects come out of the same missing idea, that a control's width is
+    a property of its *type*:
+
+    * six fields hold one character -- ``@``, ``[]``, ``/``, ``#``, ``c``,
+      ``r`` -- and each got the same ~340px box as ``AG RC RE RG``;
+    * an ``enum`` too narrow for its own value scrolls its inner line edit to
+      the tail, so ``SCHEMATIC`` renders as ``EMATIC`` and ``rc_coupled`` as
+      ``oupled``. The extraction corner, the most consequential setting on
+      the screen, could not be read at the window floor.
+
+    Computed, never authored. An override in the catalog would be the
+    hand-curated exception this module exists to avoid: the value set already
+    knows how wide it is, and a row whose choices grow gets a wider control
+    without anybody remembering to widen it.
+
+    Width is settled once, at build. It deliberately does not follow what the
+    user types -- a field that resizes under the cursor reflows every row
+    beside it, which on a forwarded X11 link is the most expensive thing a
+    form can do.
+    """
+
+    samples: list[str] = [str(choice) for choice in (spec.choices or [])]
+    for value in (spec.default, current):
+        if value is None or isinstance(value, bool):
+            continue
+        if isinstance(value, (list, tuple)):
+            samples.append(", ".join(str(item) for item in value))
+        else:
+            samples.append(str(value))
+    widest = max((len(sample) for sample in samples), default=0)
+    if widest == 0:
+        # No choices, and a default that is absent or the empty string --
+        # nothing to measure. This is the ONLY case the per-type floor is
+        # for. Artboard ``M`` section 4 states the floor unconditionally,
+        # which contradicts artboard ``I3``: an unconditional ``str`` floor
+        # of 12 gives ``device_finger_delimiter`` a twelve-character box to
+        # hold ``@``, and I3 draws that row at 30px. Applying the floor only
+        # where there is no evidence satisfies both -- ``@`` measures 1 and
+        # clamps up to 4, while ``netlist.global_power_sig`` measures 0 and
+        # gets the 12 it needs to hold a supply-net name.
+        return max(VALUE_WIDTH_MIN, _type_floor(spec))
+    return min(max(widest, VALUE_WIDTH_MIN), VALUE_WIDTH_MAX)
 
 
 # ---- small shared widgets --------------------------------------------------
@@ -564,6 +701,11 @@ class OptionLabel(QWidget):
             self._marker = marker
 
         self.setMaximumWidth(LABEL_COLUMN_WIDTH)
+        # The floor is the half that matters. See LABEL_MIN_WIDTH: the inner
+        # label pins its own minimum to zero so the screen can reach the
+        # 940px window floor, and without a minimum here the grid took that
+        # literally and removed whole label columns rather than eliding them.
+        self.setMinimumWidth(LABEL_MIN_WIDTH)
 
     @property
     def spec(self) -> OptionSpec:
@@ -649,6 +791,18 @@ class OptionEditor(QWidget):
 
     # -- construction helpers ------------------------------------------
 
+    def _sized_to_value(self, control: QWidget) -> None:
+        """Fix ``control`` at :func:`value_width` characters wide.
+
+        Applied to the text-bearing controls only. A check box has no text of
+        its own, and the numeric field keeps the artboard's own metric.
+        """
+
+        chars = value_width(self._spec)
+        arrow = _COMBO_ARROW if isinstance(control, QComboBox) else 0
+        digit = control.fontMetrics().horizontalAdvance("0")
+        control.setFixedWidth(chars * digit + _CONTROL_CHROME + arrow)
+
     def _add_control(self, control: QWidget, *, stretch: int = 0) -> None:
         control.setToolTip(option_tooltip(self._spec))
         if self.is_frozen:
@@ -683,7 +837,10 @@ class OptionEditor(QWidget):
         label.setStyleSheet(
             f"color: {theme.TEXT_DISABLED}; font-size: {theme.FONT_SIZE_META}px;"
         )
-        label.setToolTip(option_tooltip(self._spec))
+        # No tooltip. This label carried a third copy of the row's tooltip,
+        # so hovering anywhere along a row could raise the same text from the
+        # name, the marker, the control or the hint. The hint elides, and
+        # what it elides is already in the control's tooltip beside it.
         self._layout.addWidget(label, 1)
         self._hint = label
 
@@ -872,6 +1029,7 @@ class ChoiceOptionEditor(OptionEditor):
             if index >= 0:
                 self._combo.setCurrentIndex(index)
         self._combo.currentTextChanged.connect(lambda _text: self._emit())
+        self._sized_to_value(self._combo)
         self._add_control(self._combo)
         self._add_trailing()
 
@@ -918,6 +1076,14 @@ class ChoiceOptionEditor(OptionEditor):
             self._combo.addItem(text)
             index = self._combo.count() - 1
         self._combo.setCurrentIndex(index)
+        # An editable combo puts the value in a QLineEdit, and setting text
+        # there leaves the cursor at the end. :func:`value_width` now sizes
+        # the control to its own choice set, so this only matters for a value
+        # longer than any member -- but when it does, the field must clip at
+        # the tail it is scrolled to, never at the head that identifies it.
+        line = self._combo.lineEdit()
+        if line is not None:
+            line.setCursorPosition(0)
 
     def _apply_value(self, value: Any) -> None:
         if value is None and self._unset_label is not None:
@@ -983,7 +1149,8 @@ class TextOptionEditor(OptionEditor):
             self._edit.setReadOnly(True)
             self._edit.setEnabled(False)
         self._edit.textEdited.connect(lambda _text: self._emit())
-        self._add_control(self._edit, stretch=1)
+        self._sized_to_value(self._edit)
+        self._add_control(self._edit)
         self._add_trailing()
 
     def line_edit(self) -> QLineEdit:
@@ -1017,7 +1184,8 @@ class ListOptionEditor(OptionEditor):
         _set_text_from_start(self._edit, joined)
         self._edit.setPlaceholderText(joined)
         self._edit.textEdited.connect(lambda _text: self._emit())
-        self._add_control(self._edit, stretch=1)
+        self._sized_to_value(self._edit)
+        self._add_control(self._edit)
         self._add_trailing()
 
     def line_edit(self) -> QLineEdit:
@@ -1058,12 +1226,23 @@ class MultiChoiceOptionEditor(OptionEditor):
     #: Placeholder of the trailing free-text field on a guessed member list.
     OTHER_PLACEHOLDER = "other, comma separated"
 
+    #: Text of the closed control. Artboard ``I1``: the row reads how many of
+    #: how many are on, and nothing else.
+    SUMMARY = "{on} of {total}"
+
     def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
         self._row = QWidget(self)
-        layout = QHBoxLayout(self._row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(theme.SPACE_SM)
+        # Vertical, and off the form. Artboard ``I1``: eight members laid out
+        # along the row is 81 characters of width for one value, it still
+        # overflowed into a "..." button, and the row's width tracked the
+        # value -- so the widest option on the screen was also the one nobody
+        # reads. The members move into a popup, which OVERLAYS: opening it
+        # reflows nothing, which is what the overflow button was compensating
+        # for. What stays on the row is the count.
+        layout = QVBoxLayout(self._row)
+        layout.setContentsMargins(theme.SPACE_XS, theme.SPACE_XS, theme.SPACE_XS, theme.SPACE_XS)
+        layout.setSpacing(theme.SPACE_XXS)
         self._boxes: dict[str, QCheckBox] = {}
         default = spec.default if isinstance(spec.default, list) else []
         for choice in spec.choices or []:
@@ -1083,8 +1262,39 @@ class MultiChoiceOptionEditor(OptionEditor):
             layout.addWidget(other)
             self._other = other
 
-        self._add_control(self._row, stretch=1)
+        # The control on the form is the summary; the members hang off it.
+        self._menu = QMenu(self)
+        action = QWidgetAction(self._menu)
+        action.setDefaultWidget(self._row)
+        self._menu.addAction(action)
+
+        self._summary = QPushButton(self)
+        self._summary.setMenu(self._menu)
+        self._summary.setFont(_mono_font(self._summary))
+        digit = self._summary.fontMetrics().horizontalAdvance("0")
+        total = len(spec.choices or [])
+        self._summary.setFixedWidth(
+            len(self.SUMMARY.format(on=total, total=total)) * digit
+            + _CONTROL_CHROME
+            + _COMBO_ARROW
+        )
+        self._add_control(self._summary)
         self._add_trailing()
+        self._refresh_summary()
+
+    def summary_button(self) -> QPushButton:
+        """The closed control -- the thing that reads ``8 of 8``."""
+
+        return self._summary
+
+    def _refresh_summary(self) -> None:
+        on = len(self.value())
+        total = len(self._boxes) + len(self._other_values())
+        self._summary.setText(self.SUMMARY.format(on=on, total=max(total, on)))
+
+    def _emit(self) -> None:
+        self._refresh_summary()
+        super()._emit()
 
     def other_edit(self) -> QLineEdit | None:
         """The trailing free-text field, or ``None`` on a closed member list."""
@@ -1143,6 +1353,10 @@ class MultiChoiceOptionEditor(OptionEditor):
                 box.setChecked(name in set(wanted) - extras_here)
 
         self._quietly(apply)
+        # ``_quietly`` mutes ``_emit``, and ``_emit`` is what keeps the count
+        # honest -- so a value pushed in from the model would leave the closed
+        # control reading the previous recipe's count.
+        self._refresh_summary()
 
 
 class NumberOptionEditor(OptionEditor):
@@ -1263,11 +1477,28 @@ class OptionGrid(QWidget):
         self._editors: dict[str, OptionEditor] = {}
         self._labels: dict[str, OptionLabel] = {}
         self._order: list[str] = []
+        #: Rows hidden by the density mode. They keep their widgets and their
+        #: values -- hiding is a view, never an edit.
+        self._hidden: set[str] = set()
 
         self._grid = QGridLayout(self)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setHorizontalSpacing(0)
         self._grid.setVerticalSpacing(0)
+        # Without this the grid pins the widget's own minimumSize to the
+        # minimum of the shape it currently holds -- two columns' worth -- and
+        # a widget that cannot be made narrower than two columns can never be
+        # told to fold to one. :meth:`minimumSizeHint` is what should answer
+        # that question, and it only gets asked once the layout stops
+        # answering it first.
+        self._grid.setSizeConstraint(QLayout.SetNoConstraint)
+        #: Columns the last relayout used. Starts at the requested maximum so
+        #: a grid that is never shown still reports the shape it was asked
+        #: for -- ``tests/ui`` build grids without ever resizing them.
+        self._columns = self._pairs_per_row
+        self._apply_column_stretch()
+
+    def _apply_column_stretch(self) -> None:
         for pair in range(self._pairs_per_row):
             self._grid.setColumnStretch(pair * 2, 0)
             self._grid.setColumnStretch(pair * 2 + 1, 1)
@@ -1277,8 +1508,8 @@ class OptionGrid(QWidget):
     def add_option(self, spec: OptionSpec, value: Any = _UNSET) -> OptionEditor:
         """Append one row. ``value`` left unset keeps the catalog default."""
 
-        index = len(self._order)
-        row, pair = divmod(index, self._pairs_per_row)
+        index = len(self.visible_keys())
+        row, pair = divmod(index, self._columns)
 
         label = OptionLabel(spec, self)
         editor = build_option_editor(spec, self)
@@ -1348,6 +1579,88 @@ class OptionGrid(QWidget):
 
     def option_count(self) -> int:
         return len(self._order)
+
+    # -- responsive shape ----------------------------------------------
+
+    def columns(self) -> int:
+        """Pairs per row the last relayout used."""
+
+        return self._columns
+
+    def columns_for_width(self, width: int) -> int:
+        """``clamp(floor(width / PAIR_MIN_WIDTH), 1, pairs_per_row)``.
+
+        Artboard ``M`` section 4. This is the mechanism that lets
+        :data:`LABEL_MIN_WIDTH` be a promise rather than a wish: when the
+        grid runs out of width it drops to one pair per row and gives that
+        pair the whole line, instead of squeezing two label columns until
+        both disappear. Widening past ``2`` is deliberately not offered --
+        artboard ``D`` spends surplus width on the detail pane, because a
+        third column of 24px rows is a spreadsheet, not a form.
+        """
+
+        return max(1, min(self._pairs_per_row, width // PAIR_MIN_WIDTH))
+
+    def visible_keys(self) -> list[str]:
+        """Rows currently drawn, in form order."""
+
+        return [key for key in self._order if key not in self._hidden]
+
+    def set_row_visible(self, key: str, visible: bool) -> None:
+        """Show or hide one row, closing the gap it leaves behind.
+
+        Hiding the two widgets is not enough on its own: a ``QGridLayout``
+        keeps the cell, so a hidden row in the left column leaves its
+        right-hand neighbour stranded a line below where it belongs. The
+        surviving rows are re-flowed instead.
+        """
+
+        if key not in self._editors:
+            return
+        if visible:
+            self._hidden.discard(key)
+        else:
+            self._hidden.add(key)
+        self._labels[key].setVisible(visible)
+        self._editors[key].setVisible(visible)
+        self._relayout(self._columns, force=True)
+
+    def _relayout(self, columns: int, *, force: bool = False) -> None:
+        if columns == self._columns and not force:
+            return
+        self._columns = columns
+        for index, key in enumerate(self.visible_keys()):
+            row, pair = divmod(index, columns)
+            self._grid.addWidget(self._labels[key], row, pair * 2)
+            self._grid.addWidget(self._editors[key], row, pair * 2 + 1)
+        for pair in range(self._pairs_per_row):
+            # Columns past the current count hold nothing and must not be
+            # handed any of the width.
+            live = pair < columns
+            self._grid.setColumnStretch(pair * 2, 0)
+            self._grid.setColumnStretch(pair * 2 + 1, 1 if live else 0)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        """The width of ONE pair, never of however many are on a line now.
+
+        Without this the fold can never happen. ``QGridLayout`` reports the
+        minimum of the shape it currently holds, so a two-column grid asks
+        for two columns' worth; the parent layout honours that and never
+        hands the widget a narrow geometry, so :meth:`resizeEvent` never sees
+        a width small enough to drop a column. The grid has to advertise what
+        it can shrink *to*, not what it happens to be.
+        """
+
+        base = super().minimumSizeHint()
+        widest = 0
+        for key in self._order:
+            editor = self._editors[key]
+            widest = max(widest, editor.minimumSizeHint().width())
+        return QSize(min(base.width(), LABEL_MIN_WIDTH + widest), base.height())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._relayout(self.columns_for_width(self.width()))
 
 
 class OptionGroup(QFrame):

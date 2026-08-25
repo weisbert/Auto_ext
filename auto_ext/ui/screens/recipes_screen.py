@@ -32,20 +32,40 @@ the same rule -- it reads the user's files and produces a
 :class:`~auto_ext.core.recipe_import.RecipeImportResult`, and
 ``recipe_imported`` hands that out for the host to write.
 
+**The form has two densities.** ``Common`` draws the nineteen rows a person
+changes from job to job; ``All`` draws every row the tools accept. Hiding is
+allowable only because nothing becomes unreachable, and three rules enforce
+that: the toggle is always on screen and never disabled, :meth:`search
+<RecipesScreen.search_matches>` always covers the whole catalog (including
+the six settings another screen owns), and a row whose value differs from its
+default is *promoted* into Common whatever its tier says. A Common view that
+omits a non-default value is a bug, not a preference. The full rule is
+artboard ``M`` section 3.
+
 Assumptions
 -----------
-* Groups are the first component of ``recipe_field_path``
-  (``extraction`` / ``output`` / ``lvs`` / ``reduction`` / ``netlist`` /
-  ``policy``), and a root-level field lands in ``General``.
-  :data:`GROUP_ORDER` fixes the order of the ones that exist today; a group
-  the catalog grows later renders at the end rather than not at all.
-* ``extraction.corner`` has no row here. The catalog owns that literal as
-  ``technology_corner`` with ``owner: profile`` -- it is a process fact, and
-  the seam between "the recipe names a semantic corner" and "the profile maps
-  it to ``TYPICAL``" is what makes a recipe portable. Artboard ``1f`` draws
-  the corner in the extraction group; following ``owner`` rather than the
-  artboard is deliberate, and the field re-appears the day the catalog says
-  the recipe owns it.
+* Grouping is two levels and both come from the catalog: level 1 is the tool
+  the row's landing site belongs to, in pipeline order
+  (:data:`TOOL_ORDER`), and level 2 is
+  :class:`~auto_ext.catalog.spec.SectionDisplay` -- the generated file's own
+  section names, renamed and merged by a twenty-three row table rather than
+  by anything in this module. Rows with no landing site collect under
+  :data:`FLOW_TOOL`, last. See :func:`form_layout`.
+
+  The grouping this replaced was the first component of ``recipe_field_path``
+  (``extraction`` / ``output`` / ``netlist``), which is the shape of our data
+  model and of nothing the user has ever seen. They think in tools, and the
+  manual in their hand when a run fails is that tool's.
+* A row is drawn **once** and never changes parent between the two densities.
+  Twenty-three Quantus rows write both command files; drawing them twice
+  would ask the user which copy is the real one, and moving a row between
+  modes would break the toggle's promise to keep the focused row.
+* ``extraction.corner`` has no landing site, so it lives under ``Flow`` with
+  the other four decisions that are about the run rather than about a line in
+  a file. The catalog owns the *literal* as ``technology_corner`` with
+  ``owner: profile`` -- a process fact -- and the seam between "the recipe
+  names a semantic corner" and "the profile maps it to ``TYPICAL``" is what
+  makes a recipe portable.
 * The six recipe-owned rows whose ``currently`` is ``absent`` have no
   ``context_path`` and therefore no field to bind to. They are proposals, not
   settings, and are skipped.
@@ -67,12 +87,13 @@ Assumptions
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import ValidationError
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -83,6 +104,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QStyle,
     QStyledItemDelegate,
     QTreeWidget,
@@ -91,49 +113,81 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from auto_ext.catalog import Catalog, OptionSpec, Owner, builtin_catalog, choices_for
+from auto_ext.catalog import (
+    Catalog,
+    OptionSpec,
+    Owner,
+    Screen,
+    Tier,
+    builtin_catalog,
+    choices_for,
+)
 from auto_ext.model.recipe import Recipe
 from auto_ext.ui import theme
 from auto_ext.ui.widgets.option_editor import (
     ElidedLabel,
     OptionEditor,
     OptionGroup,
-    group_label,
+    option_label,
+    option_tooltip,
     template_freezes,
 )
 from auto_ext.ui.widgets.patch_strip import PatchStrip
 from auto_ext.ui.widgets.recipe_import_dialog import RecipeImportDialog
 
 __all__ = [
-    "GROUP_ORDER",
+    "FLOW_TOOL",
+    "FormSection",
+    "FormTool",
+    "TOOL_LABELS",
+    "TOOL_ORDER",
     "OBJ_FORM_HEADER",
     "OBJ_LIST_HEADER",
     "OBJ_LIST_TOOLBAR",
     "OBJ_OPTIONS_SUMMARY",
+    "OBJ_TOOL_HEADER",
+    "OBJ_DENSITY_BAR",
+    "DENSITY_ALL",
+    "DENSITY_COMMON",
     "OBJ_RECIPE_LIST",
     "RECIPE_LIST_WIDTH",
+    "RECIPE_LIST_MIN_WIDTH",
     "RecipesScreen",
     "frozen_specs",
-    "grouped_specs",
+    "form_layout",
     "import_status_text",
     "recipe_specs",
 ]
 
-#: Groups in the order artboard ``1f`` reads top to bottom, with the two the
-#: artboard does not draw appended. Anything the catalog grows later is sorted
-#: in after these rather than dropped.
-GROUP_ORDER: tuple[str, ...] = (
-    "extraction",
-    "output",
-    "lvs",
-    "reduction",
-    "netlist",
-    "policy",
-    "general",
-)
+#: Level 1 of the form, in PIPELINE order -- the order a run executes them,
+#: which is also the order the user narrates the flow in. ``strmout`` has no
+#: recipe-owned options and so never appears. A tool the catalog grows later
+#: sorts in after these rather than being dropped.
+TOOL_ORDER: tuple[str, ...] = ("si", "calibre", "quantus", "jivaro")
 
-#: Width of the recipe list. Artboard ``1f``: 214px.
-RECIPE_LIST_WIDTH = 214
+#: Synthetic tool for the rows with no landing site at all: they are
+#: decisions about the run rather than lines in a file. Always last.
+FLOW_TOOL = "flow"
+
+#: Level-1 headings. Only the ones that differ from the raw tool name are
+#: here; the table is four entries, not a field list.
+TOOL_LABELS: dict[str, str] = {
+    "si": "si",
+    "calibre": "Calibre LVS",
+    "quantus": "Quantus",
+    "jivaro": "Jivaro",
+    FLOW_TOOL: "Flow",
+}
+
+#: Sub-heading for the rows of a split section that apply to every format.
+_EVERY_FORMAT = "every format"
+
+#: Default width of the recipe list, and its floor. Artboard ``G``: 252px
+#: default, 180px floor, resizable. The old 214 was a fixed width copied from
+#: an artboard drawn with one recipe in the library; it is now the splitter's
+#: starting position, and the user moves it.
+RECIPE_LIST_WIDTH = 252
+RECIPE_LIST_MIN_WIDTH = 180
 
 #: Height of the recipe rows, and of the list header strip. Artboard ``1f``.
 RECIPE_ROW_HEIGHT = theme.STAGE_CHIP_ROW_HEIGHT
@@ -152,14 +206,20 @@ OBJ_LIST_HEADER = "recipeListHeader"
 OBJ_LIST_TOOLBAR = "recipeListToolbar"
 OBJ_FORM_HEADER = "recipeFormHeader"
 OBJ_OPTIONS_SUMMARY = "recipeOptionsSummary"
+OBJ_TOOL_HEADER = "recipeToolHeader"
+OBJ_DENSITY_BAR = "recipeDensityBar"
+
+#: Width of the search field. Wide enough for a model path fragment
+#: (``output.dspf.busbit``), narrow enough to leave the counts on screen.
+_SEARCH_WIDTH = 190
+
+#: The two densities. Artboard ``M`` section 3.
+DENSITY_COMMON = "common"
+DENSITY_ALL = "all"
 
 _DOT = " · "
 _EM_DASH = "—"
 _GLYPH_EXPANDED = "▾"
-
-#: Fallback group for a recipe field that sits at the root of the model.
-_ROOT_GROUP = "general"
-
 
 # ---- catalog -> form -------------------------------------------------------
 # Pure functions: importable and testable without a QApplication.
@@ -190,37 +250,139 @@ def frozen_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
     return [spec for spec in recipe_specs(catalog) if template_freezes(spec)]
 
 
-def grouped_specs(catalog: Catalog | None = None) -> list[tuple[str, list[OptionSpec]]]:
-    """``[(group name, specs)]`` -- the form's shape, straight from the catalog."""
+@dataclass(frozen=True)
+class FormSection:
+    """Level 2 of the form: one heading and the rows under it."""
 
-    buckets: dict[str, list[OptionSpec]] = {}
-    for spec in recipe_specs(catalog):
-        path = spec.recipe_field_path or ""
-        group = path.split(".")[0] if "." in path else _ROOT_GROUP
-        buckets.setdefault(group, []).append(spec)
-
-    def order(name: str) -> tuple[int, str]:
-        try:
-            return (GROUP_ORDER.index(name), "")
-        except ValueError:
-            return (len(GROUP_ORDER), name)
-
-    return [(name, buckets[name]) for name in sorted(buckets, key=order)]
+    #: Stable id, unique across the form. ``quantus/capacitance``, or
+    #: ``quantus/output_db#dspf`` for a split section.
+    key: str
+    label: str
+    order: int
+    specs: tuple[OptionSpec, ...]
 
 
-def _group_subtitle(catalog: Catalog, specs: Iterable[OptionSpec]) -> str:
-    """The template files a group's options land in, deduplicated, in order."""
+@dataclass(frozen=True)
+class FormTool:
+    """Level 1 of the form: one tool, in pipeline order."""
 
-    seen: list[str] = []
-    for spec in specs:
-        for target in spec.targets:
+    #: ``si`` / ``calibre`` / ``quantus`` / ``jivaro``, or :data:`FLOW_TOOL`.
+    tool: str
+    label: str
+    #: Template ids this tool writes, for the group's subtitle.
+    templates: tuple[str, ...]
+    sections: tuple[FormSection, ...]
+
+    @property
+    def specs(self) -> list[OptionSpec]:
+        return [spec for section in self.sections for spec in section.specs]
+
+
+def _tool_of(catalog: Catalog, spec: OptionSpec) -> tuple[str, str | None]:
+    """``(tool, section)`` for one row, or ``(FLOW_TOOL, None)``.
+
+    A row landing in two files is drawn ONCE, under its tool -- twenty-three
+    Quantus rows write both ``ext.cmd`` and ``dspf.cmd``, and drawing them
+    twice would ask the user which copy is the real one. The section is taken
+    from the first landing site because no row in the catalog carries a
+    different section in different targets, and ``test_catalog`` holds that.
+    """
+
+    for site in spec.lands_in:
+        if site.target is not None:
+            return catalog.tool_of(site.target), site.section
+    return FLOW_TOOL, None
+
+
+def _split_key(spec: OptionSpec) -> str | None:
+    """Which ``requires_emit`` bucket a row falls in, or ``None`` for all."""
+
+    return spec.requires_emit[0] if spec.requires_emit else None
+
+
+def form_layout(catalog: Catalog | None = None) -> list[FormTool]:
+    """The form's whole shape: tool, then section, then rows. Artboard ``M`` §2.
+
+    Level 1 is the tool the row's landing site belongs to, in pipeline order,
+    because that is the vocabulary the user already holds -- they think *si*,
+    *Calibre LVS*, *Quantus*, *Jivaro*, and when something goes wrong the
+    thing in their hand is that tool's manual. The old grouping was by the
+    first component of the Recipe field path, which is the shape of our data
+    model and of nothing the user has ever seen.
+
+    Level 2 is :class:`~auto_ext.catalog.spec.SectionDisplay`, so the headings
+    are the generated file's own section names and cannot drift from the
+    catalog. Rows with no landing site collect under :data:`FLOW_TOOL`, last:
+    they are decisions *about* the run rather than lines in a file.
+
+    A row is never in two places, and never changes parent between the two
+    density modes. That last property is what the mode toggle's
+    "keep the focused row" behaviour depends on.
+    """
+
+    cat = catalog if catalog is not None else builtin_catalog()
+    #: ``tool -> section group key -> (display, specs)``
+    tools: dict[str, dict[str, tuple[Any, list[OptionSpec]]]] = {}
+    templates: dict[str, list[str]] = {}
+
+    for spec in recipe_specs(cat):
+        tool, section = _tool_of(cat, spec)
+        display = cat.section_display(None if tool == FLOW_TOOL else tool, section or FLOW_TOOL)
+        bucket = display.group
+        if display.split_by == "requires_emit":
+            # One section becomes one heading per emitted format. The vendor
+            # documents four DIFFERENT option sets under the one name
+            # ``output_db``, so a single heading would promise that the rows
+            # under it are interchangeable, and they are not.
+            bucket = f"{bucket}#{_split_key(spec) or _EVERY_FORMAT}"
+        sections = tools.setdefault(tool, {})
+        if bucket not in sections:
+            sections[bucket] = (display, [])
+        sections[bucket][1].append(spec)
+        seen = templates.setdefault(tool, [])
+        for site in spec.lands_in:
+            if site.target is None:
+                continue
             try:
-                template_id = catalog.target(target).template_id
+                template_id = cat.target(site.target).template_id
             except KeyError:  # pragma: no cover - the catalog validates this
                 continue
             if template_id not in seen:
                 seen.append(template_id)
-    return ", ".join(seen)
+
+    def tool_rank(name: str) -> tuple[int, str]:
+        try:
+            return (TOOL_ORDER.index(name), "")
+        except ValueError:
+            return (len(TOOL_ORDER), name)
+
+    out: list[FormTool] = []
+    for tool in sorted(tools, key=tool_rank):
+        built: list[FormSection] = []
+        for bucket, (display, specs) in tools[tool].items():
+            label = display.label
+            if display.split_by == "requires_emit":
+                fmt = bucket.split("#", 1)[1]
+                label = f"{label} {_EM_DASH} {fmt.replace('_', ' ')}"
+            built.append(
+                FormSection(
+                    key=f"{tool}/{bucket}",
+                    label=label,
+                    order=display.order,
+                    specs=tuple(specs),
+                )
+            )
+        built.sort(key=lambda s: (s.order, s.label))
+        out.append(
+            FormTool(
+                tool=tool,
+                label=TOOL_LABELS.get(tool, tool),
+                templates=tuple(templates.get(tool, ())),
+                sections=tuple(built),
+            )
+        )
+    return out
+
 
 
 def _get_path(root: Any, path: str) -> Any:
@@ -291,7 +453,10 @@ class _SelectedBarDelegate(QStyledItemDelegate):
     """
 
     def paint(self, painter, option, index) -> None:
-        super().paint(painter, option, index)
+        if index.column() == 0:
+            self._paint_two_lines(painter, option, index)
+        else:
+            super().paint(painter, option, index)
         if index.column() != 0 or not (option.state & QStyle.State_Selected):
             return
         painter.save()
@@ -303,6 +468,109 @@ class _SelectedBarDelegate(QStyledItemDelegate):
             QColor(theme.ACCENT),
         )
         painter.restore()
+
+    def _paint_two_lines(self, painter, option, index) -> None:
+        """``recipe_id`` in mono, then the description, wrapped. Artboard ``G``.
+
+        The list used to draw ``name`` alone in a 214px column, and ``name``
+        is a sentence: the migrator writes
+        "rc_coupled, corner typical, 55C, extracted_view, with reduction",
+        sixty-three characters, of which twelve fitted. Three fields exist and
+        each has a job -- ``recipe_id`` is the identity and the file name,
+        ``description`` is the sentence, and ``name`` is the editable title in
+        the form header. Splitting them is the fix; widening the column only
+        moves the truncation.
+        """
+
+        painter.save()
+        style = option.widget.style() if option.widget else None
+        if style is not None:
+            style.drawPrimitive(QStyle.PE_PanelItemViewItem, option, painter, option.widget)
+
+        rect = option.rect.adjusted(
+            theme.SELECTED_BAR_WIDTH + theme.SPACE_XS, theme.SPACE_XXS, -theme.SPACE_XS, 0
+        )
+        selected = bool(option.state & QStyle.State_Selected)
+
+        ident = index.data(Qt.DisplayRole) or ""
+        font = QFont(option.font)
+        font.setFamily(theme.FONT_MONO_FAMILIES[0])
+        font.setBold(True)
+        font.setPointSize(-1)
+        font.setPixelSize(theme.FONT_SIZE_META)
+        painter.setFont(font)
+        painter.setPen(QColor(theme.TEXT_PRIMARY))
+        line = painter.fontMetrics().height()
+        painter.drawText(
+            rect.x(), rect.y(), rect.width(), line, Qt.AlignLeft | Qt.AlignVCenter, ident
+        )
+
+        description = index.data(Qt.UserRole + 1) or ""
+        if description:
+            sub = QFont(option.font)
+            sub.setPointSize(-1)
+            sub.setPixelSize(theme.FONT_SIZE_META)
+            painter.setFont(sub)
+            painter.setPen(
+                QColor(theme.TEXT_PRIMARY if selected else theme.TEXT_SECONDARY)
+            )
+            body = rect.adjusted(0, line, 0, 0)
+            metrics = painter.fontMetrics()
+            if metrics.boundingRect(
+                0, 0, body.width(), 0, Qt.TextWordWrap, description
+            ).height() > 2 * metrics.height():
+                # Two lines is the budget (see sizeHint); past it the text is
+                # elided rather than clipped mid-glyph.
+                description = metrics.elidedText(
+                    description, Qt.ElideRight, 2 * body.width()
+                )
+            painter.drawText(
+                body, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, description
+            )
+        painter.restore()
+
+    def sizeHint(self, option, index) -> QSize:  # noqa: N802 - Qt naming
+        """Tall enough for the identity line plus the wrapped description.
+
+        ``uniformItemSizes`` is off for exactly this: a 40-character sentence
+        takes one wrapped line and a 65-character one takes two, and the row
+        grows rather than eliding. Nothing in this list is ever truncated.
+        """
+
+        base = super().sizeHint(option, index)
+        if index.column() != 0:
+            return base
+        description = index.data(Qt.UserRole + 1) or ""
+        metrics = option.fontMetrics
+        line = metrics.height()
+        if not description:
+            return QSize(base.width(), line + 2 * theme.SPACE_XXS)
+        wrapped = min(
+            metrics.boundingRect(
+                0, 0, self._text_width(option), 0, Qt.TextWordWrap, description
+            ).height(),
+            # Two lines and no more. A description long enough to need a third
+            # is a description that wanted to be the recipe's notes, and a
+            # library where one row is six lines tall stops being a list.
+            2 * line,
+        )
+        return QSize(base.width(), line + wrapped + 2 * theme.SPACE_XXS)
+
+    @staticmethod
+    def _text_width(option) -> int:
+        """Usable text width, asked of the VIEW rather than of ``option``.
+
+        ``option.rect`` is empty while Qt is collecting size hints, so
+        measuring the wrap against it gives one word per line and a row six
+        lines tall. The column knows its own width at that point; the item
+        does not.
+        """
+
+        view = option.widget
+        width = view.columnWidth(0) if view is not None else 0
+        if width <= 0:
+            width = RECIPE_LIST_WIDTH
+        return max(1, width - theme.SELECTED_BAR_WIDTH - 2 * theme.SPACE_XS)
 
 
 # ---- the screen ------------------------------------------------------------
@@ -348,6 +616,14 @@ class RecipesScreen(QWidget):
         #: The loaded PdkProfile, or None. Only ``choices_from`` rows read it.
         self._profile: Any = None
         self._groups: dict[str, OptionGroup] = {}
+        #: Which density is on screen. Per session, never stored on a recipe.
+        self._density = DENSITY_COMMON
+        #: ``tool -> FormTool`` and ``tool -> heading widget``, so a
+        #: density change can restate a tool's count without a rebuild.
+        self._tools: dict[str, FormTool] = {}
+        self._tool_headers: dict[str, QLabel] = {}
+        #: ``option key -> section key``, for showing and hiding by row.
+        self._section_of: dict[str, str] = {}
         self._editors: dict[str, OptionEditor] = {}
 
         self._recipes: list[Recipe] = []
@@ -361,9 +637,21 @@ class RecipesScreen(QWidget):
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._build_list_panel())
-        root.addWidget(self._build_form_panel(), 1)
+        # A splitter, not a fixed 214px column. Artboard ``G``: the list holds
+        # recipe ids and sentence-long descriptions, and how much room those
+        # need is the user's judgement, not a number copied off an artboard
+        # that was drawn before anybody had twelve recipes.
+        self._splitter = QSplitter(Qt.Horizontal, self)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(1)
+        self._splitter.addWidget(self._build_list_panel())
+        self._splitter.addWidget(self._build_form_panel())
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([RECIPE_LIST_WIDTH, 900])
+        root.addWidget(self._splitter)
 
+        self._apply_density()
         self._refresh_header()
         self._refresh_status()
 
@@ -372,7 +660,7 @@ class RecipesScreen(QWidget):
     def _build_list_panel(self) -> QWidget:
         panel = QFrame(self)
         panel.setFrameShape(QFrame.NoFrame)
-        panel.setFixedWidth(RECIPE_LIST_WIDTH)
+        panel.setMinimumWidth(RECIPE_LIST_MIN_WIDTH)
         panel.setStyleSheet(
             f"background: {theme.SURFACE_CARD};"
             f" border-right: 1px solid {theme.LINE_STRUCTURAL};"
@@ -397,7 +685,11 @@ class RecipesScreen(QWidget):
         self._list.setColumnCount(2)
         self._list.setHeaderHidden(True)
         self._list.setRootIsDecorated(False)
-        self._list.setUniformRowHeights(True)
+        # Off on purpose: a row's height follows its wrapped description,
+        # so a 65-character sentence takes two lines and grows the row
+        # rather than being elided. Artboard G.
+        self._list.setUniformRowHeights(False)
+        self._list.setWordWrap(True)
         self._list.setSelectionMode(QAbstractItemView.SingleSelection)
         self._list.setFrameShape(QFrame.NoFrame)
         self._list.setItemDelegate(_SelectedBarDelegate(self._list))
@@ -463,6 +755,7 @@ class RecipesScreen(QWidget):
         column.setSpacing(0)
 
         column.addWidget(self._build_form_header(panel))
+        column.addWidget(self._build_density_bar(panel))
         column.addWidget(self._build_options_summary(panel))
 
         self._scroll = QScrollArea(panel)
@@ -586,21 +879,365 @@ class RecipesScreen(QWidget):
         self._summary_bar = bar
         return bar
 
-    def _build_groups(self) -> None:
-        for name, specs in grouped_specs(self._catalog):
-            group = OptionGroup(
-                group_label(name),
-                _group_subtitle(self._catalog, specs),
-                parent=self._form_host,
+    def _build_density_bar(self, parent: QWidget) -> QWidget:
+        """``Common N | All M``, plus the counts that keep it honest.
+
+        Artboard ``M`` section 3. The toggle is the whole reason hiding rows
+        is allowable at all, so it is always on screen, never in a menu, and
+        never disabled: a form that quietly holds back sixty-six settings and
+        looks complete is worse than the crowded one it replaced. Beside it
+        the bar states how many rows were promoted, how many carry an
+        unanswered question and how many sit outside their advisory range --
+        the three things a hidden row could otherwise hide.
+        """
+
+        bar = QFrame(parent)
+        bar.setObjectName(OBJ_DENSITY_BAR)
+        bar.setFrameShape(QFrame.NoFrame)
+        bar.setFixedHeight(theme.TOOLBAR_HEIGHT)
+        bar.setStyleSheet(
+            f"QFrame#{OBJ_DENSITY_BAR} {{ background: {theme.SURFACE_TOOLBAR};"
+            f" border-bottom: 1px solid {theme.LINE_PANEL}; }}"
+        )
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(theme.SPACE_MD, 0, theme.SPACE_MD, 0)
+        row.setSpacing(theme.SPACE_XS)
+
+        self._density_buttons: dict[str, QPushButton] = {}
+        for mode in (DENSITY_COMMON, DENSITY_ALL):
+            button = QPushButton("", bar)
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setChecked(mode == self._density)
+            button.clicked.connect(lambda _c, m=mode: self.set_density(m))
+            _let_shrink(button)
+            row.addWidget(button, 0)
+            self._density_buttons[mode] = button
+
+        self._search = QLineEdit(bar)
+        self._search.setPlaceholderText("Find  name, path or value")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(_SEARCH_WIDTH)
+        self._search.textChanged.connect(self._on_search)
+        row.addWidget(self._search, 0)
+
+        self._density_note = ElidedLabel("", parent=bar)
+        self._density_note.setStyleSheet(
+            f"font-family: {theme.FONT_MONO}; font-size: {theme.FONT_SIZE_META}px;"
+            f" color: {theme.TEXT_SECONDARY};"
+        )
+        row.addWidget(self._density_note, 1)
+        return bar
+
+    # -- search --------------------------------------------------------
+
+    def search_matches(self, needle: str) -> list[OptionSpec]:
+        """Catalog rows matching ``needle``. Always the WHOLE catalog.
+
+        Artboard ``M`` and rule 3 of the split: search is not a filter of the
+        current density, it is a third view. Searching in Common view has to
+        find the sixty-six rows Common is hiding, and it has to find the rows
+        that are not on this screen at all -- the office report this answers
+        was "I cannot find where to rename the Quantus output view", and the
+        answer is a per-cell setting on another screen.
+
+        Matched against everything a person might type: the label, the model
+        path, the catalog key, the current value, the choice members, the
+        generated option name and ``why``.
+        """
+
+        text = needle.strip().lower()
+        if not text:
+            return []
+        out: list[OptionSpec] = []
+        for spec in recipe_specs(self._catalog) + self._elsewhere_specs():
+            haystack = [
+                spec.key,
+                spec.recipe_field_path or "",
+                option_label(spec),
+                spec.why,
+                _display_value(self._value_of(spec)),
+                " ".join(str(c) for c in (spec.choices or [])),
+                " ".join(site.option for site in spec.lands_in),
+            ]
+            if any(text in part.lower() for part in haystack):
+                out.append(spec)
+        return out
+
+    def _elsewhere_specs(self) -> list[OptionSpec]:
+        """Rows another screen owns. Found by search, never editable here."""
+
+        return [
+            spec
+            for spec in self._catalog.options
+            if spec.screen is not Screen.RECIPES
+        ]
+
+    def _value_of(self, spec: OptionSpec) -> Any:
+        if self._working is None or spec.recipe_field_path is None:
+            return spec.default
+        try:
+            return _get_path(self._working, spec.recipe_field_path)
+        except AttributeError:
+            return spec.default
+
+    def _on_search(self, text: str) -> None:
+        matches = self.search_matches(text)
+        if not text.strip():
+            self._apply_density()
+            self.status_changed.emit("")
+            return
+        keys = {spec.key for spec in matches}
+        for tool in form_layout(self._catalog):
+            live = 0
+            for section in tool.sections:
+                group = self._groups.get(section.key)
+                if group is None:  # pragma: no cover - built together
+                    continue
+                here = 0
+                for spec in section.specs:
+                    on = spec.key in keys
+                    group.grid.set_row_visible(spec.key, on)
+                    here += int(on)
+                live += here
+                group.setVisible(here > 0)
+            self._refresh_tool_header(tool, live)
+        here_count = sum(1 for spec in matches if spec.screen is Screen.RECIPES)
+        elsewhere = [spec for spec in matches if spec.screen is not Screen.RECIPES]
+        parts = [f"{here_count} match{'' if here_count == 1 else 'es'}"]
+        if elsewhere:
+            # Named, not silently dropped. A search that returns nothing for
+            # ``out_file`` teaches the user the setting does not exist.
+            names = ", ".join(option_label(spec) for spec in elsewhere)
+            parts.append(f"{len(elsewhere)} on the Cells screen: {names}")
+        self._density_note.set_full_text(_DOT.join(parts))
+        self.status_changed.emit(_DOT.join(parts))
+
+    def search_field(self) -> QLineEdit:
+        return self._search
+
+    # -- density -------------------------------------------------------
+
+    def density(self) -> str:
+        return self._density
+
+    def set_density(self, mode: str) -> None:
+        """Switch between the two densities. A view change, never an edit."""
+
+        if mode not in (DENSITY_COMMON, DENSITY_ALL):
+            raise ValueError(f"unknown density {mode!r}")
+        self._density = mode
+        for name, button in self._density_buttons.items():
+            button.setChecked(name == mode)
+        self._apply_density()
+
+    def _is_promoted(self, spec: OptionSpec) -> bool:
+        """True when a row's value has left its catalog default.
+
+        Rule 2 of the split, and the one that makes it safe: a Common view
+        that omits a non-default value is a form lying about what the run
+        will do. Tier does not get a vote here.
+        """
+
+        if self._working is None or spec.recipe_field_path is None:
+            return False
+        try:
+            current = _get_path(self._working, spec.recipe_field_path)
+        except AttributeError:  # pragma: no cover - the model validates this
+            return False
+        return _display_value(current) != _display_value(spec.default)
+
+    def _shows_in_common(self, spec: OptionSpec) -> bool:
+        return spec.tier is Tier.COMMON or self._is_promoted(spec)
+
+    def visible_option_keys(self) -> list[str]:
+        """Rows the current density draws, in form order."""
+
+        return [
+            key
+            for tool in form_layout(self._catalog)
+            for section in tool.sections
+            for spec in section.specs
+            if (key := spec.key) in self._editors
+            and (self._density == DENSITY_ALL or self._shows_in_common(spec))
+        ]
+
+    def promoted_keys(self) -> list[str]:
+        """All-tier rows Common shows anyway, because their value moved."""
+
+        return [
+            spec.key
+            for spec in recipe_specs(self._catalog)
+            if spec.tier is not Tier.COMMON and self._is_promoted(spec)
+        ]
+
+    def emitted_formats(self) -> set[str]:
+        """Output formats the working copy actually asks for."""
+
+        if self._working is None:
+            return set()
+        return {str(item) for item in getattr(self._working.output, "emit", []) or []}
+
+    def _applies_to_this_recipe(self, spec: OptionSpec) -> bool:
+        """False when the row belongs to an output format this recipe skips.
+
+        Rendering such a row writes an option the tool does not accept under
+        the chosen output type: the vendor documents four *different* option
+        sets under ``output_db``, and mixing them produces an illegal command
+        file that fails hours into a run.
+        """
+
+        if not spec.requires_emit:
+            return True
+        emitted = self.emitted_formats()
+        return not emitted or bool(emitted & set(spec.requires_emit))
+
+    def inapplicable_keys(self) -> list[str]:
+        """Rows drawn disabled because this recipe does not emit their format."""
+
+        return [
+            spec.key
+            for spec in recipe_specs(self._catalog)
+            if spec.key in self._editors and not self._applies_to_this_recipe(spec)
+        ]
+
+    def _apply_emit_gating(self) -> None:
+        """Grey the rows this recipe cannot reach. Disabled, never hidden.
+
+        Hiding them would say "this tool has no such setting", which is false
+        and is the exact misunderstanding the catalog exists to end. The row
+        keeps its label, its real value and a reason, and search still finds
+        it -- that is the point of drawing it at all.
+        """
+
+        for spec in recipe_specs(self._catalog):
+            editor = self._editors.get(spec.key)
+            if editor is None or not spec.requires_emit:
+                continue
+            ok = self._applies_to_this_recipe(spec)
+            editor.setEnabled(ok)
+            label = self._label_of(spec.key)
+            if label is not None:
+                label.setEnabled(ok)
+            editor.setToolTip(
+                option_tooltip(spec)
+                if ok
+                else f"{', '.join(spec.requires_emit)} only "
+                f"{_EM_DASH} this recipe emits "
+                f"{', '.join(sorted(self.emitted_formats())) or 'nothing'}"
             )
-            group.add_options(specs)
-            group.value_changed.connect(self._on_value_changed)
-            self._form_layout.addWidget(group)
-            self._groups[name] = group
-            for spec in specs:
-                editor = group.grid.editor(spec.key)
-                if editor is not None:
-                    self._editors[spec.key] = editor
+
+    def _label_of(self, key: str):
+        section = self._section_of.get(key)
+        group = self._groups.get(section) if section else None
+        return group.grid.label(key) if group is not None else None
+
+    def _apply_density(self) -> None:
+        self._apply_emit_gating()
+        shown = set(self.visible_option_keys())
+        for tool in form_layout(self._catalog):
+            live = 0
+            for section in tool.sections:
+                group = self._groups.get(section.key)
+                if group is None:  # pragma: no cover - built from the same layout
+                    continue
+                for spec in section.specs:
+                    group.grid.set_row_visible(spec.key, spec.key in shown)
+                here = sum(1 for spec in section.specs if spec.key in shown)
+                live += here
+                group.setVisible(here > 0)
+            self._refresh_tool_header(tool, live)
+        self._refresh_density_bar(len(shown))
+
+    def _refresh_tool_header(self, tool: FormTool, live: int) -> None:
+        header = self._tool_headers.get(tool.tool)
+        if header is None:  # pragma: no cover - built together
+            return
+        total = len(tool.specs)
+        files = ", ".join(tool.templates)
+        head = f"{tool.label}  {files}" if files else tool.label
+        if self._density == DENSITY_ALL:
+            header.setText(f"{head} {_EM_DASH} {total}")
+        elif live:
+            header.setText(f"{head} {_EM_DASH} {live} of {total} shown")
+        else:
+            # Artboard ``M`` section 5: a tool with nothing to say still says
+            # it. One that vanished would read as a stage that is not being
+            # run, which is a different and much more alarming claim.
+            header.setText(
+                f"{head} {_EM_DASH} {total} options, all at the catalog default"
+            )
+
+    def _refresh_density_bar(self, shown: int) -> None:
+        total = len(self._editors)
+        common = sum(
+            1 for spec in recipe_specs(self._catalog) if spec.tier is Tier.COMMON
+        )
+        self._density_buttons[DENSITY_COMMON].setText(f"Common {common}")
+        self._density_buttons[DENSITY_ALL].setText(f"All {total}")
+        promoted = len(self.promoted_keys())
+        unverified = sum(
+            1
+            for key in self.visible_option_keys()
+            if (spec := self._specs.get(key)) is not None and spec.question
+        )
+        parts = [f"{shown} of {total} shown"]
+        if promoted:
+            parts.append(f"{promoted} promoted")
+        if unverified:
+            parts.append(f"{unverified} unverified")
+        self._density_note.set_full_text(_DOT.join(parts))
+
+    def _build_groups(self) -> None:
+        """Tool heading, then one card per section. Artboard ``B``.
+
+        Two levels, both from the catalog: the heading is the tool, the cards
+        under it are the generated file's own sections. Nothing here decides
+        what goes where -- see :func:`form_layout`.
+        """
+
+        for tool in form_layout(self._catalog):
+            self._form_layout.addWidget(self._build_tool_header(tool))
+            self._tools[tool.tool] = tool
+            for section in tool.sections:
+                group = OptionGroup(
+                    section.label,
+                    "",
+                    parent=self._form_host,
+                )
+                group.add_options(section.specs)
+                group.value_changed.connect(self._on_value_changed)
+                self._form_layout.addWidget(group)
+                self._groups[section.key] = group
+                for spec in section.specs:
+                    editor = group.grid.editor(spec.key)
+                    if editor is not None:
+                        self._editors[spec.key] = editor
+                        self._section_of[spec.key] = section.key
+
+    def _build_tool_header(self, tool: FormTool) -> QWidget:
+        """Level-1 heading: the tool, the files it writes, and its row count.
+
+        A tool with no rows in the current density still gets this line. One
+        that disappeared entirely would read as a stage that is not being
+        run, which is a different and much worse statement than "nothing here
+        needs you".
+        """
+
+        header = QLabel(self._form_host)
+        header.setObjectName(OBJ_TOOL_HEADER)
+        files = ", ".join(tool.templates)
+        count = len(tool.specs)
+        caption = f"{tool.label}  {files} {_EM_DASH} {count}" if files else f"{tool.label} {_EM_DASH} {count}"
+        header.setText(caption)
+        header.setStyleSheet(
+            f"QLabel#{OBJ_TOOL_HEADER} {{ color: {theme.TEXT_PRIMARY};"
+            f" font-size: {theme.FONT_SIZE_SECTION}px;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+            f" padding: {theme.SPACE_XS}px 0px {theme.SPACE_XXS}px 0px; }}"
+        )
+        self._tool_headers[tool.tool] = header
+        return header
 
     # -- data ----------------------------------------------------------
 
@@ -613,9 +1250,12 @@ class RecipesScreen(QWidget):
         self._list.blockSignals(True)
         self._list.clear()
         for recipe in self._recipes:
-            item = QTreeWidgetItem([recipe.name, self._edit_badge(recipe)])
+            # Column 0 is the IDENTITY, not the name: the delegate draws
+            # ``recipe_id`` on the first line and the description under it.
+            # See _SelectedBarDelegate._paint_two_lines.
+            item = QTreeWidgetItem([recipe.recipe_id, self._edit_badge(recipe)])
             item.setData(0, Qt.UserRole, recipe.recipe_id)
-            item.setSizeHint(0, QSize(0, RECIPE_ROW_HEIGHT))
+            item.setData(0, Qt.UserRole + 1, recipe.description or recipe.name)
             item.setToolTip(0, recipe.description or recipe.name)
             item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
             if recipe.manual_edit_count:
@@ -891,6 +1531,7 @@ class RecipesScreen(QWidget):
         finally:
             self._loading = False
         self._set_dirty(False)
+        self._apply_density()
         self._refresh_header()
         if self._working is not None:
             self.recipe_selected.emit(self._working.recipe_id)
@@ -932,6 +1573,19 @@ class RecipesScreen(QWidget):
         if editor is not None:
             editor.set_invalid(False)
         self._recompute_dirty()
+        if self._density == DENSITY_COMMON:
+            # A row whose value just left the default has to appear. The
+            # reverse is deliberately NOT done here: artboard M section 3
+            # keeps a row that returned to its default on screen until the
+            # next mode switch, save or recipe change, so a control never
+            # disappears under the cursor that just reset it.
+            for key in self.promoted_keys():
+                section = self._section_of.get(key)
+                group = self._groups.get(section) if section else None
+                if group is not None:
+                    group.grid.set_row_visible(key, True)
+                    group.setVisible(True)
+            self._refresh_density_bar(len(self.visible_option_keys()))
 
     def _on_name_edited(self, text: str) -> None:
         """Rename the working copy as the user types, list row included.

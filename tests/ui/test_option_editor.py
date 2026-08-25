@@ -15,7 +15,12 @@ pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
 from PyQt5.QtGui import QDoubleValidator, QIntValidator  # noqa: E402
-from PyQt5.QtWidgets import QCheckBox, QComboBox, QLineEdit  # noqa: E402
+from PyQt5.QtWidgets import (  # noqa: E402
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QLineEdit,
+)
 
 from auto_ext.catalog import (  # noqa: E402
     Confidence,
@@ -32,6 +37,11 @@ from auto_ext.ui.widgets.option_editor import (  # noqa: E402
     FROZEN_GLYPH,
     NEEDS_CONFIRMATION,
     NOT_SETTABLE,
+    LABEL_MIN_WIDTH,
+    VALUE_WIDTH_FLOORS,
+    VALUE_WIDTH_MAX,
+    VALUE_WIDTH_MIN,
+    PAIR_MIN_WIDTH,
     QUESTION_GLYPH,
     BoolOptionEditor,
     ChoiceOptionEditor,
@@ -53,6 +63,7 @@ from auto_ext.ui.widgets.option_editor import (  # noqa: E402
     option_label,
     option_tooltip,
     template_freezes,
+    value_width,
 )
 
 
@@ -432,10 +443,80 @@ def test_an_elided_label_never_widens_the_window(qtbot) -> None:
     assert label.minimumSizeHint().width() == 0
 
 
-def test_a_full_form_of_labels_stays_narrow(qtbot) -> None:
+def test_value_width_is_measured_not_typed() -> None:
+    """Artboard ``M`` section 4 -- the fix for a 340px box holding ``@``.
+
+    Width comes from the value set, so it is right without anybody
+    maintaining it, and a row whose choices grow gets a wider control for
+    free.
+    """
+
+    # One character in, four characters out: the clamp floor, not the 12 a
+    # blanket ``str`` floor would give it. Six delimiter rows are like this.
+    assert value_width(spec(default="@")) == VALUE_WIDTH_MIN
+    assert value_width(spec(default="[]")) == VALUE_WIDTH_MIN
+
+    # A real string measures itself.
+    assert value_width(spec(default="AG RC RE RG")) == len("AG RC RE RG")
+
+    # The widest member wins, not the default: the control has to hold
+    # whatever the user picks, not only what it opens on.
+    corner = spec(
+        type=OptionType.ENUM,
+        choices=["typical", "rcworst_t", "cbest"],
+        default="cbest",
+    )
+    assert value_width(corner) == len("rcworst_t")
+
+    # Nothing to measure -> the per-type floor, which is the only case it is
+    # for. ``netlist.global_power_sig`` defaults to "" and holds a net name.
+    assert value_width(spec(default="")) == VALUE_WIDTH_FLOORS[OptionType.STR]
+    assert value_width(spec(type=OptionType.PATH)) == VALUE_WIDTH_FLOORS[OptionType.PATH]
+
+    # And nothing is ever wider than the cap.
+    assert value_width(spec(default="x" * 200)) == VALUE_WIDTH_MAX
+
+
+def test_a_closed_member_list_reads_as_a_count(qtbot) -> None:
+    """Artboard ``I1``: eight check boxes on one line become ``8 of 8``.
+
+    The point is that the control's width stops tracking its value. Eight
+    members spelled out is 81 characters of row, which is why the old row
+    still needed an overflow button; the popup overlays instead, so opening
+    it reflows nothing.
+    """
+
+    one = spec(
+        type=OptionType.LIST,
+        choices=["CANONICAL_CAP", "PARASITIC_CAP", "DIODE", "MOS"],
+        default=["CANONICAL_CAP", "PARASITIC_CAP", "DIODE", "MOS"],
+    )
+    editor = _make(qtbot, one)
+    assert isinstance(editor, MultiChoiceOptionEditor)
+    assert editor.summary_button().text() == "4 of 4"
+
+    # The members are still there, and still the value.
+    editor.check_boxes()["DIODE"].setChecked(False)
+    assert editor.value() == ["CANONICAL_CAP", "PARASITIC_CAP", "MOS"]
+    assert editor.summary_button().text() == "3 of 4"
+
+    # A value pushed in from the model updates the count too -- that path
+    # mutes the change signal, which is what keeps the form from marking
+    # itself dirty on load.
+    editor.set_value(["MOS"])
+    assert editor.summary_button().text() == "1 of 4"
+
+    # Width is the count's, not the members'. Compare in pixels: spelling the
+    # four members out is what the row used to cost.
+    button = editor.summary_button()
+    spelled = button.fontMetrics().horizontalAdvance("  ".join(one.choices or []))
+    assert button.width() < spelled
+
+
+def _wide_grid(qtbot, count: int = 20) -> OptionGrid:
     grid = OptionGrid()
     qtbot.addWidget(grid)
-    for index in range(20):
+    for index in range(count):
         grid.add_option(
             spec(
                 key=f"k{index}",
@@ -444,7 +525,53 @@ def test_a_full_form_of_labels_stays_narrow(qtbot) -> None:
                 default="a fairly long default value string",
             )
         )
-    assert grid.minimumSizeHint().width() <= 500
+    return grid
+
+
+def test_a_squeezed_grid_drops_a_column_instead_of_its_labels(qtbot) -> None:
+    """Artboard ``M`` section 4, and the answer to the label-vanishing defect.
+
+    The grid used to keep two pairs on a line at any width, which it could
+    only do by letting the label columns shrink to nothing: at 1280px the
+    whole ``Output`` section rendered as anonymous check boxes. The contract
+    is now the other way round -- the *column count* is what gives way, and a
+    label is never narrower than :data:`LABEL_MIN_WIDTH`.
+    """
+
+    grid = _wide_grid(qtbot)
+
+    assert grid.columns_for_width(1200) == 2
+    assert grid.columns_for_width(2 * PAIR_MIN_WIDTH) == 2
+    assert grid.columns_for_width(2 * PAIR_MIN_WIDTH - 1) == 1
+    # The form pane at the 940px window floor, minus the recipe list and the
+    # page margins. One pair, whole line.
+    assert grid.columns_for_width(560) == 1
+    # Never zero, however little there is to give.
+    assert grid.columns_for_width(0) == 1
+
+
+def test_labels_keep_their_floor_at_one_column(qtbot) -> None:
+    grid = _wide_grid(qtbot)
+    # Qt DEFERS the resize event of a widget that has never been shown
+    # (``WA_PendingResizeEvent``) rather than sending or posting it, so the
+    # fold is driven by showing, not by resizing. The application always
+    # shows this widget; a test has to say so.
+    grid.resize(560, 400)
+    grid.show()
+    QApplication.processEvents()
+
+    assert grid.columns() == 1
+    for key in grid.keys():
+        label = grid.label(key)
+        assert label is not None
+        assert label.minimumWidth() == LABEL_MIN_WIDTH
+    # A single pair fits inside the narrowest form pane the window allows.
+    assert grid.minimumSizeHint().width() <= 560
+
+    # And it folds back: the surplus at 1280 buys the second column again.
+    grid.resize(1200, 400)
+    QApplication.processEvents()
+    assert grid.columns() == 2
 
 
 # ---- grid and group ------------------------------------------------------
