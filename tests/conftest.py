@@ -164,9 +164,9 @@ _TEST_LOCAL_ENV_VARS: tuple[str, ...] = (
 )
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """Unset every env var this suite's own fixtures bind.
+    """Unset every env var this suite's own fixtures bind. **Autouse.**
 
     The PDK half of the list is *derived* from the profile builders rather
     than written out: which variables a technology needs is a discovered
@@ -174,6 +174,20 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     stale the moment a second profile declared a different one (section 4.3 of
     the tests disposition). Tests then ``monkeypatch.setenv`` the specific
     shell values they need; everything is restored at teardown.
+
+    Autouse since 2026-08-25, and the reason is the whole point of shipping
+    this suite. It was opt-in, and a test that asserted "this variable cannot
+    be bound, so the import must refuse" simply forgot to ask for it. That
+    test passed on every development machine -- where ``VERIFY_ROOT`` is not
+    set and never was -- and failed the moment ``doctor.sh --test`` ran it on
+    the office server, where the PDK setup script exports all five. The bug
+    was in neither the test's logic nor the tool: the test was asserting a
+    property of the *machine*.
+
+    A suite that ships as an install check must not depend on the target
+    being more impoverished than the development box. Opt-in cannot give that
+    -- it only takes one test that forgets -- so the cleaning is unconditional
+    and a test that wants a variable sets it explicitly.
     """
 
     from tests.support.v2 import ENV, OTHER_ENV

@@ -344,8 +344,22 @@ done
 shopt -u dotglob nullglob
 
 # --- backup + swap (the only non-atomic window; rollback on any failure) -----
+# The timestamp is second-resolution, so two deploys inside one second name the
+# same directory -- and the second one would then back up INTO the first one's
+# backup. `mv` refuses that for a directory that already exists and is not
+# empty, which aborts the swap; for a plain FILE it succeeds and silently
+# overwrites, leaving one backup holding a mix of two installs and a rollback
+# that restores neither. So the name is made unique before anything moves.
+#
+# Found by tests/test_deploy.py on real Linux: four deploys in a row are fast
+# enough there to collide, and slow enough on Windows never to.
 TS="$(date +%Y%m%d-%H%M%S)"
 BK="$BACKUPS/$TS"
+_bk_n=2
+while [[ -e "$BK" ]]; do
+  BK="$BACKUPS/$TS-$_bk_n"
+  _bk_n=$((_bk_n + 1))
+done
 mkdir -p "$BK"
 
 shopt -s dotglob nullglob

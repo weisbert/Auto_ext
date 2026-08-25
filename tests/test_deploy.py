@@ -580,14 +580,39 @@ def _make_package(tmp_path: Path, name: str = "Auto_ext_pro_abc1234.tar.gz") -> 
     return tarball
 
 
-def _deploy(box: Path) -> subprocess.CompletedProcess:
+def _deploy(box: Path, *, path_prefix: Path | None = None) -> subprocess.CompletedProcess:
+    env = None
+    if path_prefix is not None:
+        env = dict(os.environ)
+        env["PATH"] = f"{path_prefix}{os.pathsep}{env.get('PATH', '')}"
     return subprocess.run(
         [_bash(), "deploy.sh"],
         cwd=str(box),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         timeout=300,
+        env=env,
     )
+
+
+def _frozen_clock(tmp_path: Path, stamp: str = "20260825-101438") -> Path:
+    """A directory whose ``date`` always answers ``stamp``.
+
+    The backup directory is named from a second-resolution timestamp, so two
+    deploys inside one second collide. Waiting for a real collision would make
+    the test a race that only fires on a fast machine -- which is exactly how
+    the bug reached the office box unnoticed. Freezing the clock makes the
+    collision certain everywhere.
+    """
+
+    shim_dir = tmp_path / "frozen_clock"
+    shim_dir.mkdir()
+    shim = shim_dir / "date"
+    shim.write_text(
+        "#!/bin/sh\n" f"echo {stamp}\n", encoding="utf-8", newline="\n"
+    )
+    shim.chmod(0o755)
+    return shim_dir
 
 
 def test_a_deploy_swaps_the_code_and_keeps_every_kind_of_user_data(tmp_path: Path) -> None:
@@ -823,3 +848,51 @@ def test_cli_output_does_not_depend_on_terminal_width() -> None:
         "CLI assertions will fold again and doctor.sh --test will go red on a "
         "perfectly good red-zone install"
     )
+
+
+def test_two_deploys_in_the_same_second_get_separate_backups(tmp_path: Path) -> None:
+    """The backup name is a second-resolution timestamp, so it can collide.
+
+    Found on real Linux, where four deploys in a row fit inside one second and
+    the second one tried to back up INTO the first one's backup. `mv` aborts on
+    a non-empty directory -- which is the loud half. The quiet half is worse: a
+    plain FILE moves in and overwrites, leaving one backup holding a mix of two
+    installs and a rollback that restores neither.
+    """
+
+    box = _make_install(tmp_path)
+    shutil.copy2(_make_package(tmp_path), box)
+    clock = _frozen_clock(tmp_path)
+
+    first = _deploy(box, path_prefix=clock)
+    assert first.returncode == 0, first.stdout.decode("utf-8", "replace")
+    second = _deploy(box, path_prefix=clock)
+    assert second.returncode == 0, second.stdout.decode("utf-8", "replace")
+
+    backups = sorted(p.name for p in (box / ".deploy" / "backups").iterdir())
+    assert len(backups) == 2, backups
+    # ...and neither is empty, i.e. each really holds its own install
+    for name in backups:
+        assert (box / ".deploy" / "backups" / name / _sentinel()).is_file(), name
+
+
+def test_a_frozen_clock_really_would_collide(tmp_path: Path) -> None:
+    """Negative control: prove the shim is what makes the timestamps equal.
+
+    Without it this test would pass on a slow machine for the wrong reason --
+    two genuinely different seconds -- and go on passing after the uniquifier
+    was deleted.
+    """
+
+    clock = _frozen_clock(tmp_path, stamp="20260825-101438")
+    stamps = {
+        subprocess.run(
+            [_bash(), "-c", "date +%Y%m%d-%H%M%S"],
+            cwd=str(tmp_path),
+            env={**os.environ, "PATH": f"{clock}{os.pathsep}{os.environ.get('PATH', '')}"},
+            stdout=subprocess.PIPE,
+            timeout=60,
+        ).stdout.decode().strip()
+        for _ in range(2)
+    }
+    assert stamps == {"20260825-101438"}

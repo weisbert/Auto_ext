@@ -229,8 +229,22 @@ def test_run_summary_reports_a_missing_binary_as_such(
     v2_config_dir: Path,
     workarea: Path,
     wide_console: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without the mocks on PATH every tool exits 127; say why."""
+    """With no tool on PATH every stage exits 127; say why rather than "failed".
+
+    ``PATH`` is emptied rather than left alone. Leaving it alone asserted a
+    property of the machine -- true on a development box, false on the office
+    server, where ``si`` really is on ``PATH``. There the test did not merely
+    fail: it started a real Cadence ``si``, which a self-test run by
+    ``doctor.sh --test`` has no business doing.
+    """
+
+    empty = tmp_path / "no_tools_here"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
     result = runner.invoke(
         app,
         [

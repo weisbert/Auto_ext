@@ -174,9 +174,22 @@ def test_resize_folds_the_bar_by_itself(qtbot) -> None:
 
 
 def test_auto_compact_can_be_taken_over(qtbot) -> None:
-    host, bar = _hosted_bar(qtbot)
-    bar.auto_compact = False
+    """Taking over freezes the current state; it does not reset it.
 
+    The starting state has to be established rather than assumed. ``show()``
+    delivers a resize with whatever size the window manager chose, and under
+    a real X11 server that first size was already below the fold threshold --
+    so the bar folded *before* the test took over, and the assertion failed on
+    the office box while passing on every offscreen run. The precondition is
+    now asserted, which is what makes the rest of the test mean anything.
+    """
+
+    host, bar = _hosted_bar(qtbot)
+    host.resize(RUN_BAR_COMPACT_BELOW + 200, 90)
+    qtbot.wait(10)
+    assert bar.is_compact() is False, "precondition: the bar starts unfolded"
+
+    bar.auto_compact = False
     host.resize(RUN_BAR_COMPACT_BELOW - 300, 90)
     qtbot.wait(10)
 
