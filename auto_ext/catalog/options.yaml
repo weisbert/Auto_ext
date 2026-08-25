@@ -102,6 +102,59 @@ schema_version: 1
 # records it, so a conflict report can name the catalog that moved.
 catalog_version: "2026.08.24"
 
+# How the Recipes form titles each template section -- level 2 of its
+# grouping, where level 1 is the tool. Twenty-three rows for the whole
+# catalog, authored ONCE PER SECTION and never per option: adding an option
+# touches this table never, adding a template section touches it once.
+#
+# Three operations, all needed:
+#   rename  = label            device_check reads "device checks"
+#   merge   = a shared group   sections in one group render as one heading,
+#                              taking the label of the lowest-ordered member
+#   split   = split_by         output_db becomes one heading per emitted
+#                              format, because the vendor documents four
+#                              DIFFERENT option sets under that one name
+#
+# `tool` is the template_id's directory, not the target id: quantus.ext.cmd
+# and quantus.dspf.cmd share eight of these sections with the same meaning,
+# and one heading must not have two places to change it.
+#
+# A section missing from this table is not an error. It renders under its raw
+# name, sorted last -- ugly, visible, and fixable in one line.
+sections:
+  # -- si.env ---------------------------------------------------------------
+  - {tool: si, section: device_check,       label: device checks,               group: device_checks,     order: 10}
+  - {tool: si, section: device_preserve,    label: preserve & netlist,          group: preserve_netlist,  order: 20}
+  - {tool: si, section: netlist_control,    label: preserve & netlist,          group: preserve_netlist,  order: 21}
+  - {tool: si, section: globals,            label: "globals, scale & thresholds", group: globals_scale,     order: 30}
+  - {tool: si, section: device_reduction,   label: "globals, scale & thresholds", group: globals_scale,     order: 31}
+
+  # -- calibre lvs.qci ------------------------------------------------------
+  - {tool: calibre, section: lvs_rules,     label: deck & rules,                group: lvs_deck,          order: 10}
+  - {tool: calibre, section: lvs_devices,   label: devices & filters,           group: lvs_devices,       order: 20}
+  - {tool: calibre, section: lvs_options,   label: options,                     group: lvs_options,       order: 30}
+  - {tool: calibre, section: cmn_options,   label: options,                     group: lvs_options,       order: 31}
+  - {tool: calibre, section: lvs_triggers,  label: triggers,                    group: lvs_triggers,      order: 40}
+
+  # -- quantus ext.cmd + dspf.cmd -------------------------------------------
+  # The first eight are shared by both command files; the last three are
+  # written only by dspf.cmd.
+  - {tool: quantus, section: extract,             label: extract,              group: extract,            order: 10}
+  - {tool: quantus, section: process_technology,  label: process & technology, group: process,            order: 20}
+  - {tool: quantus, section: input_db,            label: input,                group: input_db,           order: 25}
+  - {tool: quantus, section: extraction_setup,    label: extraction setup,     group: extraction_setup,   order: 30}
+  - {tool: quantus, section: capacitance,         label: capacitance,          group: capacitance,        order: 40}
+  - {tool: quantus, section: filter_cap,          label: capacitance,          group: capacitance,        order: 41}
+  - {tool: quantus, section: filter_coupling_cap, label: capacitance,          group: capacitance,        order: 42}
+  - {tool: quantus, section: filter_res,          label: resistance,           group: resistance,         order: 50}
+  - {tool: quantus, section: metal_fill,          label: metal fill,           group: metal_fill,         order: 60}
+  - {tool: quantus, section: output_db,           label: output_db,            group: output_db,          order: 80, split_by: requires_emit}
+  - {tool: quantus, section: output_setup,        label: output setup,         group: output_setup,       order: 90}
+
+  # -- jivaro default.xml ---------------------------------------------------
+  - {tool: jivaro, section: reduction,      label: reduction,                   group: reduction,         order: 10}
+  - {tool: jivaro, section: general,        label: logging & general,           group: general,           order: 20}
+
 targets:
   - id: si.env
     stage: si
@@ -208,6 +261,8 @@ options:
   # ---- identity: the DUT. Owner is the Cells table, never a Recipe. --------
 
   - key: library
+    tier: elsewhere
+    screen: cells
     template_var: library
     context_path: library
     owner: cells
@@ -229,6 +284,8 @@ options:
       being portable, which is the one property a Recipe has to keep.
 
   - key: cell
+    tier: elsewhere
+    screen: cells
     template_var: cell
     context_path: cell
     owner: cells
@@ -252,6 +309,8 @@ options:
     why: One column of the cell table; the primary axis of a run.
 
   - key: layout_view
+    tier: elsewhere
+    screen: cells
     template_var: lvs_layout_view
     context_path: lvs_layout_view
     owner: cells
@@ -273,6 +332,8 @@ options:
     why: One column of the cell table.
 
   - key: source_view
+    tier: elsewhere
+    screen: cells
     template_var: lvs_source_view
     context_path: lvs_source_view
     owner: cells
@@ -288,6 +349,8 @@ options:
     why: One column of the cell table.
 
   - key: ground_net
+    tier: elsewhere
+    screen: cells
     template_var: ground_net
     context_path: ground_net
     owner: cells
@@ -310,6 +373,8 @@ options:
       not an extraction condition.
 
   - key: out_file
+    tier: elsewhere
+    screen: cells
     template_var: out_file
     context_path: out_file
     owner: cells
@@ -894,6 +959,7 @@ options:
       fact with a PDK-shaped escape hatch.
 
   - key: lvs_deck_variant
+    tier: common
     template_var: lvs_variant
     context_path: recipe.lvs.deck_variant
     owner: recipe
@@ -1399,6 +1465,7 @@ options:
     why: Batch-mode plumbing, plus a load-bearing anchor for the importer.
 
   - key: lvs_connect_by_name
+    tier: common
     template_var: connect_by_name
     context_path: recipe.lvs.connect_by_name
     owner: recipe
@@ -1687,6 +1754,7 @@ options:
       direct accuracy / runtime trade, hardcoded today.
 
   - key: extract_selection
+    tier: common
     template_var: extract_selection
     context_path: recipe.extraction.selection
     owner: recipe
@@ -1704,6 +1772,7 @@ options:
     why: Extract every net or a named subset. An extraction condition.
 
   - key: extract_type
+    tier: common
     template_var: extract_type
     context_path: recipe.extraction.extract_type
     owner: recipe
@@ -1916,6 +1985,7 @@ options:
     why: Drops floating nets. A filtering condition on the result.
 
   - key: exclude_floating_nets_limit
+    tier: common
     template_var: exclude_floating_nets_limit
     context_path: recipe.extraction.exclude_floating_nets_limit
     owner: recipe
@@ -1937,6 +2007,7 @@ options:
     why: Cap on how many floating nets are dropped. Already a knob; stays tunable.
 
   - key: coupling_cap_threshold_absolute
+    tier: common
     template_var: coupling_cap_threshold_absolute
     context_path: recipe.extraction.coupling_cap_threshold_absolute
     owner: recipe
@@ -1961,6 +2032,7 @@ options:
     why: Absolute floor on kept coupling caps. Sets netlist size and accuracy.
 
   - key: coupling_cap_threshold_relative
+    tier: common
     template_var: coupling_cap_threshold_relative
     context_path: recipe.extraction.coupling_cap_threshold_relative
     owner: recipe
@@ -1991,6 +2063,7 @@ options:
     why: Collapses parallel resistors. A reduction condition on the result.
 
   - key: min_res_ohm
+    tier: common
     template_var: min_res
     context_path: recipe.extraction.min_res_ohm
     owner: recipe
@@ -2183,6 +2256,7 @@ options:
     why: As device_property_value. Meaning unknown; value transcribed.
 
   - key: input_db_hierarchy_delimiter
+    requires_emit: [dspf]
     template_var: input_db_hierarchy_delimiter
     context_path: recipe.output.dspf.input_hierarchy_delimiter
     owner: recipe
@@ -2202,6 +2276,8 @@ options:
     why: How hierarchical names are spelled on the way in. Must match the DSPF consumer.
 
   - key: metal_fill_type
+    tier: common
+    requires_emit: [dspf]
     template_var: metal_fill_type
     context_path: recipe.extraction.metal_fill
     owner: recipe
@@ -2226,6 +2302,7 @@ options:
       capacitance, and an unexplained difference between the two flows.
 
   - key: output_form
+    tier: common
     template_var: output_form
     context_path: recipe.output.emit
     owner: recipe
@@ -2272,6 +2349,7 @@ options:
     why: Which analogLib device parasitic caps are instantiated as. A PDK/library fact.
 
   - key: cap_property_name
+    requires_emit: [extracted_view]
     template_var: cap_property_name
     context_path: recipe.output.extracted_view.cap_property_name
     owner: recipe
@@ -2286,6 +2364,7 @@ options:
     why: Property name the capacitance value is written under in the extracted view.
 
   - key: enable_cellview_check
+    requires_emit: [extracted_view]
     template_var: enable_cellview_check
     context_path: recipe.output.extracted_view.enable_cellview_check
     owner: recipe
@@ -2369,6 +2448,7 @@ options:
     why: As include_cap_model, for parasitic caps.
 
   - key: include_res_model
+    tier: common
     template_var: include_res_model
     context_path: recipe.output.common.include_res_model
     owner: recipe
@@ -2420,6 +2500,7 @@ options:
     why: Which analogLib device parasitic resistors are instantiated as. A PDK/library fact.
 
   - key: res_property_name
+    requires_emit: [extracted_view]
     template_var: res_property_name
     context_path: recipe.output.extracted_view.res_property_name
     owner: recipe
@@ -2451,6 +2532,7 @@ options:
     why: Half the runs in this flow produce an artifact that is not a file.
 
   - key: dspf_subtype
+    requires_emit: [dspf]
     template_var: dspf_subtype
     context_path: recipe.output.dspf.subtype
     owner: recipe
@@ -2466,6 +2548,7 @@ options:
     why: Which DSPF dialect is written. Decides what the simulator can read back.
 
   - key: busbit_delimiter
+    requires_emit: [dspf]
     template_var: busbit_delimiter
     context_path: recipe.output.dspf.busbit_delimiter
     owner: recipe
@@ -2480,6 +2563,7 @@ options:
     why: How bus bits are spelled in the DSPF. Must match the simulator.
 
   - key: disable_instances
+    requires_emit: [dspf]
     template_var: disable_instances
     context_path: recipe.output.dspf.disable_instances
     owner: recipe
@@ -2494,6 +2578,7 @@ options:
     why: Whether device instances are written into the DSPF.
 
   - key: output_hierarchy_delimiter
+    requires_emit: [dspf]
     template_var: output_hierarchy_delimiter
     context_path: recipe.output.dspf.hierarchy_delimiter
     owner: recipe
@@ -2508,6 +2593,7 @@ options:
     why: How hierarchical names are spelled on the way out. Must match the DSPF consumer.
 
   - key: output_xy
+    requires_emit: [dspf]
     template_var: output_xy
     context_path: recipe.output.dspf.output_xy
     owner: recipe
@@ -2527,6 +2613,7 @@ options:
     why: Which element classes get coordinates in the DSPF. Affects file size and back-annotation.
 
   - key: netlist_coupling_values
+    requires_emit: [dspf]
     template_var: netlist_coupling_values
     context_path: recipe.output.dspf.netlist_coupling_values
     owner: recipe
@@ -2542,6 +2629,7 @@ options:
     why: How coupling caps are written into the DSPF. Changes what the simulator sees.
 
   - key: add_bulk_terminal
+    requires_emit: [dspf]
     template_var: add_bulk_terminal
     context_path: recipe.output.dspf.add_bulk_terminal
     owner: recipe
@@ -2556,6 +2644,7 @@ options:
     why: Whether devices get an explicit bulk terminal in the DSPF.
 
   - key: sub_node_char
+    requires_emit: [dspf]
     template_var: sub_node_char
     context_path: recipe.output.dspf.sub_node_char
     owner: recipe
@@ -2644,6 +2733,7 @@ options:
     why: Where the DSPF lands. Derived from the workspace pattern per run.
 
   - key: output_net_name_space
+    requires_emit: [dspf]
     template_var: output_net_name_space
     context_path: recipe.output.dspf.net_name_space
     owner: recipe
@@ -2676,6 +2766,7 @@ options:
     why: Determined by the PDK query_cmd, like the other three "Design" rows.
 
   - key: extraction_corner
+    tier: common
     template_var: extraction_corner
     context_path: recipe.extraction.corner
     owner: recipe
@@ -2782,6 +2873,7 @@ options:
     why: Which technology QRC loads. Pure process fact.
 
   - key: temperature_c
+    tier: common
     template_var: temperature
     context_path: recipe.extraction.temperature_c
     owner: recipe
@@ -3010,6 +3102,7 @@ options:
     why: As parasitic_ind_model, for mutual inductance.
 
   - key: reduction_criterion
+    tier: common
     template_var: jivaro_criterion
     context_path: recipe.reduction.criterion
     owner: recipe
@@ -3026,6 +3119,7 @@ options:
     why: The reduction criterion. Directly decides how much accuracy is traded away.
 
   - key: reduction_frequency_limit_ghz
+    tier: common
     template_var: jivaro_frequency_limit
     context_path: recipe.reduction.frequency_limit_ghz
     owner: recipe
@@ -3049,6 +3143,7 @@ options:
     why: The frequency the reduced network must stay accurate to. An RF-critical condition.
 
   - key: reduction_error_max_pct
+    tier: common
     template_var: jivaro_error_max
     context_path: recipe.reduction.error_max_pct
     owner: recipe
@@ -3115,6 +3210,7 @@ options:
     why: A known empty extension point. Better documented than rediscovered.
 
   - key: reduction_enabled
+    tier: common
     template_var: reduction_enabled
     context_path: recipe.reduction.enabled
     owner: recipe
@@ -3302,6 +3398,7 @@ options:
     why: A machine property. Belongs with the other resource settings, not in a Recipe.
 
   - key: stages
+    tier: common
     template_var: stages
     context_path: recipe.stages
     owner: recipe
@@ -3346,6 +3443,7 @@ options:
     why: A property of one invocation.
 
   - key: continue_on_lvs_fail
+    tier: common
     template_var: continue_on_lvs_fail
     context_path: recipe.policy.continue_on_lvs_fail
     owner: recipe

@@ -338,6 +338,91 @@ class LandingSite(Frozen):
         )
 
 
+# ---- presentation -----------------------------------------------------------
+# These three exist for the Recipes form and for nothing else. They are here
+# rather than in the UI because the alternative is a hand-written table of
+# eighty-five exceptions inside a widget, which is precisely the system this
+# catalog replaced. See docs/refactor/RECIPES_FORM.md.
+
+
+class Tier(StrEnum):
+    """How much of the form a row belongs to. Artboard ``M`` section 3.
+
+    The form shows ~85 options and the shipped recipe leaves 83 of them at
+    the catalog default, so a single flat list spends almost all of its
+    height on values nobody touches. Two densities fix that -- but only
+    because nothing is ever made *unreachable*: ``ALL`` rows are one always-
+    visible toggle away, they are searchable from either mode, and a row
+    whose value differs from its default is promoted into ``COMMON``
+    whatever its tier says.
+    """
+
+    #: Shown in both modes. The settings a person changes from job to job.
+    COMMON = "common"
+    #: Shown in All view, and in Common view when its value is non-default.
+    FULL = "full"
+    #: Owned by another screen. Never rendered as an editable row here;
+    #: search finds it and offers to navigate. See :class:`Screen`.
+    ELSEWHERE = "elsewhere"
+
+
+class Screen(StrEnum):
+    """Which screen owns the value. Artboard ``M`` section 1.
+
+    ``CELLS`` rows are per-DUT: ``out_file`` names the extracted view one
+    cell produces, so it is a column on the cell table and cannot be a recipe
+    field. The office report that produced this column was "I cannot find
+    where to rename the Quantus output view" -- the ownership was right and
+    the discoverability was zero, so search answers for these rows too.
+    """
+
+    RECIPES = "recipes"
+    CELLS = "cells"
+
+
+class SectionDisplay(Frozen):
+    """One raw ``lands_in.section`` and how the form draws it. Artboard ``L``.
+
+    Authored once per section -- twenty-three rows for the whole catalog --
+    and never per option. Adding an option touches this table never; adding a
+    template *section* touches it once. A section with no entry here is not an
+    error: it renders under its own raw name at :data:`UNMAPPED_ORDER`, so a
+    new tool section shows up ugly, visible, and fixable in one line.
+
+    Three operations, and the level-2 headings need all three:
+
+    * **rename** is :attr:`label` -- ``device_check`` reads "device checks".
+    * **merge** is a shared :attr:`group`: sections in one group render as a
+      single heading, taking the label of the lowest-ordered member.
+      ``device_preserve`` and ``netlist_control`` are one heading.
+    * **split** is :attr:`split_by`, and ``output_db`` is its only user: one
+      section becomes one heading per emitted output format, because the
+      vendor documents four *different* option sets under that name.
+    """
+
+    #: The tool, not the file: ``si`` / ``quantus`` / ``calibre`` / ``jivaro``,
+    #: which is the directory component of a target's ``template_id``.
+    #: Keying on the tool is what makes this table twenty-three rows instead
+    #: of thirty-one -- ``quantus.ext.cmd`` and ``quantus.dspf.cmd`` share
+    #: eight section names, with the same meaning in both, and giving them
+    #: separate entries would be two places to change one heading. ``None``
+    #: marks the synthetic bucket for rows with no landing site at all.
+    tool: str | None = None
+    section: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    #: Sections sharing a group render as one heading.
+    group: str = Field(min_length=1)
+    order: int = Field(ge=0)
+    #: Name of the OptionSpec field to split this section by. Only
+    #: ``requires_emit`` is understood, and only ``output_db`` uses it.
+    split_by: str | None = None
+
+
+#: Order given to a section with no :class:`SectionDisplay` entry. High enough
+#: to sort last, finite so it still renders.
+UNMAPPED_ORDER = 999
+
+
 # ---- the option -------------------------------------------------------------
 
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -395,6 +480,25 @@ class OptionSpec(Frozen):
     notes: str | None = None
     #: An unanswered question this row depends on (mirrored in OFFICE_TODO.md).
     question: str | None = None
+
+    # -- presentation ---------------------------------------------------
+    #: Which density this row belongs to. Artboard ``M`` names it required on
+    #: every row; it defaults to :attr:`Tier.FULL` here instead, because
+    #: ``full`` is the answer that hides nothing -- an unclassified row shows
+    #: in All view, is searchable, and is promoted into Common the moment its
+    #: value leaves the default. A required column would be safer only if the
+    #: unsafe default were the silent one, and it is the other way round.
+    tier: Tier = Tier.FULL
+    #: Which screen owns the value. Rows that are not ``recipes`` are drawn
+    #: disabled with a pointer, and found by search.
+    screen: Screen = Screen.RECIPES
+    #: Output formats this row applies to, by ``output.emit`` member. Empty
+    #: means every format. A recipe that does not emit a listed format draws
+    #: the row disabled, never hidden: the option exists, the tool accepts
+    #: it, and this recipe simply does not reach it. Hiding it would make the
+    #: form lie about what the tool can do, which is the misunderstanding the
+    #: catalog exists to end.
+    requires_emit: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check(self) -> OptionSpec:
@@ -581,6 +685,41 @@ class Catalog(Frozen):
     catalog_version: str
     targets: list[RenderTargetSpec]
     options: list[OptionSpec]
+    #: How the form titles each template section. See :class:`SectionDisplay`.
+    #: Optional: an empty table renders every section under its raw name.
+    sections: list[SectionDisplay] = Field(default_factory=list)
+
+    def tool_of(self, target: RenderTarget) -> str:
+        """``quantus.ext.cmd`` -> ``quantus``. Level 1 of the form's grouping.
+
+        Read off ``template_id``'s directory rather than off the target id,
+        because the id spells the *file* (``lvs.qci``) while the directory
+        spells the *tool* (``calibre``), and the form groups by tool.
+        """
+
+        spec = next((t for t in self.targets if t.id == target), None)
+        if spec is None:  # pragma: no cover - the model validates this
+            return str(target.value).split(".")[0]
+        return spec.template_id.split("/")[0]
+
+    def section_display(self, tool: str | None, section: str) -> SectionDisplay:
+        """The display rule for one section, invented if the table lacks it.
+
+        Never raises. A missing entry is a presentation gap, not a broken
+        catalog, and a form that refuses to draw is a worse answer than one
+        that draws an ugly heading somebody can fix in one line.
+        """
+
+        for entry in self.sections:
+            if entry.tool == tool and entry.section == section:
+                return entry
+        return SectionDisplay(
+            tool=tool,
+            section=section,
+            label=section.replace("_", " "),
+            group=section,
+            order=UNMAPPED_ORDER,
+        )
 
     @model_validator(mode="after")
     def _check(self) -> Catalog:
