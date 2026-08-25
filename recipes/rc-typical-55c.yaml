@@ -148,8 +148,12 @@ reduction:
   reduce_floating_nets: false
   decoupling_auto_threshold: false
   log_verbose_level: trace
-  # NEEDS CONFIRMATION: Should this always equal out_file? (Suspected live bug.)
-  views_to_reduce: av_extracted
+  # Deliberately unset: it then follows the DUT's out_file, which is what the
+  # old script did by never touching the line. Pinning a literal here froze
+  # `av_extracted` into every recipe while the real flow used `av_ext` -- the
+  # named case of the frozen-default class in OLD_VS_NEW_FLOW.md section 0.
+  # Set it only to reduce a view some earlier run produced.
+  views_to_reduce:
   output_view_suffix: _red
 policy:
   continue_on_lvs_fail: false
