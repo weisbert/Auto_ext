@@ -149,3 +149,39 @@ are not:
 Search currently reports off-screen matches by name in the status line; the
 three labelled result bands of artboard `J`, and the button that navigates to
 the Cells screen, are part of the detail-pane round.
+
+## 7. The library list — overruling artboard `G`
+
+`G` drew the list as `recipe_id` (mono, first line) over `description`, with
+`name` living only in the form header. The reasoning was sound and is worth
+keeping on the record: the migrator writes names like `rc_coupled, corner
+typical, 55C, extracted_view, with reduction` — sixty-three characters, of
+which twelve fitted the 214px column — so a list drawn from `name` was a list
+of truncated sentences.
+
+**The user overruled it on 2026-08-25.** The report was "我在recipe页把recipe
+更名之后，左边的菜单栏上的内容并没有跟着改名". Whatever the column is
+technically showing, a rename that leaves the list unmoved reads as a rename
+that did not take, and that reading costs more than the truncation did.
+
+What is drawn now, top to bottom:
+
+| line | field | treatment |
+|---|---|---|
+| 1 | `name` | body size, DemiBold, **wrapped over up to two lines**, elided past that |
+| 2 | `recipe_id` | mono, meta size, secondary, middle-elided |
+| tooltip | `description` | falls back to `recipe_id` when absent |
+
+Wrapping is what makes this survivable where `G`'s objection was not: the
+sixty-three-character name takes two lines and the row grows, rather than
+being cut at twelve characters. `recipe_id` keeps a line of its own because it
+is the file name and the string every error message quotes. `sizeHint` and
+`_paint_two_lines` measure the same way, so the row is never clipped.
+
+**One writer.** `_fill_list_item` is the only thing that writes a list row,
+called by both `set_recipes` and `_on_name_edited`. That is not tidiness: the
+bug underneath the user's report was those two writing *different* meanings
+into column 0 — `set_recipes` the id, `_on_name_edited` the name — after
+`e2b722c` changed what column 0 meant and left the rename handler behind. Two
+call sites agreeing is a rule someone has to remember; one call site is a rule
+that holds itself.

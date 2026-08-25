@@ -119,6 +119,10 @@ class MainWindow(QMainWindow):
         #: into the screens, so their change signals do not read as edits.
         self._pushing = False
 
+        #: Last ``(recipe_id, name)`` list handed to the Cells column and the
+        #: run bar. See :meth:`_push_recipe_choices`.
+        self._pushed_recipe_choices: list[tuple[str, str]] = []
+
         self._controller = ConfigController(
             auto_ext_root=auto_ext_root,
             workarea=workarea,
@@ -435,6 +439,12 @@ class MainWindow(QMainWindow):
         recipe = self._recipes.current_recipe()
         if recipe is not None:
             self._controller.stage_recipe(recipe)
+            # A rename has to reach the two places that spell a recipe by
+            # name -- the Cells table's ``recipe`` column and the run bar's
+            # override combo. They used to be refreshed on new / duplicate /
+            # delete / save but not on an edit, so both went on showing the
+            # old name until something else happened to trigger a push.
+            self._push_recipe_choices()
 
     def _on_recipe_dirty_changed(self, dirty: bool) -> None:
         """Stage the working copy the moment the screen reports an edit.
@@ -530,9 +540,21 @@ class MainWindow(QMainWindow):
         return f"{stem}-{index}"
 
     def _push_recipe_choices(self) -> None:
-        self._cells.set_recipe_choices(
-            [(r.recipe_id, r.name) for r in self._controller.recipes]
-        )
+        """``(recipe_id, name)`` to the Cells column and the run bar.
+
+        Skips the push when the pairs have not moved. Staging fires on every
+        keystroke, and repopulating a combo means ``clear()`` plus one
+        ``addItem`` per recipe plus a re-selection -- a full repaint of a
+        control the user may be looking at, per character typed, over a
+        forwarded X11 link. Comparing first makes the common keystroke (any
+        field that is not the name) cost one list comprehension.
+        """
+
+        pairs = [(r.recipe_id, r.name) for r in self._controller.recipes]
+        if pairs == self._pushed_recipe_choices:
+            return
+        self._pushed_recipe_choices = pairs
+        self._cells.set_recipe_choices(pairs)
         self._push_recipe_usage()
 
     def _push_recipe_usage(self) -> None:

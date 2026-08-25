@@ -27,7 +27,7 @@ from auto_ext.core.config import (  # noqa: E402
 from auto_ext.core.progress import CancelToken  # noqa: E402
 from auto_ext.core.runner import RunSummary  # noqa: E402
 from auto_ext.ui.qt_reporter import QtProgressReporter  # noqa: E402
-from auto_ext.ui.worker import RunWorker  # noqa: E402
+from auto_ext.ui.worker import RunBatch, RunWorker  # noqa: E402
 
 
 @pytest.fixture
@@ -48,13 +48,12 @@ def _worker(worker_inputs, *, token: CancelToken, tmp_path: Path, workarea: Path
     project, tasks, recipe, profile = worker_inputs
     return RunWorker(
         project=project,
-        tasks=tasks,
+        batches=[RunBatch(recipe=recipe, tasks=tasks)],
         stages=["si", "calibre"],
         auto_ext_root=tmp_path / "pr",
         workarea=workarea,
         reporter=QtProgressReporter(),
         cancel_token=token,
-        recipe=recipe,
         profile=profile,
         dry_run=True,
     )

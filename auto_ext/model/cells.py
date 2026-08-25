@@ -27,7 +27,9 @@ per-task render settings. Only the first survives here.
   the load fails.
 * **Render settings left.** ``jivaro`` / ``knobs`` / ``templates`` /
   ``continue_on_lvs_fail`` / ``dspf_out_path`` are Recipe and Workspace
-  business. What is left is what genuinely varies per DUT.
+  business. What is left is what genuinely varies per DUT -- including, since
+  2026-08-25, :attr:`CellEntry.recipe`: *which* recipe a DUT runs varies per
+  DUT even though what is *in* the recipe does not.
 
 Import direction: this module imports :mod:`auto_ext.model.common` and
 :mod:`auto_ext.core.errors` only, so ``migrate`` and the model layer can both
@@ -104,6 +106,22 @@ class CellEntry(Base):
     #: ``None`` means the flow has no extracted view for this DUT, which the
     #: reduction stage refuses to run against.
     out_file: str | None = None
+    #: Which Recipe this DUT runs, by ``recipe_id``. ``None`` means "no
+    #: choice made here", which the run resolves from the run bar's override
+    #: or -- when the library holds exactly one -- from the library.
+    #:
+    #: This lives on the DUT because different blocks want different
+    #: extraction settings in one batch: an RF top level and a bias cell are
+    #: not asking the same question of Quantus. It was screen-only state
+    #: until 2026-08-25 (a column you could fill that changed nothing and was
+    #: lost on exit); the user ruled that per-cell recipes are real.
+    #:
+    #: Not a schema-version bump: ``dump_cells_yaml`` writes with
+    #: ``exclude_none``, so a table where nobody has chosen one is byte-wise
+    #: unchanged and still readable by an older install. A table that *does*
+    #: name recipes is not -- ``Base`` forbids unknown keys - so do not hand a
+    #: file written here back to a red zone running older code.
+    recipe: str | None = None
     #: Human-readable name for the UI. The only piece of UX sugar that
     #: survived from ``TaskSpec.label``. ``None`` renders :attr:`key`.
     display_name: str | None = None
@@ -113,7 +131,7 @@ class CellEntry(Base):
     #: Free-form. Why this row exists, or why it is disabled.
     note: str | None = None
 
-    @field_validator("out_file", "display_name", "note", mode="before")
+    @field_validator("out_file", "recipe", "display_name", "note", mode="before")
     @classmethod
     def _blank_to_none(cls, value: Any) -> Any:
         """``""`` round-trips to ``None`` so the YAML stays free of empties.

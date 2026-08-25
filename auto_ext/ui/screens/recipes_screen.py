@@ -470,16 +470,22 @@ class _SelectedBarDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _paint_two_lines(self, painter, option, index) -> None:
-        """``recipe_id`` in mono, then the description, wrapped. Artboard ``G``.
+        """The recipe's ``name``, wrapped, then ``recipe_id`` in mono under it.
 
-        The list used to draw ``name`` alone in a 214px column, and ``name``
-        is a sentence: the migrator writes
-        "rc_coupled, corner typical, 55C, extracted_view, with reduction",
-        sixty-three characters, of which twelve fitted. Three fields exist and
-        each has a job -- ``recipe_id`` is the identity and the file name,
-        ``description`` is the sentence, and ``name`` is the editable title in
-        the form header. Splitting them is the fix; widening the column only
-        moves the truncation.
+        The list originally drew ``name`` alone in a 214px column and the
+        migrator writes names like "rc_coupled, corner typical, 55C,
+        extracted_view, with reduction" -- sixty-three characters of which
+        twelve fitted. Artboard ``G`` answered that by promoting ``recipe_id``
+        to the first line and dropping ``name`` from the list entirely.
+
+        The user overruled that on 2026-08-25: renaming a recipe and seeing
+        the list not move reads as a rename that did not work, whatever the
+        column is technically showing. So ``name`` is back on the first line
+        -- but wrapped over two lines rather than truncated at twelve
+        characters, which is what made the original arrangement untenable.
+        ``recipe_id`` keeps a line of its own because it is the file name and
+        the thing every error message quotes; ``description`` moves to the
+        tooltip. See ``docs/refactor/RECIPES_FORM.md`` section 7.
         """
 
         painter.save()
@@ -492,69 +498,77 @@ class _SelectedBarDelegate(QStyledItemDelegate):
         )
         selected = bool(option.state & QStyle.State_Selected)
 
-        ident = index.data(Qt.DisplayRole) or ""
-        font = QFont(option.font)
-        font.setFamily(theme.FONT_MONO_FAMILIES[0])
-        font.setBold(True)
-        font.setPointSize(-1)
-        font.setPixelSize(theme.FONT_SIZE_META)
-        painter.setFont(font)
+        name = index.data(Qt.DisplayRole) or ""
+        title = QFont(option.font)
+        title.setPointSize(-1)
+        title.setPixelSize(theme.FONT_SIZE_BODY)
+        title.setWeight(QFont.DemiBold)
+        painter.setFont(title)
         painter.setPen(QColor(theme.TEXT_PRIMARY))
-        line = painter.fontMetrics().height()
+        metrics = painter.fontMetrics()
+        line = metrics.height()
+        wanted = metrics.boundingRect(
+            0, 0, rect.width(), 0, Qt.TextWordWrap, name
+        ).height()
+        used = max(min(wanted, 2 * line), line)
+        if wanted > 2 * line:
+            name = metrics.elidedText(name, Qt.ElideRight, 2 * rect.width())
         painter.drawText(
-            rect.x(), rect.y(), rect.width(), line, Qt.AlignLeft | Qt.AlignVCenter, ident
+            rect.x(),
+            rect.y(),
+            rect.width(),
+            used,
+            Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap,
+            name,
         )
 
-        description = index.data(Qt.UserRole + 1) or ""
-        if description:
-            sub = QFont(option.font)
-            sub.setPointSize(-1)
-            sub.setPixelSize(theme.FONT_SIZE_META)
-            painter.setFont(sub)
+        ident = index.data(Qt.UserRole + 1) or ""
+        if ident:
+            mono = QFont(option.font)
+            mono.setFamily(theme.FONT_MONO_FAMILIES[0])
+            mono.setPointSize(-1)
+            mono.setPixelSize(theme.FONT_SIZE_META)
+            painter.setFont(mono)
             painter.setPen(
                 QColor(theme.TEXT_PRIMARY if selected else theme.TEXT_SECONDARY)
             )
-            body = rect.adjusted(0, line, 0, 0)
-            metrics = painter.fontMetrics()
-            if metrics.boundingRect(
-                0, 0, body.width(), 0, Qt.TextWordWrap, description
-            ).height() > 2 * metrics.height():
-                # Two lines is the budget (see sizeHint); past it the text is
-                # elided rather than clipped mid-glyph.
-                description = metrics.elidedText(
-                    description, Qt.ElideRight, 2 * body.width()
-                )
+            below = rect.adjusted(0, used, 0, 0)
             painter.drawText(
-                body, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, description
+                below,
+                Qt.AlignLeft | Qt.AlignTop,
+                painter.fontMetrics().elidedText(ident, Qt.ElideMiddle, below.width()),
             )
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802 - Qt naming
-        """Tall enough for the identity line plus the wrapped description.
+        """Tall enough for the wrapped name plus the ``recipe_id`` under it.
 
-        ``uniformItemSizes`` is off for exactly this: a 40-character sentence
-        takes one wrapped line and a 65-character one takes two, and the row
-        grows rather than eliding. Nothing in this list is ever truncated.
+        ``uniformItemSizes`` is off for exactly this: a short name takes one
+        line and a migrator-written sentence takes two, and the row grows
+        rather than eliding at twelve characters.
         """
 
         base = super().sizeHint(option, index)
         if index.column() != 0:
             return base
-        description = index.data(Qt.UserRole + 1) or ""
+        name = index.data(Qt.DisplayRole) or ""
+        ident = index.data(Qt.UserRole + 1) or ""
         metrics = option.fontMetrics
         line = metrics.height()
-        if not description:
-            return QSize(base.width(), line + 2 * theme.SPACE_XXS)
-        wrapped = min(
-            metrics.boundingRect(
-                0, 0, self._text_width(option), 0, Qt.TextWordWrap, description
-            ).height(),
-            # Two lines and no more. A description long enough to need a third
-            # is a description that wanted to be the recipe's notes, and a
-            # library where one row is six lines tall stops being a list.
-            2 * line,
+        wrapped = max(
+            min(
+                metrics.boundingRect(
+                    0, 0, self._text_width(option), 0, Qt.TextWordWrap, name
+                ).height(),
+                # Two lines and no more. A name long enough to need a third is
+                # a name that wanted to be the description, and a library
+                # where one row is six lines tall stops being a list.
+                2 * line,
+            ),
+            line,
         )
-        return QSize(base.width(), line + wrapped + 2 * theme.SPACE_XXS)
+        below = line if ident else 0
+        return QSize(base.width(), wrapped + below + 2 * theme.SPACE_XXS)
 
     @staticmethod
     def _text_width(option) -> int:
@@ -1250,19 +1264,9 @@ class RecipesScreen(QWidget):
         self._list.blockSignals(True)
         self._list.clear()
         for recipe in self._recipes:
-            # Column 0 is the IDENTITY, not the name: the delegate draws
-            # ``recipe_id`` on the first line and the description under it.
-            # See _SelectedBarDelegate._paint_two_lines.
-            item = QTreeWidgetItem([recipe.recipe_id, self._edit_badge(recipe)])
+            item = QTreeWidgetItem()
             item.setData(0, Qt.UserRole, recipe.recipe_id)
-            item.setData(0, Qt.UserRole + 1, recipe.description or recipe.name)
-            item.setToolTip(0, recipe.description or recipe.name)
-            item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
-            if recipe.manual_edit_count:
-                item.setForeground(1, QColor(theme.WARNING_TEXT_ON_WHITE))
-                item.setToolTip(
-                    1, f"{recipe.manual_edit_count} manual edits to the generated files"
-                )
+            self._fill_list_item(item, recipe)
             self._list.addTopLevelItem(item)
         self._list.blockSignals(False)
         self._list.resizeColumnToContents(1)
@@ -1274,6 +1278,34 @@ class RecipesScreen(QWidget):
             self._load(None)
         else:
             self.select_recipe(wanted)
+
+    def _fill_list_item(self, item: QTreeWidgetItem, recipe: Recipe) -> None:
+        """Write every visible field of one list row, from one Recipe.
+
+        **The only writer.** Column 0 carries the ``name`` and the delegate
+        draws it on the first line, wrapped; ``recipe_id`` rides in
+        ``UserRole + 1`` and is drawn in mono under it; ``description``
+        becomes the tooltip (``_SelectedBarDelegate._paint_two_lines``).
+
+        This used to be open-coded in :meth:`set_recipes` while
+        ``_on_name_edited`` wrote a *different* meaning into the same cells --
+        the name into column 0, and nothing at all into the second line. So a
+        row said one thing while the user typed and another after the next
+        repaint, and every save repaints. The two agreeing is not a rule
+        anyone can hold in their head across two call sites; it is a rule that
+        survives by there being one.
+        """
+
+        item.setText(0, recipe.name)
+        item.setText(1, self._edit_badge(recipe))
+        item.setData(0, Qt.UserRole + 1, recipe.recipe_id)
+        item.setToolTip(0, recipe.description or recipe.recipe_id)
+        item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+        if recipe.manual_edit_count:
+            item.setForeground(1, QColor(theme.WARNING_TEXT_ON_WHITE))
+            item.setToolTip(
+                1, f"{recipe.manual_edit_count} manual edits to the generated files"
+            )
 
     def set_profile(self, profile: Any | None) -> None:
         """Point every ``choices_from`` control at this PDK profile's tables.
@@ -1369,6 +1401,24 @@ class RecipesScreen(QWidget):
     @property
     def recipe_list(self) -> QTreeWidget:
         return self._list
+
+    def list_row_lines(self, recipe_id: str) -> tuple[str, str] | None:
+        """The two lines the list actually paints for ``recipe_id``.
+
+        ``_SelectedBarDelegate._paint_two_lines`` draws ``DisplayRole`` on the
+        first line and ``UserRole + 1`` on the second. This reads back exactly
+        those, so a test can assert on **what is on screen** without knowing
+        the role numbers or re-deriving the text from the Recipe -- which is
+        the assertion that was missing when a refactor changed what column 0
+        means and left the rename handler writing the old meaning into it.
+
+        ``None`` when no row carries that id.
+        """
+
+        item = self._item_for(recipe_id)
+        if item is None:
+            return None
+        return item.text(0), str(item.data(0, Qt.UserRole + 1) or "")
 
     def groups(self) -> dict[str, OptionGroup]:
         return dict(self._groups)
@@ -1590,6 +1640,12 @@ class RecipesScreen(QWidget):
     def _on_name_edited(self, text: str) -> None:
         """Rename the working copy as the user types, list row included.
 
+        The row is repainted through :meth:`_fill_list_item`, the same call
+        :meth:`set_recipes` makes, so what the list says while typing is what
+        it will say after the next rebuild. Whether the *name* belongs on that
+        row at all is a separate question and lives in ``RECIPES_FORM.md``;
+        this only guarantees the two writers cannot disagree about it.
+
         An empty box is a half-typed name, not a rename: ``Recipe.name`` is
         ``min_length=1``, so the old name is held until there is a new one
         rather than raising on every backspace to empty.
@@ -1603,8 +1659,7 @@ class RecipesScreen(QWidget):
         self._working.name = name
         item = self._item_for(self._working.recipe_id)
         if item is not None:
-            item.setText(0, name)
-            item.setToolTip(0, self._working.description or name)
+            self._fill_list_item(item, self._working)
         self._recompute_dirty()
 
     def _item_for(self, recipe_id: str) -> QTreeWidgetItem | None:

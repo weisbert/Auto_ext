@@ -5,7 +5,7 @@ The rule that makes this file worth having
 **A journey test may only touch what a user can touch, and may only assert on
 what a user can see.** No private attribute, no controller method, no
 ``screen._working``, no "assert the signal fired". Click the button; type in
-the box; then read the file on disk.
+the box; read the file on disk; **then read the screen back.**
 
 That rule is not stylistic. The Recipes screen's ``Save`` button shipped
 staging its recipe into a queue and writing nothing -- so an edit made in the
@@ -14,6 +14,30 @@ it that passed, because they asserted ``save_requested`` was emitted and that
 the controller had been staged. Both were true. Both are what the bug looks
 like. The only assertion that could tell the difference is the one that reads
 the bytes afterwards, and nothing in the suite made it.
+
+Why the rule now has a fourth clause
+------------------------------------
+The first three clauses stopped at the disk, and the disk is the one place a
+user never looks. Every invariant this project enforces ran the same
+direction -- catalog to widget, widget to disk, recipe to rendered file -- and
+nothing at all ran back. Two bugs lived in the gap and neither was reachable
+by the suite:
+
+* renaming a recipe wrote ``name:`` to the file correctly (asserted below,
+  green throughout) while the list on the left threw the new name away on the
+  next repaint, because a refactor changed what column 0 *means* and left a
+  second writer behind;
+* the Cells table's ``recipe`` column accepted a choice that no dispatch ever
+  read.
+
+Both are read-back defects. A write-only assertion cannot see either, and no
+amount of them adds up to one. So: after the bytes, **reload and assert what
+is on screen** -- the value, and the label the user actually reads.
+
+Fixtures follow the same reasoning. Anything that draws a *choice* uses
+``v2_config_dir_multi``: with one recipe and one corner in the tree, a control
+offering nothing and a control offering the only answer look identical, and
+the dispatch's "refuse to guess between candidates" branch is unreachable.
 
 So the tests here are few, slow and blunt on purpose. They cover the seam
 between "the widget did its part" and "the user got what they asked for",
@@ -38,6 +62,23 @@ from auto_ext.ui.main_window import MainWindow  # noqa: E402
 @pytest.fixture
 def window(qtbot, v2_config_dir: Path, isolated_recipe_path: Path) -> MainWindow:
     win = MainWindow(config_dir=v2_config_dir / "config", auto_ext_root=v2_config_dir)
+    qtbot.addWidget(win)
+    return win
+
+
+@pytest.fixture
+def window_multi(
+    qtbot, v2_config_dir_multi: Path, isolated_recipe_path: Path
+) -> MainWindow:
+    """A window over a project with two recipes and two corners.
+
+    For every journey whose subject is a *choice*. See the fixture note in
+    this module's docstring.
+    """
+
+    win = MainWindow(
+        config_dir=v2_config_dir_multi / "config", auto_ext_root=v2_config_dir_multi
+    )
     qtbot.addWidget(win)
     return win
 
@@ -86,6 +127,177 @@ def test_rename_a_recipe_press_save_and_the_file_on_disk_has_it(
     screen.save_button().click()
 
     assert "name: RC coupled 125C" in path.read_text(encoding="utf-8")
+
+
+def test_renaming_a_recipe_does_not_leave_the_list_saying_two_things(
+    window_multi: MainWindow
+) -> None:
+    """"改名之后左边并没有跟着改" -- the two writers to column 0 disagree.
+
+    ``set_recipes`` builds column 0 from ``recipe_id``; ``_on_name_edited``
+    writes ``name`` into it. So the row says one thing while you type and
+    another after the next repaint, and a save repaints. Whatever the design
+    answer is about *whether* the list should carry the name at all, the two
+    writers have to agree -- that part needs no decision, and this asserts
+    only that part.
+
+    Run over the recipe that has a ``description``: with the description-less
+    fixture recipe the second line falls back to ``name``, so the name was on
+    screen by accident and the disagreement was invisible.
+    """
+
+    screen = window_multi.shell.page("recipes")
+    described = next(r for r in screen.recipes() if r.description)
+    screen.select_recipe(described.recipe_id)
+
+    screen.name_edit().setText("RC coupled 125C")
+    screen.name_edit().textEdited.emit("RC coupled 125C")
+    while_typing = screen.list_row_lines(described.recipe_id)
+
+    screen.save_button().click()
+    after_repaint = screen.list_row_lines(described.recipe_id)
+
+    assert while_typing == after_repaint, (
+        "the list row changed under the user without the user touching it: "
+        f"{while_typing!r} while typing, {after_repaint!r} after the save"
+    )
+
+
+def test_a_renamed_recipe_reads_back_under_its_new_name(
+    window_multi: MainWindow
+) -> None:
+    """"改名之后左边并没有跟着改" -- the user's ruling, 2026-08-25.
+
+    Artboard ``G`` had dropped ``name`` from the list. Whatever the column is
+    technically showing, a rename that leaves the list unmoved reads as a
+    rename that did not work, so ``name`` is the first line now and
+    ``recipe_id`` the second. Run over the recipe that has a ``description``:
+    with a description-less one the old layout showed ``name`` by accident.
+    """
+
+    screen = window_multi.shell.page("recipes")
+    described = next(r for r in screen.recipes() if r.description)
+    screen.select_recipe(described.recipe_id)
+
+    screen.name_edit().setText("RC coupled 125C")
+    screen.name_edit().textEdited.emit("RC coupled 125C")
+    screen.save_button().click()
+
+    first, second = screen.list_row_lines(described.recipe_id)
+    assert first == "RC coupled 125C", "the list did not follow the rename"
+    assert second == described.recipe_id, "the id lost its line"
+
+
+def test_a_rename_reaches_the_cells_table_without_waiting_for_a_save(
+    window_multi: MainWindow
+) -> None:
+    """The Cells column and the run bar spell recipes by name too.
+
+    They were refreshed on new / duplicate / delete / save but not on an
+    edit, so both went on showing the old name while the Recipes screen
+    showed the new one.
+    """
+
+    recipes = window_multi.shell.page("recipes")
+    target = recipes.recipes()[0].recipe_id
+    recipes.select_recipe(target)
+
+    recipes.name_edit().setText("RC coupled 125C")
+    recipes.name_edit().textEdited.emit("RC coupled 125C")
+
+    cells = window_multi.shell.page("cells")
+    assert dict(cells.recipe_choices())[target] == "RC coupled 125C"
+
+
+def test_a_recipe_picked_for_a_row_is_still_there_next_launch(
+    window_multi: MainWindow, v2_config_dir_multi: Path, qtbot
+) -> None:
+    """The other half of "填写了recipe": it has to still be there tomorrow.
+
+    The binding was screen state, so it reached neither ``cells.yaml`` nor
+    the next launch. Reloading in a second window is the closest a test gets
+    to relaunching the app.
+    """
+
+    cells = window_multi.shell.page("cells")
+    key = cells.cells().keys[0]
+    chosen = window_multi.shell.page("recipes").recipes()[1].recipe_id
+
+    cells.set_recipe_binding(key, chosen)
+    assert cells.save_button().isEnabled(), "binding a recipe must offer Save"
+    cells.save_button().click()
+
+    assert chosen in (v2_config_dir_multi / "config" / "cells.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    second = MainWindow(
+        config_dir=v2_config_dir_multi / "config", auto_ext_root=v2_config_dir_multi
+    )
+    qtbot.addWidget(second)
+    assert second.shell.page("cells").recipe_bindings()[key] == chosen
+
+
+def test_the_recipe_chosen_for_a_row_is_the_recipe_that_row_runs(
+    window_multi: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Cells table offers a ``recipe`` per row. Ask it to run one.
+
+    Two recipes in the library on purpose: with one, the dispatch falls
+    through to "there is only one candidate, use it" and the column's
+    contribution is invisible either way.
+
+    What the user sees is either a run starting or a dialog saying it cannot.
+    Both are asserted, because "it refused" is the failure being hunted.
+    """
+
+    from PyQt5.QtWidgets import QMessageBox
+
+    from auto_ext.ui.screens import cells_screen as cells_mod
+
+    started: list[dict] = []
+
+    class FakeWorker:
+        def __init__(self, **kwargs: object) -> None:
+            started.append(dict(kwargs))
+
+        def __getattr__(self, name: str):
+            return _Signal()
+
+    class _Signal:
+        def connect(self, *_a, **_k) -> None:
+            return None
+
+        def __call__(self, *_a, **_k) -> None:
+            return None
+
+    monkeypatch.setattr(cells_mod, "RunWorker", FakeWorker)
+
+    refused: list[tuple] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda *a, **k: refused.append(a) or QMessageBox.Ok),
+    )
+
+    recipes = window_multi.shell.page("recipes")
+    chosen = recipes.recipes()[1].recipe_id
+
+    cells = window_multi.shell.page("cells")
+    keys = tuple(cells.cells().keys)
+    cells.set_selected_keys(keys)
+    for key in keys:
+        cells.set_recipe_binding(key, chosen)
+
+    cells.start_run()
+
+    assert not refused, f"the run was refused: {refused[0][2] if refused else ''}"
+    assert started, "nothing was dispatched"
+    batches = started[0]["batches"]
+    assert [b.recipe.recipe_id for b in batches] == [chosen], (
+        "the rows ran a recipe other than the one chosen for them"
+    )
+    assert sorted(t.task_id for t in batches[0].tasks) == sorted(keys)
 
 
 def test_saving_leaves_the_screen_clean_and_on_the_same_recipe(

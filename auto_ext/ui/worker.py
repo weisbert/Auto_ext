@@ -11,24 +11,52 @@ Each task the worker runs produces a Run directory under
 :class:`~auto_ext.model.run.RunRecord` list once the thread has finished,
 and the attached reporter emits each one as it is written.
 
-``recipe`` and ``profile`` are required by ``run_tasks`` -- the recipe says
-what to extract, the profile supplies the process literals -- so they are
-required here too. They are keyword arguments with no default rather than
-optional-with-a-fallback: a run started against the wrong recipe produces
-plausible-looking parasitics, which is the failure this whole rewrite exists
-to make impossible.
+``run_tasks`` takes one recipe for a whole call, but a batch can hold DUTs
+that want different ones -- an RF top level and a bias cell are not asking
+Quantus the same question. So the worker takes a list of :class:`RunBatch`
+and makes one ``run_tasks`` call per recipe, in order, merging the summaries.
+Grouping happens above (``CellsScreen._dispatch``), because that is where the
+rows and the run bar's override live.
+
+Batches run one after another rather than side by side. ``max_workers``
+parallelises tasks *within* a call, and two Quantus batches racing would
+double the licence draw against a ceiling the site actually has (``ceil(N/2)``
+licences for N CPUs). Sequential is also what makes cancellation simple: the
+shared token stops the batch in flight and the loop then declines to start
+the next.
+
+``profile`` is required -- it supplies the process literals -- and so is a
+non-empty batch list. Neither has a fallback: a run started against the wrong
+recipe produces plausible-looking parasitics, which is the failure this whole
+rewrite exists to make impossible.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
+
+from dataclasses import dataclass
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from auto_ext.core.progress import CancelToken
 from auto_ext.core.runner import RunSummary, run_tasks
 from auto_ext.model.run import RunRecord
+
+
+@dataclass(frozen=True)
+class RunBatch:
+    """One ``run_tasks`` call: the tasks that share a recipe.
+
+    ``tasks`` keeps the order the caller selected the rows in, so a run whose
+    rows all name the same recipe is indistinguishable from the old
+    single-recipe dispatch.
+    """
+
+    recipe: Any
+    tasks: list[Any]
 
 
 class RunWorker(QThread):
@@ -41,13 +69,12 @@ class RunWorker(QThread):
         self,
         *,
         project: Any,
-        tasks: list[Any],
+        batches: Sequence[RunBatch],
         stages: list[str],
         auto_ext_root: Path,
         workarea: Path,
         reporter: Any,
         cancel_token: CancelToken,
-        recipe: Any,
         profile: Any,
         resources: Any = None,
         catalog: Any = None,
@@ -58,13 +85,14 @@ class RunWorker(QThread):
     ) -> None:
         super().__init__()
         self._project = project
-        self._tasks = tasks
+        self._batches = list(batches)
+        if not self._batches:
+            raise ValueError("a run needs at least one batch")
         self._stages = stages
         self._auto_ext_root = auto_ext_root
         self._workarea = workarea
         self._reporter = reporter
         self._cancel_token = cancel_token
-        self._recipe = recipe
         self._profile = profile
         self._resources = resources
         self._catalog = catalog
@@ -98,23 +126,50 @@ class RunWorker(QThread):
         self._cancel_token.cancel()
 
     def run(self) -> None:  # QThread entry point
+        """One ``run_tasks`` call per batch, in order, merged into one summary.
+
+        A batch that raises stops the loop: the recipes after it were chosen
+        for rows the user expected to run *with* the ones already done, and
+        finishing half a dispatch while reporting an error is the shape that
+        makes someone re-run the whole thing anyway.
+        """
+
+        merged = RunSummary()
         try:
-            self._summary = run_tasks(
-                self._project,
-                self._tasks,
-                stages=self._stages,
-                auto_ext_root=self._auto_ext_root,
-                workarea=self._workarea,
-                recipe=self._recipe,
-                profile=self._profile,
-                resources=self._resources,
-                catalog=self._catalog,
-                templates_root=self._templates_root,
-                max_workers=self._max_workers,
-                dry_run=self._dry_run,
-                layout_export_path=self._layout_export_path,
-                reporter=self._reporter,
-                cancel_token=self._cancel_token,
-            )
+            for index, batch in enumerate(self._batches):
+                # Only *between* batches. A run cancelled before it started
+                # still goes through ``run_tasks`` once, because that is what
+                # records the tasks as CANCELLED; skipping the first call
+                # would report an empty dispatch instead of a cancelled one.
+                if index and self._cancel_token.is_cancelled():
+                    break
+                summary = run_tasks(
+                    self._project,
+                    batch.tasks,
+                    stages=self._stages,
+                    auto_ext_root=self._auto_ext_root,
+                    workarea=self._workarea,
+                    recipe=batch.recipe,
+                    profile=self._profile,
+                    resources=self._resources,
+                    catalog=self._catalog,
+                    templates_root=self._templates_root,
+                    max_workers=self._max_workers,
+                    dry_run=self._dry_run,
+                    layout_export_path=self._layout_export_path,
+                    reporter=self._reporter,
+                    cancel_token=self._cancel_token,
+                )
+                merged.tasks.extend(summary.tasks)
+                # Each call writes its own batch index when it covered more
+                # than one task. The first one names the dispatch; the GUI
+                # reads ``tasks``, and the CLI reads the index files.
+                if merged.batch_id is None:
+                    merged.batch_id = summary.batch_id
+                if merged.runs_root is None:
+                    merged.runs_root = summary.runs_root
         except Exception as exc:  # noqa: BLE001 — keep thread from dying silently
+            self._summary = merged
             self.error.emit(f"{type(exc).__name__}: {exc}")
+            return
+        self._summary = merged

@@ -50,7 +50,12 @@ from auto_ext.ui.screens.cells_screen import (  # noqa: E402
 from auto_ext.ui.shell import Shell  # noqa: E402
 from auto_ext.ui.widgets.run_bar import StageChipStrip  # noqa: E402
 
-RECIPES = [("rc-typ", "RC typical 55C"), ("rc-worst", "RCworst 85C")]
+#: The library the ``controller`` stub below holds, spelled the way the run
+#: bar and the recipe column receive it. The two used to disagree --
+#: ``rc-typ`` / ``rc-worst`` here against ``rc-default`` / ``rc-fast`` in the
+#: stub -- and nothing noticed, because the stub answered every unknown id
+#: with a recipe anyway. One library, one spelling.
+RECIPES = [("rc-default", "RC default"), ("rc-fast", "RC fast")]
 
 
 def _book(*extra: CellEntry) -> CellBook:
@@ -69,10 +74,27 @@ def _book(*extra: CellEntry) -> CellBook:
     )
 
 
-def _screen(qtbot, book: CellBook | None = None, controller=None) -> CellsScreen:
+def _screen(
+    qtbot,
+    book: CellBook | None = None,
+    controller=None,
+    recipe_override: str | None = "rc-default",
+) -> CellsScreen:
+    """The screen, and -- when it can dispatch -- a recipe picked for the run.
+
+    ``recipe_override`` exists because the stub library holds two recipes and
+    the dispatch refuses to guess between them. Every test below that hands
+    in a controller is about *dispatch* (does the worker get built, does the
+    panel open, do reporter events land) and not about which recipe a run
+    uses, so they take the same step a user takes: pick one in the run bar.
+    Pass ``recipe_override=None`` to test the refusal itself.
+    """
+
     screen = CellsScreen(controller, book=book if book is not None else _book())
     qtbot.addWidget(screen)
     screen.set_recipe_choices(RECIPES)
+    if controller is not None and recipe_override is not None:
+        screen.run_bar.set_recipe_override(recipe_override)
     return screen
 
 
@@ -127,6 +149,16 @@ def controller(tmp_path: Path):
     both -- the recipe says what to extract, the profile supplies the process
     literals -- and the dispatch refuses rather than starting a run that would
     produce plausible-looking parasitics from the wrong settings.
+
+    **``run_recipe`` reproduces the real rule, including the refusal.** It
+    used to read ``library.get(recipe_id, recipe)`` -- fall back to a recipe
+    when the id is unknown or ``None`` -- which is the opposite of
+    :meth:`ConfigController.run_recipe`, where no override and more than one
+    candidate means ``None``. ``test_config_controller`` pins the real
+    behaviour; nothing pinned the stub to it, so every dispatch test here
+    passed and the refusal the user actually hits was unreachable by
+    construction. A stub that contradicts a tested contract is worse than no
+    stub: it certifies the branch it removes.
     """
 
     book = _book()
@@ -134,6 +166,12 @@ def controller(tmp_path: Path):
     recipe = SimpleNamespace(recipe_id="rc-default", name="RC default")
     other = SimpleNamespace(recipe_id="rc-fast", name="RC fast")
     library = {r.recipe_id: r for r in (recipe, other)}
+
+    def run_recipe(recipe_id: str | None = None):
+        if recipe_id:
+            return library.get(recipe_id)
+        return recipe if len(library) == 1 else None
+
     return SimpleNamespace(
         project=SimpleNamespace(name="demo"),
         tasks=tasks,
@@ -141,7 +179,8 @@ def controller(tmp_path: Path):
         workarea=tmp_path / "wa",
         is_dirty=False,
         profile=SimpleNamespace(profile_id="hn001"),
-        run_recipe=lambda recipe_id=None: library.get(recipe_id, recipe),
+        run_recipe=run_recipe,
+        recipe_ids=lambda: sorted(library),
     )
 
 
@@ -347,14 +386,14 @@ def test_emptying_a_required_field_is_refused(qtbot) -> None:
 def test_renaming_a_row_carries_its_recipe_and_status_along(qtbot) -> None:
     screen = _screen(qtbot)
     old_key = screen.cells().keys[0]
-    screen.set_recipe_binding(old_key, "rc-typ")
+    screen.set_recipe_binding(old_key, "rc-default")
     screen.set_row_status(old_key, "passed", text="passed", when="08-20 17:42")
 
     screen.table.item(0, COL_CELL).setText("BLOCK_back_v9")
     new_key = screen.cells().keys[0]
 
     assert new_key != old_key
-    assert screen.recipe_bindings()[new_key] == "rc-typ"
+    assert screen.recipe_bindings()[new_key] == "rc-default"
     assert screen.row_status(new_key).when == "08-20 17:42"
 
 
@@ -372,9 +411,9 @@ def test_recipe_binding_shows_the_display_name(qtbot) -> None:
     key = screen.cells().keys[0]
 
     assert screen.table.item(0, COL_RECIPE).text() == "—"
-    screen.set_recipe_binding(key, "rc-worst")
+    screen.set_recipe_binding(key, "rc-fast")
 
-    assert screen.table.item(0, COL_RECIPE).text() == "RCworst 85C"
+    assert screen.table.item(0, COL_RECIPE).text() == "RC fast"
 
 
 # ---- row commands ---------------------------------------------------------
@@ -403,20 +442,20 @@ def test_add_cell_keeps_looking_until_the_key_is_free(qtbot) -> None:
 def test_duplicate_copies_the_row_and_its_recipe(qtbot) -> None:
     screen = _screen(qtbot)
     key = screen.cells().keys[0]
-    screen.set_recipe_binding(key, "rc-typ")
+    screen.set_recipe_binding(key, "rc-default")
     screen.set_selected_keys([key])
 
     copies = screen.duplicate_selected()
 
     assert len(copies) == 1
     assert screen.cells().entry(copies[0]).cell == "BLOCK_A_v3_copy"
-    assert screen.recipe_bindings()[copies[0]] == "rc-typ"
+    assert screen.recipe_bindings()[copies[0]] == "rc-default"
 
 
 def test_remove_drops_the_rows_and_everything_hanging_off_them(qtbot) -> None:
     screen = _screen(qtbot)
     key = screen.cells().keys[0]
-    screen.set_recipe_binding(key, "rc-typ")
+    screen.set_recipe_binding(key, "rc-default")
     screen.set_row_status(key, "failed", text="lvs 3", code="LVS")
     screen.set_selected_keys([key])
 
@@ -515,9 +554,9 @@ def test_filter_hides_the_rows_that_do_not_match(qtbot) -> None:
 
 def test_filter_also_matches_the_recipe_name(qtbot) -> None:
     screen = _screen(qtbot)
-    screen.set_recipe_binding(screen.cells().keys[1], "rc-worst")
+    screen.set_recipe_binding(screen.cells().keys[1], "rc-fast")
 
-    screen.set_filter_text("rcworst")
+    screen.set_filter_text("rc fast")
 
     assert screen.visible_keys() == (screen.cells().keys[1],)
 
@@ -789,6 +828,129 @@ def test_without_a_controller_the_screen_only_announces(qtbot, fake_worker) -> N
     assert screen.is_running() is False
 
 
+def test_rows_wanting_different_recipes_become_different_batches(
+    qtbot, controller, fake_worker
+) -> None:
+    """The point of the column: one run, two recipes, in row order."""
+
+    screen = _screen(qtbot, controller=controller, recipe_override=None)
+    keys = screen.cells().keys[:2]
+    screen.set_recipe_binding(keys[0], "rc-default")
+    screen.set_recipe_binding(keys[1], "rc-fast")
+    screen.set_selected_keys(keys)
+
+    screen.start_run()
+
+    batches = fake_worker.instances[0].kwargs["batches"]
+    assert [b.recipe.recipe_id for b in batches] == ["rc-default", "rc-fast"]
+    assert [[t.task_id for t in b.tasks] for b in batches] == [[keys[0]], [keys[1]]]
+
+
+def test_rows_sharing_a_recipe_stay_in_one_batch(
+    qtbot, controller, fake_worker
+) -> None:
+    """Grouping, not one call per row: two rows on one recipe run together."""
+
+    screen = _screen(qtbot, controller=controller, recipe_override=None)
+    keys = screen.cells().keys[:2]
+    for key in keys:
+        screen.set_recipe_binding(key, "rc-fast")
+    screen.set_selected_keys(keys)
+
+    screen.start_run()
+
+    batches = fake_worker.instances[0].kwargs["batches"]
+    assert len(batches) == 1
+    assert [t.task_id for t in batches[0].tasks] == list(keys)
+
+
+def test_the_run_bar_override_replaces_every_row_recipe(
+    qtbot, controller, fake_worker
+) -> None:
+    """"override applies to this run only -- row recipes are untouched"."""
+
+    screen = _screen(qtbot, controller=controller, recipe_override=None)
+    keys = screen.cells().keys[:2]
+    screen.set_recipe_binding(keys[0], "rc-default")
+    screen.set_recipe_binding(keys[1], "rc-fast")
+    screen.set_selected_keys(keys)
+    screen.run_bar.set_recipe_override("rc-fast")
+
+    screen.start_run()
+
+    batches = fake_worker.instances[0].kwargs["batches"]
+    assert [b.recipe.recipe_id for b in batches] == ["rc-fast"]
+    assert screen.recipe_bindings()[keys[0]] == "rc-default", "the row was rewritten"
+
+
+def test_a_row_with_no_recipe_names_itself_in_the_refusal(
+    qtbot, controller, fake_worker, monkeypatch
+) -> None:
+    """Refuse the whole run, and say which rows are missing one.
+
+    Dispatching the rows that *do* name a recipe and quietly dropping the
+    rest is the shape that gets the whole batch re-run later anyway.
+    """
+
+    from PyQt5.QtWidgets import QMessageBox
+
+    shown: list[tuple] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda *a, **k: shown.append(a) or QMessageBox.Ok),
+    )
+
+    screen = _screen(qtbot, controller=controller, recipe_override=None)
+    keys = screen.cells().keys[:2]
+    screen.set_recipe_binding(keys[0], "rc-default")
+    screen.set_selected_keys(keys)
+
+    screen.start_run()
+
+    assert fake_worker.instances == [], "it refused and dispatched anyway"
+    assert keys[1] in shown[0][2], "the refusal does not name the offending row"
+    assert keys[0] not in shown[0][2], "it named a row that was fine"
+
+
+def test_with_two_recipes_and_no_choice_the_dispatch_says_so_and_starts_nothing(
+    qtbot, controller, fake_worker, monkeypatch
+) -> None:
+    """The branch the old stub made unreachable.
+
+    ``ConfigController.run_recipe`` returns ``None`` when there is no
+    override and more than one candidate, because ``run_tasks`` takes one
+    recipe for the whole batch and picking the alphabetically first one would
+    run the wrong settings silently. That refusal is what the user meets, so
+    it is worth a test of its own rather than being the thing the stub
+    papered over.
+    """
+
+    from PyQt5.QtWidgets import QMessageBox
+
+    shown: list[tuple] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda *a, **k: shown.append(a) or QMessageBox.Ok),
+    )
+
+    screen = _screen(qtbot, controller=controller, recipe_override=None)
+    screen.set_selected_keys(screen.cells().keys[:1])
+
+    screen.start_run()
+
+    assert shown, "the dispatch refused silently"
+    assert fake_worker.instances == [], "it refused and started a run anyway"
+    assert screen.is_running() is False
+
+    title, text = shown[0][1], shown[0][2]
+    assert "profile" not in title.lower(), (
+        "the profile is present; the dialog must not name it as the problem"
+    )
+    assert "run bar" in text, "the dialog does not say where to fix it"
+
+
 def test_dispatch_reuses_the_existing_worker(qtbot, controller, fake_worker) -> None:
     """One threading story in this app, not two: the screen builds the same
     RunWorker + QtProgressReporter + CancelToken the Run tab always has."""
@@ -802,7 +964,10 @@ def test_dispatch_reuses_the_existing_worker(qtbot, controller, fake_worker) -> 
 
     worker = fake_worker.instances[0]
     assert worker.started is True
-    assert [t.task_id for t in worker.kwargs["tasks"]] == list(screen.cells().keys[:2])
+    batches = worker.kwargs["batches"]
+    assert len(batches) == 1, "one recipe for these rows means one batch"
+    assert [t.task_id for t in batches[0].tasks] == list(screen.cells().keys[:2])
+    assert batches[0].recipe.recipe_id == "rc-default"
     assert worker.kwargs["stages"] == ["si", "calibre"]
     assert worker.kwargs["max_workers"] == 2
     assert worker.kwargs["dry_run"] is False

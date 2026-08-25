@@ -54,7 +54,7 @@ from auto_ext.ui.project_fields import (  # noqa: E402
     WORKSPACE_UNREACHABLE,
     bound_paths,
 )
-from auto_ext.ui.screens.cells_screen import EDITABLE_FIELDS  # noqa: E402
+from auto_ext.ui.screens.cells_screen import EDITABLE_FIELDS, RECIPE_FIELD  # noqa: E402
 from auto_ext.ui.screens.recipes_screen import recipe_specs  # noqa: E402
 
 #: Recipe field paths with no control, and why. Anything not listed here must
@@ -109,8 +109,11 @@ def test_every_recipe_field_is_reachable_or_explicitly_exempt() -> None:
 
 
 def test_every_cell_field_is_reachable_or_explicitly_exempt() -> None:
-    # ``enabled`` is the check column rather than a typed field.
-    bound = set(EDITABLE_FIELDS.values()) | {"enabled"}
+    # ``enabled`` is the check column rather than a typed field, and
+    # ``recipe`` is the combo column: reachable, but deliberately outside
+    # EDITABLE_FIELDS because that table drives the type-into-the-cell path
+    # and this column shows a display name over an id.
+    bound = set(EDITABLE_FIELDS.values()) | {"enabled", RECIPE_FIELD}
     fields = {
         name
         for name in CellEntry.model_fields

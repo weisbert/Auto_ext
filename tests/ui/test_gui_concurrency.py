@@ -28,7 +28,7 @@ pytest.importorskip("pytestqt")
 from auto_ext.core.progress import CancelToken  # noqa: E402
 from auto_ext.model.cells import CELLS_FILENAME, CellEntry  # noqa: E402
 from auto_ext.ui.qt_reporter import QtProgressReporter  # noqa: E402
-from auto_ext.ui.worker import RunWorker  # noqa: E402
+from auto_ext.ui.worker import RunBatch, RunWorker  # noqa: E402
 
 
 # ---- Invariant 1: has_external_change mtime detection -----------------------
@@ -133,13 +133,12 @@ def test_cancel_flips_the_token_and_the_thread_winds_down(
     token = CancelToken()
     worker = RunWorker(
         project=controller.project,
-        tasks=controller.tasks,
+        batches=[RunBatch(recipe=recipe, tasks=controller.tasks)],
         stages=["si", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "pr",
         workarea=workarea,
         reporter=QtProgressReporter(),
         cancel_token=token,
-        recipe=recipe,
         profile=pdk_profile,
         dry_run=True,
     )
@@ -167,13 +166,12 @@ def test_the_worker_forwards_the_recipe_and_profile_to_the_runner(
     monkeypatch.setattr("auto_ext.ui.worker.run_tasks", fake_run_tasks)
     worker = RunWorker(
         project=object(),
-        tasks=[],
+        batches=[RunBatch(recipe=recipe, tasks=[])],
         stages=["si"],
         auto_ext_root=tmp_path,
         workarea=tmp_path,
         reporter=QtProgressReporter(),
         cancel_token=CancelToken(),
-        recipe=recipe,
         profile=pdk_profile,
     )
     worker.run()

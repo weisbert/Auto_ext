@@ -50,13 +50,18 @@ being recomputed from a task id: since S1 the logs live under
 
 Assumptions
 -----------
-* **The per-row recipe binding has no home in the model yet.**
-  :class:`~auto_ext.model.cells.CellEntry` carries identity and per-DUT
-  settings only, and the schema deliberately keeps "which recipe" out of
-  it. Artboard ``1a`` nevertheless shows a ``recipe`` column, so the screen
-  holds the binding as screen state
-  (:meth:`CellsScreen.recipe_bindings`) and hands it out whole. When a
-  persistent home appears, that accessor pair is the seam to move.
+* **The per-row recipe binding is a field of the row.**
+  :attr:`~auto_ext.model.cells.CellEntry.recipe` holds it, so it is saved to
+  ``cells.yaml``, survives a rename or a duplicate without bookkeeping, and
+  is what :meth:`CellsScreen._recipe_batches` groups the dispatch by.
+
+  It was screen state until 2026-08-25 -- a column the user could fill that
+  changed nothing, was never read by the dispatch, and was lost on exit --
+  and this paragraph described that as a standing assumption. That is how a
+  known defect becomes permanent: nobody re-reads a section headed
+  "Assumptions" looking for open work. If something here stops being true
+  again, it belongs in the backlog and in a failing test, not here.
+
 * :data:`TABLE_COMPACT_BELOW` and
   :data:`~auto_ext.ui.widgets.run_bar.RUN_BAR_COMPACT_BELOW` are measured
   on the widget's own width. Artboard ``1j`` lists its concessions in
@@ -122,7 +127,7 @@ from auto_ext.model.cells import CellBook, CellEntry
 from auto_ext.ui import theme
 from auto_ext.ui.qt_reporter import QtProgressReporter
 from auto_ext.ui.widgets.run_bar import RunBar, StageChipStrip, apply_families
-from auto_ext.ui.worker import RunWorker
+from auto_ext.ui.worker import RunBatch, RunWorker
 
 __all__ = [
     "COLUMN_TITLES",
@@ -202,6 +207,15 @@ EDITABLE_FIELDS = {
     COL_GROUND: "ground_net",
     COL_OUT_VIEW: "out_file",
 }
+
+#: ``recipe`` is a field of :class:`~auto_ext.model.cells.CellEntry` like the
+#: six above, but deliberately NOT in :data:`EDITABLE_FIELDS`: that table
+#: drives the type-into-the-cell path, and this column shows a recipe's
+#: display *name* while the field holds its *id*. Committing the visible text
+#: would write "RC default" where ``rc-default`` belongs. It is edited only
+#: through :class:`RecipeDelegate`, which hands
+#: :meth:`CellsScreen.set_recipe_binding` the id behind the chosen item.
+RECIPE_FIELD = "recipe"
 
 #: Column -> width, straight off the artboard. ``COL_CELL`` stretches
 #: instead. The artboard is a CSS grid whose cells are flush against each
@@ -571,7 +585,6 @@ class CellsScreen(QWidget):
         super().__init__(parent)
         self._controller = controller
         self._book = book if book is not None else CellBook()
-        self._bindings: dict[str, str] = {}
         self._statuses: dict[str, RowStatus] = {}
         self._recipe_choices: list[tuple[str, str]] = []
         self._row_keys: list[str] = []
@@ -745,12 +758,12 @@ class CellsScreen(QWidget):
         return self._book
 
     def set_cells(self, book: CellBook) -> None:
-        """Replace the whole table. Bindings and statuses for rows that
-        survived the swap are kept; the rest are dropped."""
+        """Replace the whole table. Statuses for rows that survived the swap
+        are kept; the rest are dropped. The recipe binding needs no such
+        bookkeeping -- it is a field of the row, so it travels with it."""
 
         self._book = book
         keys = set(book.keys)
-        self._bindings = {k: v for k, v in self._bindings.items() if k in keys}
         self._statuses = {k: v for k, v in self._statuses.items() if k in keys}
         self._reload_table()
         self.cells_changed.emit(self._book)
@@ -866,7 +879,8 @@ class CellsScreen(QWidget):
         return item
 
     def _recipe_name(self, key: str) -> str:
-        recipe_id = self._bindings.get(key)
+        entry = self._book.entry(key) if key in set(self._book.keys) else None
+        recipe_id = entry.recipe if entry is not None else None
         if recipe_id is None:
             return "—"
         for candidate, name in self._recipe_choices:
@@ -1028,7 +1042,8 @@ class CellsScreen(QWidget):
     def _refresh_run_bar(self) -> None:
         keys = self.selected_keys()
         self.run_bar.set_selection_count(len(keys))
-        distinct = {self._bindings.get(key) for key in keys}
+        bindings = self.recipe_bindings()
+        distinct = {bindings.get(key) for key in keys}
         distinct.discard(None)
         self.run_bar.set_per_row_summary(len(distinct))
         has_rows = bool(self._row_keys)
@@ -1102,15 +1117,17 @@ class CellsScreen(QWidget):
             try:
                 item = self._table.item(row, _column_of_field(field_name))
                 if item is not None:
-                    item.setText(getattr(entry, field_name) or "")
+                    item.setText(
+                        self._recipe_name(key)
+                        if field_name == RECIPE_FIELD
+                        else (getattr(entry, field_name) or "")
+                    )
             finally:
                 self._syncing = False
             self.edit_rejected.emit(_first_line(exc))
             self.status_message.emit(f"edit refused: {_first_line(exc)}")
             return
         if replacement.key != key:
-            if key in self._bindings:
-                self._bindings[replacement.key] = self._bindings.pop(key)
             if key in self._statuses:
                 self._statuses[replacement.key] = self._statuses.pop(key)
         self._apply_book(book)
@@ -1171,8 +1188,6 @@ class CellsScreen(QWidget):
                 index += 1
             taken.add(candidate.key)
             copies.append(candidate)
-            if key in self._bindings:
-                self._bindings[candidate.key] = self._bindings[key]
         self._apply_book(self._book.with_added(copies))
         new_keys = tuple(c.key for c in copies)
         self.set_selected_keys(new_keys)
@@ -1188,7 +1203,6 @@ class CellsScreen(QWidget):
             return ()
         remaining = [entry for entry in self._book if entry.key not in keys]
         for key in keys:
-            self._bindings.pop(key, None)
             self._statuses.pop(key, None)
         self._apply_book(
             CellBook(schema_version=self._book.schema_version, cells=remaining)
@@ -1228,29 +1242,30 @@ class CellsScreen(QWidget):
         self._reload_table()
 
     def recipe_bindings(self) -> dict[str, str]:
-        """Row key -> recipe id. See the module's Assumptions."""
+        """Row key -> recipe id, for the rows that name one.
 
-        return dict(self._bindings)
+        Derived from the table, not held beside it. It used to be a dict on
+        this screen: unsaved, unread by the dispatch, and needing its own
+        bookkeeping every time a row was renamed, duplicated or removed.
+        :attr:`~auto_ext.model.cells.CellEntry.recipe` made all of that go
+        away -- a field of the row travels with the row.
+        """
 
-    def set_recipe_bindings(self, bindings: dict[str, str]) -> None:
-        self._bindings = {k: v for k, v in bindings.items() if k in set(self._book.keys)}
-        self._reload_table()
+        return {entry.key: entry.recipe for entry in self._book if entry.recipe}
 
     def set_recipe_binding(self, key: str, recipe_id: str | None) -> None:
-        if recipe_id is None:
-            self._bindings.pop(key, None)
-        else:
-            self._bindings[key] = recipe_id
+        """Bind one row to a recipe. An ordinary cell edit, staged and saved.
+
+        Goes through :meth:`_commit_edit` like every other editable column,
+        so it marks the table unsaved and reaches ``cells.yaml`` on Save.
+        ``None`` clears the binding: ``CellEntry`` normalises ``""`` back to
+        ``None``, which is what ``exclude_none`` then keeps out of the file.
+        """
+
         row = self.row_of_key(key)
-        if row is not None:
-            self._syncing = True
-            try:
-                item = self._table.item(row, COL_RECIPE)
-                if item is not None:
-                    item.setText(self._recipe_name(key))
-            finally:
-                self._syncing = False
-        self._refresh_run_bar()
+        if row is None:
+            return
+        self._commit_edit(row, "recipe", recipe_id or "")
 
     # ---- statuses --------------------------------------------------------
 
@@ -1512,6 +1527,56 @@ class CellsScreen(QWidget):
             return
         self._dispatch(request)
 
+    def _recipe_batches(
+        self, request: RunRequest, by_id: dict, resolve
+    ) -> tuple[list[RunBatch], list[str]]:
+        """Group the requested rows into one batch per recipe.
+
+        Returns ``(batches, unresolved)``. ``unresolved`` names the rows that
+        could not be given a recipe at all; when it is non-empty the caller
+        refuses the run rather than dispatching the rest, because a partial
+        batch is the shape that gets silently re-run in full later.
+
+        Three sources, in order:
+
+        1. **the run bar's override** -- one batch, every row, this run only;
+        2. **the row's own ``recipe``**, which is what the recipe column
+           writes and ``cells.yaml`` now stores;
+        3. **the library**, but only when it holds exactly one recipe. With
+           two there is nothing to infer and guessing produces
+           plausible-looking parasitics from the wrong settings.
+
+        Batch order follows first appearance in the selection, so a run whose
+        rows all share a recipe behaves exactly like the single-recipe
+        dispatch this replaced.
+        """
+
+        if request.recipe_override:
+            recipe = resolve(request.recipe_override)
+            if recipe is None:
+                return [], list(request.keys)
+            return [RunBatch(recipe=recipe, tasks=[by_id[k] for k in request.keys])], []
+
+        bindings = self.recipe_bindings()
+        order: list[str] = []
+        grouped: dict[str, list] = {}
+        unresolved: list[str] = []
+        cache: dict[str, Any] = {}
+        for key in request.keys:
+            recipe_id = bindings.get(key)
+            recipe = resolve(recipe_id) if recipe_id else resolve(None)
+            if recipe is None:
+                unresolved.append(key)
+                continue
+            if recipe.recipe_id not in grouped:
+                grouped[recipe.recipe_id] = []
+                order.append(recipe.recipe_id)
+                cache[recipe.recipe_id] = recipe
+            grouped[recipe.recipe_id].append(by_id[key])
+        if unresolved:
+            return [], unresolved
+        return [RunBatch(recipe=cache[rid], tasks=grouped[rid]) for rid in order], []
+
     def _dispatch(self, request: RunRequest) -> None:
         controller = self._controller
         project = getattr(controller, "project", None)
@@ -1540,28 +1605,47 @@ class CellsScreen(QWidget):
             )
             return
 
-        # ``run_tasks`` takes one recipe and one profile for the whole batch
-        # (the recipe says what to extract, the profile supplies the process
-        # literals). The run bar's override picks the recipe; with no override
-        # the controller only answers when there is exactly one candidate,
-        # because running the wrong settings produces plausible parasitics.
-        recipe = None
-        resolver = getattr(controller, "run_recipe", None)
-        if callable(resolver):
-            recipe = resolver(request.recipe_override)
+        # ``run_tasks`` takes one recipe and one profile per call. The
+        # profile is the workspace's; the recipes come from the rows, and
+        # rows wanting different ones become different batches (see
+        # ``RunWorker``). The run bar's override, when set, replaces all of
+        # them for this run only -- which is what its hint has always said.
         profile = getattr(controller, "profile", None)
-        if recipe is None or profile is None:
+        if profile is None:
             QMessageBox.warning(
                 self,
-                "Nothing to run with",
-                "A run needs one recipe and one PDK profile.\n\n"
-                "Pick a recipe in the run bar (or keep exactly one in the "
-                "library), and make sure config/profiles/ holds the profile "
-                "workspace.yaml names.",
+                "No PDK profile",
+                "This run has no PDK profile, so there are no process "
+                "literals to extract with.\n\n"
+                "workspace.yaml names the profile; check that "
+                "config/profiles/ holds a file with that id.",
             )
             return
 
-        tasks = [by_id[key] for key in request.keys]
+        resolve = getattr(controller, "run_recipe", None)
+        if not callable(resolve):
+            return
+        batches, unresolved = self._recipe_batches(request, by_id, resolve)
+        if unresolved:
+            names = "\n".join(f"  {key}" for key in unresolved[:8])
+            more = (
+                ""
+                if len(unresolved) <= 8
+                else f"\n  ... and {len(unresolved) - 8} more"
+            )
+            QMessageBox.warning(
+                self,
+                "No recipe for some rows",
+                "These rows do not name a recipe, and the library holds "
+                "more than one, so there is nothing to guess from:\n\n"
+                f"{names}{more}\n\n"
+                "Pick one in each row's recipe column, or choose one in "
+                "the run bar to use for this run only.",
+            )
+            return
+        if not batches:
+            return
+
         reporter = QtProgressReporter()
         reporter.run_started.connect(self._on_run_started)
         reporter.task_started.connect(self._on_task_started)
@@ -1575,13 +1659,12 @@ class CellsScreen(QWidget):
         self._live = _LiveRun(keys=request.keys, stages=request.stages)
         self._worker = RunWorker(
             project=project,
-            tasks=tasks,
+            batches=batches,
             stages=list(request.stages),
             auto_ext_root=auto_ext_root,
             workarea=workarea,
             reporter=reporter,
             cancel_token=token,
-            recipe=recipe,
             profile=profile,
             resources=getattr(controller, "resources", None),
             max_workers=request.jobs if request.jobs >= 2 else None,
@@ -1798,6 +1881,8 @@ def _mono_font() -> QFont:
 
 
 def _column_of_field(field_name: str) -> int:
+    if field_name == RECIPE_FIELD:
+        return COL_RECIPE
     for column, name in EDITABLE_FIELDS.items():
         if name == field_name:
             return column
