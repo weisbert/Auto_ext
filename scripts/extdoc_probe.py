@@ -21,6 +21,12 @@ extdoc_probe.py -- 在红区本地把 Cadence extUser.pdf 拆成可外带的小�
 """
 
 from __future__ import print_function
+# Both of these exist because this file carries Chinese literals (the field
+# table and every progress line) and the red-zone box's bare `python` is 2.7.
+# Without unicode_literals, cmd_ask's "".join() mixes a byte str holding those
+# literals with the unicode read back from the text cache -> UnicodeDecodeError
+# on the main path. See _force_utf8_stdio for the other half.
+from __future__ import unicode_literals
 
 import os
 import re
@@ -38,6 +44,27 @@ WORK_DEFAULT = "./extdoc_work"
 CHUNK_BYTES = 48000
 
 IS_PY2 = sys.version_info[0] == 2
+
+
+def _force_utf8_stdio():
+    """The red-zone shell is usually LANG=C. Without this, the first Chinese
+    thing this script prints raises UnicodeEncodeError -- on py3 too."""
+    try:
+        if IS_PY2:
+            import codecs
+            sys.stdout = codecs.getwriter("utf-8")(sys.stdout, errors="replace")
+            sys.stderr = codecs.getwriter("utf-8")(sys.stderr, errors="replace")
+        else:
+            for h in (sys.stdout, sys.stderr):
+                try:
+                    h.reconfigure(encoding="utf-8", errors="replace")
+                except AttributeError:
+                    pass          # py3 < 3.7
+    except Exception:
+        pass
+
+
+_force_utf8_stdio()
 
 
 # --------------------------------------------------------------------------
@@ -558,7 +585,15 @@ def die(msg):
     sys.exit(1)
 
 
+def _u(x):
+    """py2 hands us argv as byte str; everything downstream is unicode."""
+    if isinstance(x, bytes):
+        return x.decode("utf-8", "replace")
+    return x
+
+
 def parse_argv(argv):
+    argv = [_u(x) for x in argv]
     args, pos = {}, []
     i = 0
     while i < len(argv):

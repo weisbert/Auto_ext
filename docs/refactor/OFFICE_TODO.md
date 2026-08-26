@@ -85,6 +85,54 @@ RuleSet 里，而那是个 GUI 列表，扫描器读不到。R6 规则降级为"
 这些我都给了默认值、代码能跑，但默认值是**推断**不是事实。
 一行一条，勾掉或改掉即可。
 
+> **2026-08-25：查了红区本地的 `extUser.pdf`，这一节里有一批不用再问你了。**
+> 手册是 `<cadence-ext-install>/doc/extUser/extUser.pdf`（761 页）—— 真实路径别写进这个
+> 公开仓库，导出成 `$EXTDOC_PDF` 给 `scripts/extdoc_probe.py` 用即可。
+> 凡是"这个选项的合法取值是什么 / Cadence 的默认值是多少"这类问题，**手册能答，不必占用你的时间**。
+> 已答完的条目就地标了 ✅ 并附页码；剩下开着的，都是**只有你或只有真跑一次才能答**的。
+> 全部结论进了 `catalog-quantus.json`（新增 `doc_ref` / `cadence_default` / `applies_to` /
+> `schema_findings` / `template_defects` 五处），完整推导过程在
+> `private/pdf_answers/FINDINGS.md`（gitignored —— 里面有手册正文，本仓库是 public）。
+>
+> 顺带的产物：`extdoc_probe.py`（纯标准库，py2.7/py3 都能跑）能在红区把任意 20MB+ PDF
+> 拆成 ≤48KB 的可外带小块。以后再撞上"手册里到底怎么写的"，直接用它，不用再靠猜。
+
+### 手册核实之后**新开**的问题（2026-08-25）
+
+这五条是查手册时才浮现出来的，之前的清单里一条都没有：
+
+- [ ] **`global_nets` 整段缺失 —— 电源地网到底提不提？**（p.469-470）
+      `extract -selection all` 的语义是"**除电源地网之外**的全部网"，而电源地网正是由
+      `global_nets` 命令定义的 —— **我们的模板里没有这一段**。
+      官方写法：`global_nets -nets "vdd" "vss" -import_from_lvs true -force_global_nets true`。
+      对射频来说"电源地上的寄生算不算"不是小事。你们原来的手工流程里有这一段吗？
+
+- [ ] **`-use_field_solver` 我们一个字都没写**（p.388, p.95/99/108）
+      手册里几乎**每个**官方 `extract` 示例都带着 `-use_field_solver default_accuracy`，
+      三档是 `none | default_accuracy | high_accuracy`。我们两份模板都没有，走的是未知默认值。
+      配套的还有 `-field_solver_type [ deterministic | probabilistic ]`。
+      **这两条直接关系到射频精度。** 你在 Quantus GUI 里这两项是怎么设的？
+
+- [ ] **`ext.cmd` 里的 `-device_finger_delimiter` 可能是多余的**（缺陷 D4，p.507-508）
+      p.507-508 的 `output_db -type extracted_view` 专表里**没有**这个选项，而我们写了。
+      也可能是手册表遗漏。**跑一次就知道** —— 看 Quantus 报不报未知选项。
+      （`dspf.cmd` 那一处是合法的，dspf 表里明确列着。）
+
+- [ ] **被屏蔽 cell 的 `gray` / `white` 是一道选择题**（p.402, p.419）
+      `-parasitic_blocking_device_cells_type` 的**新默认是 `white`**
+      （顶层网与被屏蔽 cell 内部网之间的耦合电容照常提取）；
+      `gray` = 把被屏蔽 cell 接地、其 R/C 完全不提取，**那是老版本的默认行为** ——
+      早期只要写了 `-parasitic_blocking_device_cells_file` 就等于 `gray`。
+      我们只写了 `_file` 没写 `_type`，所以拿到的是 `white`。
+      **这是一次静默的默认值变更**：老流程搬过来，行为已经变了。你要哪一种？
+
+- [ ] **`extract` 应该支持写多段**（schema 发现 S1，p.389 / p.95）
+      手册明写 `extract` 可以出现多次、结果累积、**后面的覆盖前面的**，
+      并给了一个有名字的用法模型 **Full Chip, Selected Nets**：
+      全片只提电容，电阻只在关心的那组网上提 —— 正是射频最常用的降档策略。
+      我们把 `extract_selection` / `extract_type` 建模成两个标量，**表达不了这个**。
+      改成有序列表是明确的，但**要不要现在就改，取决于你实际用不用这种分组提取**。
+
 ### 已经发现的疑似 bug（请优先确认）
 
 - [ ] **Jivaro 缩减目标视图名对不上**：`templates/jivaro/default.xml.j2:6` 写死
@@ -95,19 +143,50 @@ RuleSet 里，而那是个 GUI 列表，扫描器读不到。R6 规则降级为"
 
 - [ ] **耦合电容绝对阈值的单位/量级不对**：manifest 写 `default: 0.01, unit: F`，
       也就是 10 毫法的耦合电容阈值 —— 物理上不成立。你平时填的数值和单位是什么？（默认 0.01 F）
+      > **2026-08-25 查手册后降级：不再怀疑数值，只怀疑那个 `unit: F` 标注。**
+      > 手册通篇**没有写这个选项的单位**；RSF 映射是 `?minC`（minimum C）。
+      > 而 **p.584 的 Cadence 官方示例本身就写 `-coupling_cap_threshold_absolute 0.01`** ——
+      > 所以 0.01 是照抄官方示例，不是谁随手填的。
+      > 顺带：同段的 `-cap_filtering_mode [ absolute_and_relative | absolute_or_relative ]`
+      > 限 DEF/OA，我们这条 LVS 支路用不了 —— 也就是说两个阈值怎么组合，在我们的流程里没有开关。
 
 ### 提取条件
 
-- [ ] 提取类型：现在写死"带耦合的 RC"。你们平时还会用哪几档（只提电容 / 只提电阻）？
-      请给你们 QRC 认的确切写法。（默认 rc_coupled）
+- [x] ~~提取类型~~ ✅ **2026-08-25 查手册答完**（extUser.pdf p.388）。
+      `extract -type` 共 15 个值，我们这条 LVS(QCI) 支路**全都能用**：
+      `none` `substrate_only` `r_only` `c_only_decoupled` `c_only_coupled`
+      `c_only_decoupled_to_substrate` `rc_decoupled` `rc_coupled` `rc_decoupled_to_substrate`
+      `rlc_{decoupled,coupled,decoupled_to_substrate}` `rlck_{decoupled,coupled,decoupled_to_substrate}`。
+      **只提电阻 = `r_only`；只提电容 = `c_only_coupled`（带耦合）/ `c_only_decoupled`（不带）。**
+      catalog 原来写的 `c_only` / `rcc` / `rlck` 三个拼写**在手册里不存在**，已改。
+      → 还剩一问留给你：**你们平时实际用哪几档？**（不影响代码，只影响 Recipe 预设）
 - [ ] 输出形式：一次跑是否需要**同时**出 extracted view 和 DSPF？
       （今天的代码结构里只能二选一，因为 quantus 只有一个模板槽。）另外要不要 SPEF？
       （默认 只出 extracted view）
 - [ ] metal fill：DSPF 流程里写着按虚拟填充处理，extracted view 流程里整段没有。
       这两条流程对 metal fill 的处理本来就该不同吗？（默认 DSPF=virtual，extracted view=不写）
-- [ ] 长走线切段与过孔阵列：切段长度写 infinite、过孔阵列间距和上限都写 auto。
-      这三项除了 auto/infinite 还能填数值吗？射频长传输线你们会调到多少？（默认 全 auto/infinite）
-- [ ] Quantus 多核：现在提取是单核。你们的 QRC 支持多核吗？命令文件里要写哪一段？（默认 单核）
+- [x] ~~长走线切段与过孔阵列：能不能填数值~~ ✅ **2026-08-25 查手册答完**（p.402）。
+      **三项都能填数值。** `-max_fracture_length [ <value> | infinite ]`，
+      `-array_vias_spacing [ <value> | "auto" ]`，`-max_via_array_size [ <value> | "auto" ]`。
+      Cadence 对 `-max_fracture_length` 的文档默认值是：cell-level 25µm（先进节点 ≤20nm）/
+      100µm（成熟节点 >20nm）；**transistor-level 就是 `infinite`** —— 我们的写法与默认一致。
+      切段单位 `-max_fracture_length_unit` 只有 **`microns | squares`** 两个值
+      （catalog 原来写的 MILS / MILLIMETERS / DBU 都不存在，已改）。
+      → 还剩一问：**射频长传输线你们会调到多少？**（是数值选择，不是能不能填的问题）
+
+- [x] ~~Quantus 多核~~ ✅ **2026-08-25 查手册答完**（p.382-385, p.19），
+      而且**推翻了这条问题的前提**。
+      段名和选项：`distributed_processing -multi_cpu <number>`
+      （同段还有 `-lsf_number`（默认 64）/ `-lsf_command` / `-multi_machine <file>`，**互相排斥**）。
+      **🔴 "现在提取是单核"是错的。** 原文：*the default for Quantus is to run on two CPUs in
+      machines equipped with multiple CPUs*。我们模板里**根本没有 `distributed_processing` 段**，
+      所以现在实际跑在 **2 核**上；catalog 里的 `cpu_count: 1` 是一个**从未生效过的值**。
+      要真单核必须显式写 `-multi_cpu 1`。
+      **License 是硬天花板**：需要的 license 数 = `ceil(N/2)`（4 CPU → 2 个，5 台机 → 3 个），
+      与 p.19 的"XL license 数 × 2 = 允许 CPU 数"是同一约束的两种说法。
+      EXT15.1 起 transistor-level 流程支持 `-multi_cpu` / `-lsf_number` / `-multi_machine`；
+      `-sge_*` 和 `-drm_*` 在 transistor-level **不支持**。
+      → 还剩一问：**你们站点有几个 XL license 可用？**（这个数决定 `-multi_cpu` 的上限）
 
 ### LVS
 
@@ -155,11 +234,23 @@ RuleSet 里，而那是个 GUI 列表，扫描器读不到。R6 规则降级为"
       所以它不只是"PDK 定的"，而是**必须和另外两个字段保持锁步**，否则 Quantus
       什么都读不到 —— 这正是它 owner 是 `fixed` 而不是可调项的理由。
       两个 QRC deck 发布里的 `query_cmd` 逐字节相同，不存在版本间分歧。
-- [ ] 寄生器件映射：Quantus 把寄生电阻/电容映射成 `presistor` / `pcapacitor`，
-      Jivaro 那边另外还认电感和互感（`pinductor` / `pmind`）。这四个名字在你们 PDK 里是这样吗？
-      两边必须一致吗？（默认 analogLib 的这四个）
+- [x] ~~寄生器件映射：这四个名字对不对~~ ✅ **2026-08-25 查手册答完**（p.170, p.507）。
+      原文写死：*The default parasitic capacitor component and property name are **pcapacitor**
+      and **c***；电阻那句同理是 **presistor** 和 **r**。**我们填的就是 Cadence 默认值。**
+      Quantus 侧也确实有 `-ind_component` / `-mutual_ind_component` 两个选项，
+      与 Jivaro 的 `pinductor` / `pmind` 名字体系一致 —— 之前记的"Jivaro 多出两项"这个不对称，
+      真正原因只是**我们没开 RLCK 提取**，不是两边模型不一致。
+      语法是 `<string +>`：器件名后面还能跟可选的 view 名和 library 名（默认 view 是 `symbol`）。
+      → 还剩一问：**你们 PDK 的 analogLib 里这四个 cell 确实都在吗？**（是查库，不是查手册）
+
 - [ ] 寄生电阻模型语句：现在填的是 `comment`（既不是开也不是关）。这在你们的后仿真里
       意味着什么？三档分别什么时候用？（默认 comment）
+      > **2026-08-25 部分答**（p.501）：三档 `[ true | false | comment ]` 确认存在，
+      > 而且 **`include_cap_model` / `include_parasitic_cap_model` / `include_res_model`
+      > 这三个也同样是三档，不是 bool** —— 模板现在把它们渲染成
+      > `[[ "true" if x else "false" ]]`，**`comment` 这一档永远取不到**（已记为缺陷 D2）。
+      > `comment` 的确切语义手册正文没取到（在 output_db 的 Options 段，p.509+），
+      > 这一问仍然开着。
 - [ ] Jivaro 缩减判据 `criterion`：现在写死 `standard`。Jivaro 界面上还有别的选项吗？
       （默认 standard）
 - [ ] `strmout` 的 argv 形状**从未在真二进制上验证过**（backlog 老条目）。

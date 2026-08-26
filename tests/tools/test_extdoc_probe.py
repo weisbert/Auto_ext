@@ -68,3 +68,41 @@ def test_a_row_that_emits_nothing_gets_a_term_the_manual_has_seen() -> None:
     table, _ = build_table()
     assert "'global_nets'" in table
     assert "'-global_nets_nets'" not in table
+
+
+def test_the_python_2_guards_are_still_in_place() -> None:
+    """The script prints Chinese, and the red-zone box's bare ``python`` is 2.7.
+
+    Two lines make that combination work, and both were dropped once already
+    when the script was recovered from a session scratchpad:
+
+    * ``unicode_literals`` -- without it, ``cmd_ask`` joins a byte str holding
+      the field table's Chinese with the unicode read back out of the text
+      cache, and py2 tries to decode the former as ASCII.
+    * ``_force_utf8_stdio`` -- the red-zone shell is usually ``LANG=C``, so the
+      first Chinese thing printed raises ``UnicodeEncodeError``. On py3 too.
+
+    Neither can be caught by running this suite, which is py3 under a UTF-8
+    locale -- hence checking the source rather than the behaviour.
+    """
+
+    src = (REPO_ROOT / "scripts" / "extdoc_probe.py").read_text(encoding="utf-8")
+
+    assert "from __future__ import unicode_literals" in src
+    assert "_force_utf8_stdio()" in src
+    # The guards are pointless if the literals they protect are gone, so pin
+    # the reason too: this file is expected to carry non-ASCII.
+    assert any(ord(ch) > 0x2FFF for ch in src), "no CJK left -- guards may be moot"
+
+
+def test_binary_regexes_stayed_bytes_under_unicode_literals() -> None:
+    """``unicode_literals`` does not touch prefixed literals -- but a later
+    edit that drops a ``b`` prefix would break PDF parsing on both pythons,
+    silently, only in the no-poppler fallback path nobody runs locally."""
+
+    src = (REPO_ROOT / "scripts" / "extdoc_probe.py").read_text(encoding="utf-8")
+
+    body = src.split("def _pure_python", 1)[0]
+    for marker in ("stream\r?\n", "FlateDecode"):
+        assert 'br"' in body or "br'" in body, marker
+    assert "_TJ_ITEM = re.compile(br" in src
