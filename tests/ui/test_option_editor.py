@@ -935,3 +935,55 @@ def test_no_enum_anywhere_in_the_catalog_is_a_bare_text_box() -> None:
     catalog = builtin_catalog()
     enums = [opt for opt in catalog.options if opt.type is OptionType.ENUM]
     assert [o.key for o in enums if editor_kind(o) is EditorKind.TEXT] == []
+
+
+# ---- artboard I1: the popup's two shortcuts ------------------------------------
+
+
+def test_all_and_none_tick_every_member_in_one_action(qtbot) -> None:
+    """With eight members the common edit is "everything except one".
+
+    Doing that by hand is eight clicks to get back to where you started.
+    """
+
+    from auto_ext.catalog import builtin_catalog
+
+    spec = builtin_catalog().option("output_xy")
+    editor = build_option_editor(spec)
+    qtbot.addWidget(editor)
+
+    seen: list[object] = []
+    editor.value_changed.connect(lambda _k, v: seen.append(v))
+
+    editor.none_button().click()
+    assert editor.value() == []
+    editor.all_button().click()
+    assert len(editor.value()) == len(spec.choices)
+
+    # One emission per click, not one per member: eight validations and
+    # eight repaints for one user action is the difference between instant
+    # and visibly slow over a forwarded X11 link.
+    assert len(seen) == 2
+
+
+def test_an_open_member_list_can_still_take_a_value_nobody_predicted(qtbot) -> None:
+    """The other half of I1: type a value the list does not have."""
+
+    # Built here rather than found in the catalog: no shipped row is a
+    # GUESSED member list today, and the affordance has to keep working for
+    # the day one is added -- that is precisely when a value nobody predicted
+    # turns up.
+    one = spec(
+        type=OptionType.LIST,
+        choices=["a", "b"],
+        default=["a"],
+        choices_confidence=Confidence.GUESS,
+    )
+    assert one.free_input, "a guessed member list must stay open"
+    editor = build_option_editor(one)
+    qtbot.addWidget(editor)
+
+    assert editor.other_edit() is not None
+    editor.other_edit().setText("a_value_nobody_predicted")
+    editor.other_edit().textEdited.emit("a_value_nobody_predicted")
+    assert "a_value_nobody_predicted" in editor.value()

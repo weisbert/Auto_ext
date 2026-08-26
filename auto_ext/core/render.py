@@ -613,6 +613,11 @@ def _bind_flat_aliases(context: dict[str, Any], catalog: Catalog) -> None:
     """
 
     for opt in catalog.options:
+        if opt.describes_member:
+            # The row describes a member of a collection; there is no single
+            # value to alias. Templates loop over the collection instead --
+            # see the extract block in the two quantus files.
+            continue
         path = _FLAT_ALIAS_OVERRIDES.get(opt.key, opt.context_path)
         if path is None:
             continue

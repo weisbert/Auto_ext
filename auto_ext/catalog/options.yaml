@@ -1756,25 +1756,43 @@ options:
   - key: extract_selection
     tier: common
     template_var: extract_selection
-    context_path: recipe.extraction.selection
+    context_path: recipe.extraction.extract
+    describes_member: true
     owner: recipe
     type: enum
-    choices: [all, specified_nets, selected_nets]
-    choices_confidence: guess
+    choices: [all, net, nets_file, selected_path_file]
+    choice_args:
+      net: net-name pattern
+      nets_file: file listing net names
+      selected_path_file: file listing selected paths
+    choices_confidence: certain
     default: all
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:11
-    notes: Only "all" observed; the other two spellings are unverified.
+    notes: >-
+      Four members, and THREE OF THEM TAKE AN OPERAND -- see choice_args.
+      The set this row used to carry (all / specified_nets / selected_nets)
+      had two spellings that do not exist, and even the real ones were
+      unusable: the template emitted -selection "[[extract_selection]]" as a
+      bare quoted token, so picking any operand-bearing member produced a
+      command line the tool rejects.
+      This row now describes the members of one rule in
+      extraction.extract[]. It is not a scalar setting any more: `extract` is
+      a repeatable command whose specifications accumulate first-to-last with
+      the LAST ONE WINNING for any net it covers, which is what makes the
+      standard RF strategy -- whole chip at c_only_coupled, the nets that
+      matter at rc_coupled -- expressible at all.
     lands_in:
       - {target: quantus.ext.cmd, section: extract, option: -selection, line: 11}
       - {target: quantus.dspf.cmd, section: extract, option: -selection, line: 11}
-    why: Extract every net or a named subset. An extraction condition.
+    why: Which nets one extract statement covers. Ordered; later rules win.
 
   - key: extract_type
     tier: common
     template_var: extract_type
-    context_path: recipe.extraction.extract_type
+    context_path: recipe.extraction.extract
+    describes_member: true
     owner: recipe
     type: enum
     choices:
@@ -3124,7 +3142,7 @@ options:
       option, so `separate` is legal for our Calibre-input flow. Default
       `double` unchanged and still inside the set.
     lands_in:
-      - {target: quantus.dspf.cmd, section: output_db, option: -netlist_coupling_values, line: 60}
+      - {target: quantus.dspf.cmd, section: output_db, option: -netlist_coupling_values, line: 53}
     why: How coupling caps are written into the DSPF. Changes what the simulator sees.
 
   - key: add_bulk_terminal
@@ -3139,7 +3157,7 @@ options:
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:61
     lands_in:
-      - {target: quantus.dspf.cmd, section: output_db, option: -add_bulk_terminal, line: 61, quoting: bare}
+      - {target: quantus.dspf.cmd, section: output_db, option: -add_bulk_terminal, line: 54, quoting: bare}
     why: Whether devices get an explicit bulk terminal in the DSPF.
 
   - key: sub_node_char
@@ -3154,7 +3172,7 @@ options:
     observed: true
     source_ref: templates/quantus/dspf.cmd.j2:62
     lands_in:
-      - {target: quantus.dspf.cmd, section: output_db, option: -sub_node_char, line: 62}
+      - {target: quantus.dspf.cmd, section: output_db, option: -sub_node_char, line: 55}
     why: Character introducing subnodes of a split net. Must match the simulator.
 
 

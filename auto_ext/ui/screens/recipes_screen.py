@@ -93,8 +93,10 @@ from typing import Any
 
 from pydantic import ValidationError
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QKeySequence
 from PyQt5.QtWidgets import (
+    QApplication,
+    QShortcut,
     QAbstractItemView,
     QFrame,
     QHBoxLayout,
@@ -124,6 +126,9 @@ from auto_ext.catalog import (
 )
 from auto_ext.model.recipe import Recipe
 from auto_ext.ui import theme
+from auto_ext.ui.widgets.elsewhere_band import ElsewhereBand
+from auto_ext.ui.widgets.extract_rules import ExtractRulesEditor
+from auto_ext.ui.widgets.focus_detail import FocusDetailBar
 from auto_ext.ui.widgets.option_editor import (
     PointerOptionEditor,
     ElidedLabel,
@@ -218,6 +223,13 @@ _SEARCH_WIDTH = 190
 DENSITY_COMMON = "common"
 DENSITY_ALL = "all"
 
+#: Artboard ``J``'s three result bands, in its order. The names are the
+#: labels: three different situations with three different next actions,
+#: and a flat list makes the user work out which is which from memory.
+SEARCH_BAND_COMMON = "IN COMMON"
+SEARCH_BAND_ALL_ONLY = "IN ALL ONLY"
+SEARCH_BAND_ELSEWHERE = "NOT ON THIS SCREEN"
+
 _DOT = " · "
 _EM_DASH = "—"
 _GLYPH_EXPANDED = "▾"
@@ -238,6 +250,21 @@ def recipe_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
     cat = catalog if catalog is not None else builtin_catalog()
     rows = [opt for opt in cat.by_owner(Owner.RECIPE) if opt.recipe_field_path]
     return sorted(rows, key=lambda opt: opt.recipe_field_path or "")
+
+
+def member_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
+    """Rows that describe a member of a collection. ``describes_member``.
+
+    Two today, both describing one rule of ``extraction.extract``. They are in
+    the form's layout so the section that hosts the sub-form exists and is
+    grouped by the same rules as everything else; what gets drawn for them is
+    one :class:`ExtractRulesEditor` per collection, not one control per row.
+    """
+
+    cat = catalog if catalog is not None else builtin_catalog()
+    return sorted(
+        (opt for opt in cat.options if opt.describes_member), key=lambda opt: opt.key
+    )
 
 
 def pointer_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
@@ -363,7 +390,7 @@ def form_layout(catalog: Catalog | None = None) -> list[FormTool]:
     tools: dict[str, dict[str, tuple[Any, list[OptionSpec]]]] = {}
     templates: dict[str, list[str]] = {}
 
-    for spec in recipe_specs(cat) + pointer_specs(cat):
+    for spec in recipe_specs(cat) + pointer_specs(cat) + member_specs(cat):
         tool, section = _tool_of(cat, spec)
         display = cat.section_display(None if tool == FLOW_TOOL else tool, section or FLOW_TOOL)
         bucket = display.group
@@ -421,6 +448,17 @@ def form_layout(catalog: Catalog | None = None) -> list[FormTool]:
         )
     return out
 
+
+
+def _first_line_of(exc: Exception) -> str:
+    """The first line of a pydantic complaint, which is the useful one."""
+
+    text = str(exc).strip()
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith(("For further", "[type=")):
+            return line
+    return text.splitlines()[0] if text else exc.__class__.__name__
 
 
 def _get_path(root: Any, path: str) -> Any:
@@ -676,8 +714,14 @@ class RecipesScreen(QWidget):
         # from it is a KeyError the moment a recipe loads.
         self._specs = {
             spec.key: spec
-            for spec in recipe_specs(self._catalog) + pointer_specs(self._catalog)
+            for spec in recipe_specs(self._catalog)
+            + pointer_specs(self._catalog)
+            + member_specs(self._catalog)
         }
+        #: ``context_path -> ExtractRulesEditor``. See :meth:`_add_member_forms`.
+        self._member_forms: dict[str, Any] = {}
+        #: ``(density, scroll offset)`` from before the current search began.
+        self._search_return_to: tuple[str, int] | None = None
         #: The loaded PdkProfile, or None. Only ``choices_from`` rows read it.
         self._profile: Any = None
         self._groups: dict[str, OptionGroup] = {}
@@ -711,6 +755,12 @@ class RecipesScreen(QWidget):
         self._splitter.setHandleWidth(1)
         self._splitter.addWidget(self._build_list_panel())
         self._splitter.addWidget(self._build_form_panel())
+        app = QApplication.instance()
+        if app is not None:
+            # One connection for the whole screen rather than a focusInEvent
+            # on ninety editors: the strip is about which row has focus, and
+            # that is a question the application already answers.
+            app.focusChanged.connect(self._on_focus_changed)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setSizes([RECIPE_LIST_WIDTH, 900])
@@ -838,6 +888,18 @@ class RecipesScreen(QWidget):
         self._form_layout.addStretch(1)
         self._scroll.setWidget(self._form_host)
         column.addWidget(self._scroll, 1)
+
+        # Above the detail strip: it is a search result, so it belongs with
+        # the results rather than with the description of one row.
+        self._elsewhere_band = ElsewhereBand(panel)
+        self._elsewhere_band.navigate_requested.connect(self.navigate_requested)
+        column.addWidget(self._elsewhere_band)
+
+        # Under the form, over the patch strip: it describes the row above
+        # it, so it has to sit where the eye already is when focus lands.
+        self._detail = FocusDetailBar(panel)
+        self._detail.reset_requested.connect(self._on_detail_reset)
+        column.addWidget(self._detail)
 
         self._patch_strip = PatchStrip(panel)
         self._patch_strip.toggled.connect(self._on_patch_strip_toggled)
@@ -984,6 +1046,11 @@ class RecipesScreen(QWidget):
         self._search.setClearButtonEnabled(True)
         self._search.setFixedWidth(_SEARCH_WIDTH)
         self._search.textChanged.connect(self._on_search)
+        # ``QLineEdit`` swallows Esc when it has a clear button, so the
+        # shortcut is bound on the field rather than on the screen.
+        _escape = QShortcut(QKeySequence(Qt.Key_Escape), self._search)
+        _escape.setContext(Qt.WidgetShortcut)
+        _escape.activated.connect(self._on_search_escape)
         row.addWidget(self._search, 0)
 
         self._density_note = ElidedLabel("", parent=bar)
@@ -1047,6 +1114,15 @@ class RecipesScreen(QWidget):
             return spec.default
 
     def _on_search(self, text: str) -> None:
+        if text.strip() and self._search_return_to is None:
+            # Remember on the way IN, not on the way out: by the time Esc is
+            # pressed the density and the scroll offset are the search's, not
+            # the user's.
+            bar = self._scroll.verticalScrollBar()
+            self._search_return_to = (
+                self._density,
+                bar.value() if bar is not None else 0,
+            )
         matches = self.search_matches(text)
         if not text.strip():
             self._apply_density()
@@ -1067,19 +1143,99 @@ class RecipesScreen(QWidget):
                 live += here
                 group.setVisible(here > 0)
             self._refresh_tool_header(tool, live)
-        here_count = sum(1 for spec in matches if spec.screen is Screen.RECIPES)
-        elsewhere = [spec for spec in matches if spec.screen is not Screen.RECIPES]
-        parts = [f"{here_count} match{'' if here_count == 1 else 'es'}"]
-        if elsewhere:
-            # Named, not silently dropped. A search that returns nothing for
-            # ``out_file`` teaches the user the setting does not exist.
-            names = ", ".join(option_label(spec) for spec in elsewhere)
-            parts.append(f"{len(elsewhere)} on the Cells screen: {names}")
+        bands = self.search_bands(text)
+        self._paint_search_bands(bands)
+        parts = [
+            f"{len(specs)} {label.lower()}"
+            for label, specs in bands.items()
+            if specs
+        ] or ["no matches"]
         self._density_note.set_full_text(_DOT.join(parts))
         self.status_changed.emit(_DOT.join(parts))
 
+    def search_bands(self, needle: str) -> dict[str, list[OptionSpec]]:
+        """Matches split into artboard ``J``'s three bands, in its order.
+
+        The bands are not cosmetic. "You can see this already", "the density
+        is hiding this" and "this lives on another screen" are three different
+        situations with three different next actions, and a flat result list
+        makes the user work out which is which from memory.
+        """
+
+        matches = self.search_matches(needle)
+        common = {spec.key for spec in self._common_specs()}
+        bands: dict[str, list[OptionSpec]] = {
+            SEARCH_BAND_COMMON: [],
+            SEARCH_BAND_ALL_ONLY: [],
+            SEARCH_BAND_ELSEWHERE: [],
+        }
+        for spec in matches:
+            if spec.screen is not Screen.RECIPES:
+                bands[SEARCH_BAND_ELSEWHERE].append(spec)
+            elif spec.key in common:
+                bands[SEARCH_BAND_COMMON].append(spec)
+            else:
+                bands[SEARCH_BAND_ALL_ONLY].append(spec)
+        return bands
+
+    def _common_specs(self) -> list[OptionSpec]:
+        return [
+            spec
+            for spec in recipe_specs(self._catalog) + pointer_specs(self._catalog)
+            if self._shows_in_common(spec)
+        ]
+
+    def _paint_search_bands(self, bands: dict[str, list[OptionSpec]]) -> None:
+        """Label each surviving group with the band its rows fall in.
+
+        The rows stay where they are and stay EDITABLE -- artboard ``J`` is
+        explicit that a search result is a working control, not a read-only
+        listing. Re-parenting them into three new containers would have meant
+        a row that changes parent depending on how you got to it, which is
+        the one thing the grouping rules forbid.
+        """
+
+        band_of: dict[str, str] = {}
+        for label, specs in bands.items():
+            for spec in specs:
+                band_of[spec.key] = label
+        for section_key, group in self._groups.items():
+            here = [
+                band_of[key]
+                for key in group.grid.visible_keys()
+                if key in band_of
+            ]
+            group.set_band("" if not here else here[0])
+        self._elsewhere_band.set_specs(bands[SEARCH_BAND_ELSEWHERE])
+
     def search_field(self) -> QLineEdit:
         return self._search
+
+    def _on_search_escape(self) -> None:
+        """Leave search exactly where the user was before they started.
+
+        Not just "clear the box": the density they were in and the place they
+        had scrolled to are both part of where they were, and search moved
+        both. Dropping them back at the top of Common when they had been
+        halfway down All is the kind of small betrayal that makes people stop
+        using a search box.
+        """
+
+        if not self._search.text():
+            return
+        mode, offset = self._search_return_to or (self._density, 0)
+        self._search.clear()          # triggers _on_search -> _apply_density
+        if mode != self._density:
+            self.set_density(mode)
+        bar = self._scroll.verticalScrollBar()
+        if bar is not None:
+            bar.setValue(offset)
+        self._search_return_to = None
+
+    def elsewhere_band(self):
+        """The ``NOT ON THIS SCREEN`` strip, with its navigate button."""
+
+        return self._elsewhere_band
 
     # -- density -------------------------------------------------------
 
@@ -1205,6 +1361,48 @@ class RecipesScreen(QWidget):
         group = self._groups.get(section) if section else None
         return group.grid.label(key) if group is not None else None
 
+    def _refresh_row_states(self) -> None:
+        """Paint the marks for what the density logic already computed.
+
+        This is the half of artboard ``H`` that never shipped. Promotion,
+        dirty tracking and emit gating all worked; a promoted row and an
+        ordinary one simply looked the same, so the one thing the density
+        split promises -- "anything you changed is still in front of you" --
+        was true and invisible.
+
+        Only two states are drawn here, and both mean *a person did this*:
+        ``promoted`` (in Common because its value left the default) and
+        ``changed`` (dirty against what was loaded). The amber channel --
+        unverified, out of advisory range -- is drawn by the editors
+        themselves at the far right, and the two must not meet.
+        """
+
+        changed = set(self.changed_field_paths())
+        promoted = set(self.promoted_keys())
+        for key, editor in self._editors.items():
+            spec = self._specs.get(key)
+            if spec is None:
+                continue
+            path = spec.recipe_field_path
+            was = ""
+            if path is not None and path in changed and self._original is not None:
+                try:
+                    was = _display_value(_get_path(self._original, path))
+                except AttributeError:  # pragma: no cover - model validates
+                    was = ""
+            if not editor.isEnabled() and spec.requires_emit:
+                editor.set_row_state(
+                    "inapplicable",
+                    why=f"{', '.join(spec.requires_emit)} only",
+                )
+                continue
+            if path is not None and path in changed:
+                editor.set_row_state("changed", was=was)
+            elif key in promoted:
+                editor.set_row_state("promoted")
+            else:
+                editor.set_row_state("")
+
     def _apply_density(self) -> None:
         self._apply_emit_gating()
         shown = set(self.visible_option_keys())
@@ -1221,6 +1419,7 @@ class RecipesScreen(QWidget):
                 group.setVisible(here > 0)
             self._refresh_tool_header(tool, live)
         self._refresh_density_bar(len(shown))
+        self._refresh_row_states()
 
     def _refresh_tool_header(self, tool: FormTool, live: int) -> None:
         header = self._tool_headers.get(tool.tool)
@@ -1280,11 +1479,16 @@ class RecipesScreen(QWidget):
                     "",
                     parent=self._form_host,
                 )
-                group.add_options(section.specs)
+                drawn = [s for s in section.specs if not s.describes_member]
+                group.add_options(drawn)
+                self._add_member_forms(group, section)
                 group.value_changed.connect(self._on_value_changed)
                 self._form_layout.addWidget(group)
                 self._groups[section.key] = group
                 for spec in section.specs:
+                    if spec.describes_member:
+                        self._section_of[spec.key] = section.key
+                        continue
                     editor = group.grid.editor(spec.key)
                     if editor is not None:
                         self._editors[spec.key] = editor
@@ -1293,6 +1497,57 @@ class RecipesScreen(QWidget):
                             editor.navigate_requested.connect(
                                 self.navigate_requested
                             )
+
+    def _add_member_forms(self, group: OptionGroup, section: Any) -> None:
+        """One sub-form per collection this section's member rows describe.
+
+        Keyed by ``context_path``, so the two rows describing
+        ``recipe.extraction.extract`` produce ONE editor rather than two --
+        the same "a row is drawn once" rule the rest of the form keeps, at
+        the level of the collection instead of the row.
+        """
+
+        by_path: dict[str, list[OptionSpec]] = {}
+        for spec in section.specs:
+            if spec.describes_member and spec.context_path:
+                by_path.setdefault(spec.context_path, []).append(spec)
+
+        for path, specs in by_path.items():
+            selection = next((s for s in specs if s.choice_args), specs[0])
+            kind = next((s for s in specs if s is not selection), specs[0])
+            editor = ExtractRulesEditor(
+                selection_spec=selection,
+                type_spec=kind,
+                field_path=path[len("recipe.") :],
+                parent=group,
+            )
+            editor.value_changed.connect(self._on_member_changed)
+            group.grid.add_span(path, "extract rules", editor)
+            self._member_forms[path] = editor
+
+    def _on_member_changed(self, field_path: str, value: Any) -> None:
+        """A sub-form edited the collection it owns.
+
+        Validation is the model's: a rule whose selection needs an operand
+        and has none is refused there, and the refusal is reported rather
+        than swallowed -- an edit that silently does nothing is the failure
+        this screen exists to remove.
+        """
+
+        if self._loading or self._working is None:
+            return
+        before = _get_path(self._working, field_path)
+        try:
+            _set_path(self._working, field_path, value)
+        except Exception as exc:  # noqa: BLE001 - pydantic raises many shapes
+            # Put the working copy back and SAY SO. A sub-form that kept
+            # drawing a rule the model rejected would show a recipe that does
+            # not exist, and the next save would write the old one without a
+            # word.
+            _set_path(self._working, field_path, before)
+            self.status_changed.emit(f"refused: {_first_line_of(exc)}")
+            return
+        self._recompute_dirty()
 
     def _build_tool_header(self, tool: FormTool) -> QWidget:
         """Level-1 heading: the tool, the files it writes, and its row count.
@@ -1413,6 +1668,11 @@ class RecipesScreen(QWidget):
                     editor.set_value(_get_path(self._working, path))
         finally:
             self._loading = False
+
+    def extract_rules_editor(self, path: str = "recipe.extraction.extract"):
+        """The sub-form for one collection, or ``None`` if it is not drawn."""
+
+        return self._member_forms.get(path)
 
     def recipes(self) -> list[Recipe]:
         return list(self._recipes)
@@ -1653,6 +1913,17 @@ class RecipesScreen(QWidget):
                     continue
                 editor.setEnabled(True)
                 editor.set_value(_get_path(self._working, path))
+            for path, editor in self._member_forms.items():
+                # The sub-form is not in ``_editors``, so the loop above does
+                # not reach it. It is still bound to the working copy and has
+                # to follow a recipe change like any other control.
+                field = path[len("recipe.") :]
+                editor.setEnabled(self._working is not None)
+                editor.set_value(
+                    _get_path(self._working, field)
+                    if self._working is not None
+                    else []
+                )
             self._name_edit.setText(
                 self._working.name if self._working is not None else ""
             )
@@ -1704,6 +1975,7 @@ class RecipesScreen(QWidget):
         if editor is not None:
             editor.set_invalid(False)
         self._recompute_dirty()
+        self._refresh_row_states()
         if self._density == DENSITY_COMMON:
             # A row whose value just left the default has to appear. The
             # reverse is deliberately NOT done here: artboard M section 3
@@ -1749,6 +2021,50 @@ class RecipesScreen(QWidget):
             if item.data(0, Qt.UserRole) == recipe_id:
                 return item
         return None
+
+    def detail_bar(self) -> FocusDetailBar:
+        """The focused-row strip. Spec ``M`` section 4."""
+
+        return self._detail
+
+    def _on_focus_changed(self, old: Any, now: Any) -> None:
+        """Describe whatever row now holds focus, and nothing else.
+
+        Walks up from the focused widget because the thing that actually
+        takes focus is the control INSIDE the row -- a line edit, a combo's
+        popup-less view -- not the row widget the form knows by key.
+
+        Deliberately keeps the last description when focus leaves the form
+        entirely: focus moves to the Save button, the strip empties, and the
+        user loses the sentence they were reading at the moment they act on
+        it.
+        """
+
+        widget = now
+        while widget is not None:
+            key = getattr(widget, "key", None)
+            key = key() if callable(key) else key
+            if isinstance(key, str) and key in self._specs:
+                spec = self._specs[key]
+                value = self._value_of(spec)
+                self._detail.show_spec(
+                    spec,
+                    value=value,
+                    at_default=_display_value(value) == _display_value(spec.default),
+                )
+                return
+            widget = widget.parentWidget()
+
+    def _on_detail_reset(self, key: str) -> None:
+        """Put the catalog default back for one row."""
+
+        spec = self._specs.get(key)
+        editor = self._editors.get(key)
+        if spec is None or editor is None or spec.recipe_field_path is None:
+            return
+        editor.set_value(spec.default)
+        self._on_value_changed(key, spec.default)
+        self._on_focus_changed(None, editor)
 
     def _on_patch_strip_toggled(self, expanded: bool) -> None:
         self._summary_label.set_full_text(self.options_summary_text())

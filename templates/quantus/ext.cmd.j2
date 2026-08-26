@@ -7,10 +7,10 @@
 capacitance \
               -decoupling_factor [[decoupling_factor]] \
               -ground_net "[[ground_net]]"
-extract \
-              -selection "[[extract_selection]]" \
-              -type "[[extract_type]]"
-extraction_setup \
+[% for rule in recipe.extraction.extract %]extract \
+              -selection [[rule.selection_line]] \
+              -type "[[rule.type]]"
+[% endfor %]extraction_setup \
               -array_vias_spacing [[array_vias_spacing]] \
               -max_fracture_length [[max_fracture_length]] \
               -max_fracture_length_unit "[[max_fracture_length_unit]]" \
@@ -45,9 +45,9 @@ output_db -type extracted_view \
               -device_finger_delimiter "[[device_finger_delimiter]]" \
               -cdl_out_map_directory \
               "[[output_dir]]/" \
-              -include_cap_model "[[ 'true' if include_cap_model else 'false' ]]" \
-              -include_parasitic_cap_model "[[ 'true' if include_parasitic_cap_model else 'false' ]]" \
-              -include_res_model "[[ 'true' if include_res_model else 'false' ]]" \
+              -include_cap_model "[[include_cap_model]]" \
+              -include_parasitic_cap_model "[[include_parasitic_cap_model]]" \
+              -include_res_model "[[include_res_model]]" \
               -include_parasitic_res_model "[[include_parasitic_res_model]]" \
               -res_component "[[res_component]]" \
               -res_property_name "[[res_property_name]]" \

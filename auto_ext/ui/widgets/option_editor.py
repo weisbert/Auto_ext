@@ -200,6 +200,10 @@ OBJ_OPTION_UNIT = "optionUnit"
 OBJ_QUESTION_MARKER = "optionQuestionMarker"
 OBJ_POINTER_VALUE = "optionPointerValue"
 OBJ_POINTER_LINK = "optionPointerLink"
+OBJ_WAS_VALUE = theme.OBJ_WAS_VALUE
+OBJ_WHY_DISABLED = theme.OBJ_WHY_DISABLED
+OBJ_OPTION_ROW = theme.OBJ_OPTION_ROW
+OBJ_STATE_TAG = theme.OBJ_STATE_TAG
 OBJ_FROZEN_MARKER = "optionFrozenMarker"
 OBJ_GROUP_HEADER = "optionGroupHeader"
 
@@ -796,8 +800,11 @@ class OptionEditor(QWidget):
         self._control: QWidget | None = None
         self._unit: QLabel | None = None
         self._hint: ElidedLabel | None = None
+        self._was: QLabel | None = None
+        self._why: ElidedLabel | None = None
         self._frozen_override: Any = None
 
+        self.setObjectName(OBJ_OPTION_ROW)
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(
             theme.SPACE_SM, theme.SPACE_XXS, theme.SPACE_SM, theme.SPACE_XXS
@@ -934,6 +941,58 @@ class OptionEditor(QWidget):
                 else f"{NOT_SETTABLE.lower()}{_DOT}recipe holds "
                 f"{_format_value(self._frozen_override)}"
             )
+
+    def set_row_state(self, state: str, *, was: str = "", why: str = "") -> None:
+        """Mark this row promoted / changed / inapplicable, or clear it.
+
+        One dynamic property and a repolish rather than a stylesheet per
+        widget: the QSS in ``theme`` owns what each state LOOKS like, and this
+        owns only which state a row is in. That is what keeps a new state from
+        needing a new colour, and what stops the two channels of artboard
+        ``H`` -- accent for "a person set this", amber for "we are not sure" --
+        from being decided in two places.
+
+        ``was`` is the value the row left, drawn in mono so a number is
+        comparable at a glance. ``why`` is the on-row reason a row is
+        disabled: the tooltip said it already, and a reason you have to hover
+        to find is a reason most people never read.
+        """
+
+        if self.property("state") != state:
+            self.setProperty("state", state or None)
+            style = self.style()
+            if style is not None:
+                style.unpolish(self)
+                style.polish(self)
+
+        if was:
+            if self._was is None:
+                self._was = QLabel(self)
+                self._was.setObjectName(OBJ_WAS_VALUE)
+                self._layout.addWidget(self._was, 0)
+            self._was.setText(f"was {was}")
+            self._was.setVisible(True)
+        elif self._was is not None:
+            self._was.setVisible(False)
+
+        if why:
+            if self._why is None:
+                self._why = ElidedLabel("", parent=self)
+                self._why.setObjectName(OBJ_WHY_DISABLED)
+                self._layout.addWidget(self._why, 1)
+            self._why.set_full_text(why)
+            self._why.setVisible(True)
+        elif self._why is not None:
+            self._why.setVisible(False)
+
+    def row_state(self) -> str:
+        return str(self.property("state") or "")
+
+    def was_label(self) -> QLabel | None:
+        return self._was
+
+    def why_label(self) -> ElidedLabel | None:
+        return self._why
 
     def unit_label(self) -> QLabel | None:
         return self._unit
@@ -1275,6 +1334,24 @@ class MultiChoiceOptionEditor(OptionEditor):
         layout = QVBoxLayout(self._row)
         layout.setContentsMargins(theme.SPACE_XS, theme.SPACE_XS, theme.SPACE_XS, theme.SPACE_XS)
         layout.setSpacing(theme.SPACE_XXS)
+        # ``all`` / ``none`` first, because with eight members the common
+        # edit is "everything except one" and doing that by hand is eight
+        # clicks to get back to where you started. Artboard ``I1``.
+        shortcuts = QWidget(self._row)
+        shortcut_row = QHBoxLayout(shortcuts)
+        shortcut_row.setContentsMargins(0, 0, 0, 0)
+        shortcut_row.setSpacing(theme.SPACE_XS)
+        self._all = QPushButton("all", shortcuts)
+        self._none = QPushButton("none", shortcuts)
+        for button in (self._all, self._none):
+            button.setFlat(True)
+            button.setEnabled(not self.is_frozen)
+            shortcut_row.addWidget(button, 0)
+        shortcut_row.addStretch(1)
+        self._all.clicked.connect(lambda: self._set_all(True))
+        self._none.clicked.connect(lambda: self._set_all(False))
+        layout.addWidget(shortcuts)
+
         self._boxes: dict[str, QCheckBox] = {}
         default = spec.default if isinstance(spec.default, list) else []
         for choice in spec.choices or []:
@@ -1318,6 +1395,30 @@ class MultiChoiceOptionEditor(OptionEditor):
         """The closed control -- the thing that reads ``8 of 8``."""
 
         return self._summary
+
+    def all_button(self) -> QPushButton:
+        return self._all
+
+    def none_button(self) -> QPushButton:
+        return self._none
+
+    def _set_all(self, on: bool) -> None:
+        """Tick or clear every member in one go, and emit ONCE.
+
+        Emitting per box would put eight validations and eight repaints
+        through the form for one user action, and on a forwarded X11 link
+        that is the difference between instant and visibly slow.
+        """
+
+        if self.is_frozen:
+            return
+        for box in self._boxes.values():
+            box.blockSignals(True)
+            try:
+                box.setChecked(on)
+            finally:
+                box.blockSignals(False)
+        self._emit()
 
     def _refresh_summary(self) -> None:
         on = len(self.value())
@@ -1603,6 +1704,9 @@ class OptionGrid(QWidget):
         self._pairs_per_row = max(1, pairs_per_row)
         self._editors: dict[str, OptionEditor] = {}
         self._labels: dict[str, OptionLabel] = {}
+        #: Full-width rows that are not a single control. See :meth:`add_span`.
+        self._spans: dict[str, QWidget] = {}
+        self._span_labels: dict[str, QLabel] = {}
         self._order: list[str] = []
         #: Rows hidden by the density mode. They keep their widgets and their
         #: values -- hiding is a view, never an edit.
@@ -1651,6 +1755,28 @@ class OptionGrid(QWidget):
         self._order.append(spec.key)
         return editor
 
+    def add_span(self, key: str, label_text: str, widget: QWidget) -> QWidget:
+        """Append one full-width row: a label, then ``widget`` across the rest.
+
+        For a value that is not a single control -- the repeating ``extract``
+        sub-form is the only one today. It goes through the grid rather than
+        beside it so density, section membership and the focus machinery all
+        treat it like any other row; a widget bolted on outside the grid would
+        be the one thing on the form the mode toggle could not hide.
+        """
+
+        label = QLabel(label_text, self)
+        label.setObjectName(OBJ_OPTION_LABEL)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self._spans[key] = widget
+        self._span_labels[key] = label
+        self._order.append(key)
+        self._relayout(self._columns, force=True)
+        return widget
+
+    def span(self, key: str) -> QWidget | None:
+        return self._spans.get(key)
+
     def add_options(
         self, specs: Iterable[OptionSpec], values: Mapping[str, Any] | None = None
     ) -> None:
@@ -1680,7 +1806,14 @@ class OptionGrid(QWidget):
             editor.set_value(value)
 
     def needs_confirmation_keys(self) -> list[str]:
-        return [key for key in self._order if self._labels[key].needs_confirmation]
+        # Spans have no OptionLabel and carry no per-row confirmation mark:
+        # the sub-form's own rows do that. Walking ``_order`` blindly here
+        # was a KeyError the moment a span joined it.
+        return [
+            key
+            for key in self._order
+            if key in self._labels and self._labels[key].needs_confirmation
+        ]
 
     def frozen_keys(self) -> list[str]:
         """Rows the shipped templates write as a literal, in form order.
@@ -1689,7 +1822,11 @@ class OptionGrid(QWidget):
         grows one says so on the page rather than only in a tooltip.
         """
 
-        return [key for key in self._order if self._editors[key].is_frozen]
+        return [
+            key
+            for key in self._order
+            if key in self._editors and self._editors[key].is_frozen
+        ]
 
     def frozen_overrides(self) -> dict[str, Any]:
         """``{key: stored value}`` for frozen rows the recipe disagrees with.
@@ -1701,7 +1838,8 @@ class OptionGrid(QWidget):
         return {
             key: self._editors[key].frozen_override()
             for key in self._order
-            if self._editors[key].frozen_override() is not None
+            if key in self._editors
+            and self._editors[key].frozen_override() is not None
         }
 
     def option_count(self) -> int:
@@ -1742,24 +1880,48 @@ class OptionGrid(QWidget):
         surviving rows are re-flowed instead.
         """
 
-        if key not in self._editors:
+        if key not in self._editors and key not in self._spans:
             return
         if visible:
             self._hidden.discard(key)
         else:
             self._hidden.add(key)
-        self._labels[key].setVisible(visible)
-        self._editors[key].setVisible(visible)
+        if key in self._spans:
+            self._span_labels[key].setVisible(visible)
+            self._spans[key].setVisible(visible)
+        else:
+            self._labels[key].setVisible(visible)
+            self._editors[key].setVisible(visible)
         self._relayout(self._columns, force=True)
 
     def _relayout(self, columns: int, *, force: bool = False) -> None:
         if columns == self._columns and not force:
             return
         self._columns = columns
-        for index, key in enumerate(self.visible_keys()):
-            row, pair = divmod(index, columns)
+        # ``pair`` is the column slot the next ordinary row takes; a span
+        # takes a whole line, so it flushes the current line first and starts
+        # a fresh one after itself. Letting a span share a line with a control
+        # would put a three-row sub-form beside a one-line combo and leave the
+        # combo floating in the middle of it.
+        row = 0
+        pair = 0
+        for key in self.visible_keys():
+            if key in self._spans:
+                if pair:
+                    row += 1
+                    pair = 0
+                self._grid.addWidget(self._span_labels[key], row, 0)
+                self._grid.addWidget(
+                    self._spans[key], row, 1, 1, max(columns * 2 - 1, 1)
+                )
+                row += 1
+                continue
             self._grid.addWidget(self._labels[key], row, pair * 2)
             self._grid.addWidget(self._editors[key], row, pair * 2 + 1)
+            pair += 1
+            if pair >= columns:
+                row += 1
+                pair = 0
         for pair in range(self._pairs_per_row):
             # Columns past the current count hold nothing and must not be
             # handed any of the width.
@@ -1781,7 +1943,9 @@ class OptionGrid(QWidget):
         base = super().minimumSizeHint()
         widest = 0
         for key in self._order:
-            editor = self._editors[key]
+            editor = self._editors.get(key) or self._spans.get(key)
+            if editor is None:  # pragma: no cover - every key is one or other
+                continue
             widest = max(widest, editor.minimumSizeHint().width())
         return QSize(min(base.width(), LABEL_MIN_WIDTH + widest), base.height())
 
@@ -1837,11 +2001,31 @@ class OptionGroup(QFrame):
             f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_META}px;"
         )
         header_row.addWidget(self._header_label, 1)
+        self._band = QLabel("", header)
+        self._band.setObjectName(theme.OBJ_SEARCH_BAND)
+        self._band.setVisible(False)
+        header_row.addWidget(self._band, 0)
         column.addWidget(header)
 
         self._grid = OptionGrid(pairs_per_row=pairs_per_row, parent=self)
         self._grid.value_changed.connect(self.value_changed)
         column.addWidget(self._grid)
+
+    def set_band(self, band: str) -> None:
+        """Label this group with the search band its visible rows fall in.
+
+        On the group header rather than on a container of its own: artboard
+        ``J`` wants results banded, and re-parenting rows into three new
+        boxes would make a row change parent depending on how the user got to
+        it -- which the grouping rules forbid, because the mode toggle's
+        "keep the focused row" behaviour depends on parents being stable.
+        """
+
+        self._band.setText(band)
+        self._band.setVisible(bool(band))
+
+    def band_text(self) -> str:
+        return self._band.text() if self._band.isVisible() else ""
 
     @property
     def grid(self) -> OptionGrid:

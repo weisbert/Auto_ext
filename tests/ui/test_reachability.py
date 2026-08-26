@@ -55,7 +55,7 @@ from auto_ext.ui.project_fields import (  # noqa: E402
     bound_paths,
 )
 from auto_ext.ui.screens.cells_screen import EDITABLE_FIELDS, RECIPE_FIELD  # noqa: E402
-from auto_ext.ui.screens.recipes_screen import recipe_specs  # noqa: E402
+from auto_ext.ui.screens.recipes_screen import member_specs, recipe_specs  # noqa: E402
 
 #: Recipe field paths with no control, and why. Anything not listed here must
 #: be bound to a control on the Recipes screen.
@@ -96,6 +96,15 @@ def _recipe_bound_paths() -> set[str]:
     bound.discard(None)
     # Not a catalog row: the form header's editable title.
     bound.add("name")
+    # A collection reached through its own sub-form rather than through one
+    # control per row. ``describes_member`` rows have no recipe_field_path on
+    # purpose -- a single control bound to a list would write a scalar over
+    # it -- so the collection they describe is what is reachable.
+    bound |= {
+        spec.context_path[len("recipe.") :]
+        for spec in member_specs()
+        if spec.context_path
+    }
     return {path for path in bound if path is not None}
 
 
@@ -190,8 +199,9 @@ def test_the_four_settings_the_office_round_could_not_find_are_reachable_now() -
     assert "extraction.corner" in bound
     # "recipes 的名字也没有改"
     assert "name" in bound
-    # "Extraction Type 这个属性也无法编辑"
-    assert "extraction.extract_type" in bound
+    # "Extraction Type 这个属性也无法编辑" -- it is a field of a rule now, and
+    # the rules list is what the sub-form edits.
+    assert "extraction.extract" in bound
     # "里面有很多参数你是选择的是 blank 填写" -- stages was the named case.
     assert "stages" in bound
     # "没有地方可以改 ext 输出的文件名称" -- per DUT, so it is a cell column.

@@ -165,22 +165,36 @@ Five columns: marker · label · control · annotation · flag.
 | `tier: full`, at default, in Common | **hidden** | Only because one always-visible toggle and search both reach it. Never hidden when non-default. |
 | tool with 0 Common rows | **one-line strip** | A tool must never disappear — see §3. |
 
-## 6. Not built yet
+## 6. Built, 2026-08-26
 
-Everything in this file is implemented and tested. From the design, two pieces
-are not:
+This section used to list what was missing. It is empty on purpose, and the
+list is kept here as a record of what closed rather than deleted, because two
+of the three turned out to cost more than the plan said.
 
-- **The focused-row detail pane** (spec `M` §4, artboard `Q3-d`) — the 42px
-  strip that describes the focused row and lets All view carry no per-row prose
-  at all. Until it exists, All view keeps the on-row hint.
-- **The repeating `extract` sub-form** (artboards `F1`–`F3`) — blocked on the
-  Recipe model change that turns `extract` from two scalars into an ordered
-  list. That change ripples into `render`, `migrate`, the tests and the three
-  recipes already on the red-zone disk, so it is its own round.
-
-Search currently reports off-screen matches by name in the status line; the
-three labelled result bands of artboard `J`, and the button that navigates to
-the Cells screen, are part of the detail-pane round.
+- **The focused-row detail pane** (spec `M` §4, artboard `Q3-d`) — a 42px
+  strip under the form describing only the focused row: model path, `why`,
+  default, advisory range, open question, the exact generated line it writes,
+  and Reset. One `focusChanged` connection for the whole screen rather than a
+  `focusInEvent` on ninety editors. It keeps the last description when focus
+  leaves the form — otherwise the sentence vanishes at the moment the user
+  acts on it.
+- **The repeating `extract` sub-form** (artboards `F1`–`F3`) — see §8.
+- **Search result bands** (artboard `J`) — `IN COMMON` / `IN ALL ONLY` /
+  `NOT ON THIS SCREEN`, with the third carrying an Open button. The bands are
+  labels on the existing group headers, not three new containers: re-parenting
+  results would make a row change parent depending on how the user reached it,
+  and the mode toggle's "keep the focused row" behaviour depends on parents
+  being stable. `Esc` restores the density **and** the scroll offset, both
+  captured on the way *in*.
+- **Row-state marks** (artboard `H`) — the logic had shipped and the marks had
+  not, so a promoted row and an ordinary one looked identical. Two channels
+  that never share a pixel: accent at x=0 means *a person set this*, amber at
+  the far right means *nobody has checked this*. QSS attribute selectors on a
+  dynamic property, so no new colour entered the palette.
+- **Multi-select `all` / `none`** (artboard `I1`) — one emission per click,
+  not one per member. The "type a value the list does not have" field already
+  existed for guessed member lists; no shipped row is one today, which is why
+  its test builds the spec instead of finding it.
 
 ## 7. The library list — overruling artboard `G`
 
@@ -217,3 +231,91 @@ into column 0 — `set_recipes` the id, `_on_name_edited` the name — after
 `e2b722c` changed what column 0 meant and left the rename handler behind. Two
 call sites agreeing is a rule someone has to remember; one call site is a rule
 that holds itself.
+
+## 8. `extract` is a list, and the sub-form that edits it
+
+`extract` may appear more than once in a Quantus command file. Specifications
+accumulate first-to-last and **the last one wins for any net it covers**. The
+vendor's own worked example is the standard RF cost-saving strategy:
+
+```
+extract -selection all             -type c_only_coupled
+extract -selection nets_file "clk" -type rc_coupled
+```
+
+Whole chip at capacitance only; the nets that matter get R as well. Two
+scalars could not express it, so the one thing an RF engineer most wants from
+this tool was unreachable — from the GUI, the YAML and the CLI alike.
+
+### Two new catalog columns this needed
+
+| column | what it says | rows |
+|---|---|---|
+| `describes_member` | this row describes one field of one member of the collection at `context_path`, not a scalar | 2 |
+| `choice_args` | which enum members take an operand, and what kind | 1 |
+
+`describes_member` is why `extract_selection` and `extract_type` have a real
+`context_path` and a `recipe_field_path` of `None`. The value genuinely lives
+at `recipe.extraction.extract`; what does not exist is a *single* value a
+control could bind to. Pointing them at `null` instead would have made them
+look like the structural rows that bind to nothing at all, which is a
+different and less true statement.
+
+`choice_args` is what makes three of `-selection`'s four members usable.
+Before it, the template emitted `-selection "[[extract_selection]]"` as a bare
+quoted token, so choosing `net`, `nets_file` or `selected_path_file` produced
+a command line the tool rejects — three quarters of the option unusable, with
+nothing on screen to say why.
+
+### What the change cost outside the model
+
+Three things the plan did not predict, all found by tests:
+
+- **`selection_line` is one property, not two placeholders.** The first
+  version wrote the operand with an inline `[% if %]`. The import solver keys
+  a site by `(statement, option)` and a statement name glued to a block tag is
+  a statement it cannot see, so `extraction_setup` vanished from the template
+  side and every option in it came back as a manual edit.
+  `readback.strip_block_tags` fixes the general case; the one-placeholder line
+  keeps this one simple.
+- **Stripping block tags exposed two wrong line hints.** `add_bulk_terminal`
+  and `sub_node_char` recorded the *rendered* line, seven higher than the
+  template line, because the `output_xy` loop expands one line into eight.
+  Nothing had caught it: that loop's `[% endfor %]` was glued to the next
+  statement, so the parser could not see it and the check skipped everything
+  below.
+- **The importer needs to read rules back.** A hand-written file carrying the
+  downgrade pattern would otherwise import as an unmappable patch — the values
+  surviving in the diff and invisible in the form, which is the exact shape
+  the catalog exists to end. `extract_rules_from_text` reads every `extract`
+  statement **in file order**, because order is the semantics.
+
+### The sub-form
+
+One row per rule: index, selection, the operand field *when that member takes
+one*, type, move up, move down, remove. Order is editable and visible — a
+rule list whose order the user cannot see or change is a list whose meaning
+they cannot predict. The last row cannot be removed: a recipe with no extract
+statement runs Quantus and extracts nothing, which reports as a successful
+extraction of a cell that happens to have no parasitics.
+
+It goes through `OptionGrid.add_span` rather than beside the grid, so density,
+section membership and the focus machinery treat it like any other row. A
+widget bolted on outside the grid would be the one thing on the form the mode
+toggle could not hide.
+
+**One sub-form per collection, not per row.** Two catalog rows describe
+`recipe.extraction.extract`; drawing two editors would ask the user which is
+the real one — the same "a row is drawn once" rule the rest of the form keeps,
+one level up.
+
+### Migration
+
+A v1 recipe carrying the two scalars is upgraded to a one-rule list **on
+load**, in place, silently — the user ruled that on 2026-08-25 over an
+explicit step in the deploy. Silent means "does not stop to ask", not "leaves
+no trace": `load_recipe_with_raw` writes one line to the log naming the file,
+and the comment-carrying tree is updated too, or a later save would write the
+v1 keys straight back and the upgrade would un-happen on every load. A file
+carrying *both* spellings is left alone and the list wins; guessing which one
+the author meant is the silent-wrong-answer this project exists to remove.

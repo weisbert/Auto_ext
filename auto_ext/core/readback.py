@@ -296,7 +296,37 @@ def parse_by_syntax(syntax: str, text: str) -> dict[SiteKey, RawValue]:
     parser = PARSERS.get(syntax)
     if parser is None:
         raise ReadBackError(f"no read-back parser for syntax {syntax!r}")
-    return parser(text)
+    return parser(strip_block_tags(text))
+
+
+#: ``[% ... %]`` -- a Jinja BLOCK tag. Not ``[[ ... ]]``, which is a value
+#: placeholder and must survive: the whole point of parsing the template is to
+#: find those and match them against the user's literals.
+_BLOCK_TAG = re.compile(r"\[%.*?%\]")
+
+
+def strip_block_tags(text: str) -> str:
+    """Remove Jinja block tags so a statement keeps its own name.
+
+    The command-file parsers key a site by ``(statement, option)`` and read
+    the statement name off the start of a line. The house rule is that a
+    block tag shares a line with the text it governs -- ``trim_blocks`` is
+    off, so a tag alone on a line would emit a blank one -- and that puts
+    ``[% endfor %]extraction_setup`` in the template where the rendered file
+    says ``extraction_setup``.
+
+    Without this the whole statement goes missing from the TEMPLATE side of
+    the import solver, so none of its options can be recovered and every one
+    of them is reported as a manual edit. That is exactly what happened when
+    the extract block became a loop: the visible symptom was
+    ``-parasitic_blocking_device_cells_file``, eight lines further down,
+    turning into a hunk.
+
+    A no-op for any text that is not a template, which is the common case --
+    the same function runs over the user's file, and their file has no tags.
+    """
+
+    return _BLOCK_TAG.sub("", text)
 
 
 def _special_run_qrc_query(raw: RawValue) -> Any:

@@ -90,7 +90,8 @@ def test_a_default_recipe_is_grouped_and_complete() -> None:
     recipe = make_recipe()
     assert recipe.schema_version == RECIPE_SCHEMA_VERSION
     assert recipe.stages == list(STAGE_ORDER)
-    assert recipe.extraction.extract_type is ExtractType.RC_COUPLED
+    assert recipe.extraction.extract[0].type is ExtractType.RC_COUPLED
+    assert len(recipe.extraction.extract) == 1, "one rule unless asked otherwise"
     assert recipe.extraction.metal_fill is MetalFill.VIRTUAL
     assert recipe.output.emit == [OutputKind.EXTRACTED_VIEW]
     assert recipe.lvs.deck_variant == "wodio"
@@ -193,6 +194,16 @@ def test_resource_catalog_rows_all_map_into_the_resource_profile() -> None:
 def test_every_recipe_field_has_a_catalog_row() -> None:
     catalog = builtin_catalog()
     covered = {o.recipe_field_path for o in catalog.by_owner(Owner.RECIPE)}
+    # A ``describes_member`` row covers the COLLECTION its members live in.
+    # ``recipe_field_path`` is None for those on purpose -- binding one
+    # control to a list would write a scalar over it -- so the coverage
+    # question has to be asked of ``context_path`` instead. Two rows describe
+    # ``extraction.extract``; one covered field, not two orphans.
+    covered |= {
+        o.context_path[len("recipe.") :]
+        for o in catalog.by_owner(Owner.RECIPE)
+        if o.describes_member and o.context_path
+    }
     orphans = sorted(set(recipe_field_paths()) - covered - CATALOG_EXEMPT_FIELDS)
     assert orphans == [], (
         "these Recipe fields have no row in options.yaml, so nobody can say "

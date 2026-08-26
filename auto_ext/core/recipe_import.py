@@ -789,6 +789,62 @@ def _implausible(option: OptionSpec, value: Any) -> str:
     return ""
 
 
+#: One ``extract`` statement and its continuations. Quantus command files
+#: put the statement name on its own line and every option on a continued
+#: line ending in a backslash, so a statement is "extract" plus everything up
+#: to the first line that does not continue.
+_EXTRACT_HEAD = re.compile(r"^\s*extract\s*\\?\s*$")
+_SELECTION_RE = re.compile(
+    r"-selection\s+\"?([A-Za-z_][A-Za-z0-9_]*)\"?(?:\s+\"([^\"]*)\")?"
+)
+_TYPE_RE = re.compile(r"-type\s+\"?([A-Za-z_][A-Za-z0-9_]*)\"?")
+
+
+def extract_rules_from_text(text: str) -> list[dict[str, Any]]:
+    """Every ``extract`` statement in one command file, in file order.
+
+    Order is the whole point: specifications accumulate first-to-last and the
+    last one wins for any net it covers, so a reader that returned a set --
+    or that kept only the first -- would silently discard the downgrade the
+    author wrote the second statement for.
+
+    Returns plain dicts rather than :class:`ExtractRule` objects so the caller
+    can hand them to the same validation everything else goes through, and so
+    a malformed statement fails with the recipe rather than here.
+    """
+
+    rules: list[dict[str, Any]] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        if not _EXTRACT_HEAD.match(lines[index]):
+            index += 1
+            continue
+        body: list[str] = []
+        cursor = index
+        # The head line itself may carry a continuation; walk while the
+        # PREVIOUS line ended in a backslash.
+        while cursor < len(lines):
+            body.append(lines[cursor])
+            if not lines[cursor].rstrip().endswith("\\"):
+                break
+            cursor += 1
+        statement = " ".join(body)
+        rule: dict[str, Any] = {}
+        selection = _SELECTION_RE.search(statement)
+        if selection:
+            rule["selection"] = selection.group(1)
+            if selection.group(2):
+                rule["selection_arg"] = selection.group(2)
+        kind = _TYPE_RE.search(statement)
+        if kind:
+            rule["type"] = kind.group(1)
+        if rule:
+            rules.append(rule)
+        index = cursor + 1
+    return rules
+
+
 def _assign(tree: dict[str, Any], path: str, value: Any) -> None:
     parts = path.split(".")
     node = tree
@@ -1919,6 +1975,45 @@ def import_recipe(
                 note=note,
             )
         )
+
+    # The extract statements, read as an ordered list rather than row by
+    # row. ``extract_selection`` / ``extract_type`` are describes_member rows
+    # and so are deliberately not assignable one at a time -- there is no
+    # single value to assign, and picking the first statement would drop the
+    # rest without saying so.
+    for target in (RenderTarget.QUANTUS_EXT, RenderTarget.QUANTUS_DSPF):
+        if target not in texts:
+            continue
+        rules = extract_rules_from_text(texts[target])
+        if not rules:
+            continue
+        _assign(tree, "extraction.extract", rules)
+        applied_keys.update({"extract_selection", "extract_type"})
+        mapped.append(
+            MappedValue(
+                key="extract_selection",
+                value="; ".join(
+                    " ".join(str(v) for v in rule.values()) for rule in rules
+                ),
+                owner=Owner.RECIPE,
+                source=labels[target],
+                # A real ReadSite, not None: the report and the dialog both
+                # ask a mapped value where it came from, and one that cannot
+                # answer is one the user cannot check. No line number -- the
+                # rules come from every extract statement in the file, not
+                # from one of them.
+                site=ReadSite(target=target, section="extract", option="-selection"),
+                origin="literal",
+                applied_to="extraction.extract",
+                note=(
+                    None
+                    if len(rules) == 1
+                    else f"{len(rules)} extract statements, kept in file order "
+                    "-- the last one wins for any net it covers"
+                ),
+            )
+        )
+        break
 
     for key, (target, where) in _PRESENCE_ROWS.items():
         if target not in texts:

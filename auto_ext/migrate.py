@@ -547,8 +547,23 @@ def _number_token(value: float, suffix: str = "") -> str:
     return f"{value}".replace(".", "p") + suffix
 
 
+def _extract_token(recipe: Recipe) -> str:
+    """The id token for a recipe's extraction, now that there may be several.
+
+    One rule keeps the id it always had. More than one gets the FIRST rule's
+    token plus a count -- ``rc+2`` -- because the first rule is the one that
+    covers the whole chip in the vendor's own downgrade pattern, and a name
+    that silently reported only that would hide the very thing the extra
+    rules were added to do.
+    """
+
+    rules = recipe.extraction.extract
+    head = _EXTRACT_TOKENS.get(rules[0].type.value, "ext") if rules else "ext"
+    return head if len(rules) <= 1 else f"{head}+{len(rules) - 1}"
+
+
 def _base_tokens(recipe: Recipe) -> list[str]:
-    tokens = [_EXTRACT_TOKENS.get(recipe.extraction.extract_type.value, "ext")]
+    tokens = [_extract_token(recipe)]
     if recipe.extraction.corner:
         tokens.append(str(recipe.extraction.corner))
     if recipe.extraction.temperature_c is not None:
@@ -559,7 +574,13 @@ def _base_tokens(recipe: Recipe) -> list[str]:
 def _human_name(recipe: Recipe) -> str:
     """A display name that says what the recipe does, derived like the id."""
 
-    bits = [recipe.extraction.extract_type.value]
+    rules = recipe.extraction.extract
+    bits = [
+        rules[0].type.value
+        if len(rules) == 1
+        else f"{rules[0].type.value} + {len(rules) - 1} more rule"
+        + ("" if len(rules) == 2 else "s")
+    ]
     if recipe.extraction.corner:
         bits.append(f"corner {recipe.extraction.corner}")
     if recipe.extraction.temperature_c is not None:

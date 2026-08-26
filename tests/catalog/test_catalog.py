@@ -527,6 +527,22 @@ def test_unknown_key_lookups_raise(catalog: Catalog) -> None:
 # ---- the self-check ----------------------------------------------------------
 
 
+def test_the_two_namespace_lists_never_drift() -> None:
+    """``spec._CONTEXT_NAMESPACES`` mirrors ``render._NAMESPACE_ROOTS``.
+
+    The catalog must stay importable without Jinja, so it cannot import the
+    renderer to ask -- the same constraint that made ``Stage`` be declared
+    twice. Declaring it twice is fine; letting the two drift is not, and a
+    template walking a namespace the audit has not heard of gets reported as
+    an unclaimed variable rather than as what it is.
+    """
+
+    from auto_ext.catalog.spec import _CONTEXT_NAMESPACES
+    from auto_ext.core.render import _NAMESPACE_ROOTS
+
+    assert set(_CONTEXT_NAMESPACES) == set(_NAMESPACE_ROOTS)
+
+
 def test_catalog_and_templates_agree(catalog: Catalog) -> None:
     """Catalog rows and template variables must match, in both directions.
 

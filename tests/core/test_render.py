@@ -174,10 +174,25 @@ def test_every_catalog_row_with_a_context_path_gets_a_flat_alias(
     that template would die on StrictUndefined at run time instead of here."""
 
     catalog = builtin_catalog()
-    bound = [o for o in catalog.options if o.context_path is not None]
+    # ``describes_member`` rows are excluded: their path names a COLLECTION
+    # and the row describes one field of one member of it, so there is no
+    # single value an alias could hold. The templates loop instead.
+    bound = [
+        o
+        for o in catalog.options
+        if o.context_path is not None and not o.describes_member
+    ]
     assert len(bound) > 100
     for opt in bound:
         assert opt.template_var in context, opt.key
+
+    members = [o for o in catalog.options if o.describes_member]
+    assert {o.key for o in members} == {"extract_selection", "extract_type"}
+    for opt in members:
+        assert opt.template_var not in context, (
+            f"{opt.key} got a flat alias; a scalar over a list is exactly the "
+            "shape this column exists to prevent"
+        )
 
 
 def test_flat_aliases_match_their_namespaced_source(
@@ -237,8 +252,14 @@ def test_several_cdl_includes_are_refused_with_the_profile_s_own_reason(
 def test_enum_values_are_bound_as_their_string_value(
     context: dict[str, object],
 ) -> None:
-    assert context["extract_type"] == "rc_coupled"
     assert context["metal_fill_type"] == "virtual"
+    # extract_type lives inside a rule now, and the rule keeps it a string.
+    # The recipe namespace keeps live model objects, so the template reads
+    # rule.selection / rule.type as attributes and StrEnum renders as its
+    # value -- which is what keeps the emitted line unquoted-identical.
+    rules = context["recipe"]["extraction"]["extract"]
+    assert f"{rules[0].type}" == "rc_coupled"
+    assert f"{rules[0].selection}" == "all"
 
 
 def test_a_catalog_row_pointing_at_an_unbuilt_key_is_caught_here(

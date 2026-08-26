@@ -319,6 +319,24 @@ OBJ_NAV_RAIL = "shellNavRail"
 OBJ_NAV_ITEM = "shellNavItem"
 OBJ_NAV_LABEL = "shellNavLabel"
 OBJ_NAV_COUNT = "shellNavCount"
+
+#: The Recipes form's row container, so a state can be styled without
+#: the label and the editor each carrying their own copy of the rule.
+OBJ_OPTION_ROW = "optionRow"
+#: The bordered "promoted" / "changed" tag beside a row's label.
+OBJ_STATE_TAG = "optionStateTag"
+#: ``was 55.0`` in mono, so the value a row left is still readable.
+OBJ_WAS_VALUE = "optionWasValue"
+#: Why a row is disabled, said ON the row rather than only on hover.
+OBJ_WHY_DISABLED = "optionWhyDisabled"
+#: The focused-row detail strip and its two labels. Spec ``M`` section 4.
+OBJ_DETAIL_BAR = "focusDetailBar"
+OBJ_DETAIL_PATH = "focusDetailPath"
+OBJ_DETAIL_PROSE = "focusDetailProse"
+#: The band label on a group header while a search is live. Artboard ``J``.
+OBJ_SEARCH_BAND = "searchBand"
+#: The ``NOT ON THIS SCREEN`` strip and its navigate button.
+OBJ_ELSEWHERE_BAND = "elsewhereBand"
 OBJ_STACK = "shellStack"
 OBJ_HEALTH_BADGE = "shellHealthBadge"
 OBJ_HEALTH_GLYPH = "shellHealthGlyph"
@@ -447,6 +465,62 @@ QLabel#{OBJ_NAV_COUNT} {{
     font-family: {FONT_MONO};
     font-size: {FONT_SIZE_META}px;
     color: {TEXT_DISABLED};
+}}
+/* Row states -- artboard H. One channel, at x=0, and it means "a person set
+   this". The amber channel lives at the far right and is drawn by the
+   widgets themselves; the two never share a pixel. */
+QWidget#{OBJ_OPTION_ROW} {{
+    border-left: {SELECTED_BAR_WIDTH}px solid transparent;
+    background: transparent;
+}}
+QWidget#{OBJ_OPTION_ROW}[state="changed"] {{
+    border-left: {SELECTED_BAR_WIDTH}px solid {ACCENT};
+}}
+QWidget#{OBJ_OPTION_ROW}[state="promoted"] {{
+    border-left: {SELECTED_BAR_WIDTH}px solid {ACCENT};
+    background: {ACCENT_TINT};
+}}
+QWidget#{OBJ_OPTION_ROW}[state="inapplicable"] {{
+    border-left: {SELECTED_BAR_WIDTH}px solid transparent;
+    background: transparent;
+}}
+QLabel#{OBJ_STATE_TAG} {{
+    font-size: {FONT_SIZE_META}px;
+    color: {ACCENT};
+    border: 1px solid {ACCENT};
+    border-radius: 2px;
+    padding: 0px 3px;
+}}
+QLabel#{OBJ_WAS_VALUE} {{
+    font-family: {FONT_MONO};
+    font-size: {FONT_SIZE_META}px;
+    color: {TEXT_SECONDARY};
+}}
+QLabel#{OBJ_WHY_DISABLED} {{
+    font-size: {FONT_SIZE_META}px;
+    color: {TEXT_DISABLED};
+}}
+QFrame#{OBJ_DETAIL_BAR} {{
+    background: {SURFACE_CARD};
+    border-top: 1px solid {LINE_STRUCTURAL};
+}}
+QLabel#{OBJ_DETAIL_PATH} {{
+    font-family: {FONT_MONO};
+    font-size: {FONT_SIZE_META}px;
+    color: {TEXT_PRIMARY};
+}}
+QLabel#{OBJ_DETAIL_PROSE} {{
+    font-size: {FONT_SIZE_META}px;
+    color: {TEXT_SECONDARY};
+}}
+QLabel#{OBJ_SEARCH_BAND} {{
+    font-size: {FONT_SIZE_META}px;
+    font-weight: {FONT_WEIGHT_SEMIBOLD};
+    color: {ACCENT};
+}}
+QFrame#{OBJ_ELSEWHERE_BAND} {{
+    background: {SURFACE_TABLE_HEADER};
+    border: 1px solid {LINE_PANEL};
 }}
 QFrame#{OBJ_NAV_ITEM}[selected="true"] QLabel#{OBJ_NAV_COUNT} {{
     color: {TEXT_SECONDARY};
@@ -680,6 +754,15 @@ __all__ = [
     "STATUS_PASSED",
     "STATUS_RUNNING",
     "STATUS_SKIPPED",
+    "OBJ_OPTION_ROW",
+    "OBJ_STATE_TAG",
+    "OBJ_WAS_VALUE",
+    "OBJ_WHY_DISABLED",
+    "OBJ_DETAIL_BAR",
+    "OBJ_DETAIL_PATH",
+    "OBJ_DETAIL_PROSE",
+    "OBJ_SEARCH_BAND",
+    "OBJ_ELSEWHERE_BAND",
     "STATUS_TEXT",
     "STATUS_WARNING",
     "SURFACE_BUTTON",

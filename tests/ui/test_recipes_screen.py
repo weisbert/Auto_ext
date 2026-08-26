@@ -47,6 +47,7 @@ from auto_ext.core.patch_models import (  # noqa: E402
 )
 from auto_ext.model.recipe import Recipe, recipe_from_catalog  # noqa: E402
 from auto_ext.ui.screens.recipes_screen import (
+    member_specs,
     pointer_specs,  # noqa: E402
     DENSITY_ALL,
     DENSITY_COMMON,
@@ -226,9 +227,15 @@ def test_a_row_landing_in_two_files_is_drawn_once(qtbot) -> None:
 
     keys = [spec.key for tool in form_layout() for spec in tool.specs]
     assert len(keys) == len(set(keys))
-    assert set(keys) == {spec.key for spec in recipe_specs()} | {
-        spec.key for spec in pointer_specs()
-    }
+    assert set(keys) == (
+        {spec.key for spec in recipe_specs()}
+        | {spec.key for spec in pointer_specs()}
+        # ``describes_member`` rows are in the LAYOUT so their section exists
+        # and is grouped by the same rules as everything else. What is drawn
+        # for them is one sub-form per collection, not one control per row --
+        # see ``_add_member_forms``.
+        | {spec.key for spec in member_specs()}
+    )
 
 
 def test_level_two_is_the_generated_files_own_section(qtbot) -> None:
@@ -961,10 +968,14 @@ def test_common_shows_only_the_common_tier(qtbot) -> None:
         1
         for spec in recipe_specs() + pointer_specs()
         if spec.tier in (Tier.COMMON, Tier.ELSEWHERE)
-    )
+    ), "member rows draw as a sub-form, so they are not in the row count"
     assert {"out_file", "ground_net", "dspf_out_path"} <= shown
     # The settings a person changes from job to job are all there.
-    assert {"extract_type", "temperature_c", "lvs_deck_variant"} <= shown
+    # ``extract_type`` is not among them any more: it describes a member of
+    # ``extraction.extract`` and reaches the user through the sub-form, which
+    # the assertion below checks for instead.
+    assert {"temperature_c", "lvs_deck_variant"} <= shown
+    assert screen.extract_rules_editor() is not None
     # And the ones nobody has ever touched are not.
     assert "sub_node_char" not in shown
 
@@ -1082,4 +1093,209 @@ def test_search_answers_for_settings_that_live_on_another_screen(qtbot) -> None:
     assert [spec.key for spec in elsewhere] == ["out_file"]
 
     screen.search_field().setText("out_file")
-    assert "Cells screen" in screen._density_note.full_text()
+
+    # Artboard ``J``: banded, not a flat list. The band that matters is the
+    # third one, and it carries the button that answers the report.
+    bands = screen.search_bands("out_file")
+    assert [spec.key for spec in bands["NOT ON THIS SCREEN"]] == ["out_file"]
+    band = screen.elsewhere_band()
+    assert band.isVisibleTo(screen) is True
+    assert "NOT ON THIS SCREEN" in band.text()
+    assert band.open_button().text() == "Open in Cells"
+
+    went: list[tuple[str, str]] = []
+    screen.navigate_requested.connect(lambda s, k: went.append((s, k)))
+    band.open_button().click()
+    assert went == [("cells", "out_file")]
+
+
+def test_the_three_bands_say_which_situation_each_match_is_in(qtbot) -> None:
+    """"you can see this", "the density is hiding this", "this is elsewhere".
+
+    Three different next actions. A flat result list makes the user work out
+    which is which from memory.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+
+    bands = screen.search_bands("net")
+    assert list(bands) == ["IN COMMON", "IN ALL ONLY", "NOT ON THIS SCREEN"]
+    assert sum(len(v) for v in bands.values()) == len(screen.search_matches("net"))
+    # No row is in two bands.
+    seen = [spec.key for specs in bands.values() for spec in specs]
+    assert len(seen) == len(set(seen))
+
+
+def test_a_search_with_nothing_elsewhere_hides_the_third_band(qtbot) -> None:
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.search_field().setText("temperature")
+    assert screen.elsewhere_band().isVisibleTo(screen) is False
+
+
+# ---- artboard H: the marks, not just the logic --------------------------------
+
+
+def test_a_changed_row_wears_the_accent_and_says_what_it_left(qtbot) -> None:
+    """The half of artboard ``H`` that never shipped.
+
+    Promotion and dirty tracking both worked; a promoted row and an ordinary
+    one looked identical, so "anything you changed is still in front of you"
+    was true and invisible.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    editor = screen.editor("temperature_c")
+    assert editor.row_state() == ""
+
+    editor.line_edit().setText("125.0")
+    editor.line_edit().textEdited.emit("125.0")
+
+    assert editor.row_state() == "changed"
+    assert editor.was_label() is not None
+    assert "was 55.0" in editor.was_label().text()
+
+
+def test_a_row_disabled_by_emit_gating_says_why_on_the_row(qtbot) -> None:
+    """A reason you have to hover to find is a reason most people never read."""
+
+    screen = _screen(qtbot)
+    recipe = make_recipe()
+    recipe.output.emit = ["extracted_view"]
+    screen.set_recipes([recipe])
+    screen.set_density(DENSITY_ALL)
+
+    key = next(iter(screen.inapplicable_keys()))
+    editor = screen.editor(key)
+    assert editor.row_state() == "inapplicable"
+    assert editor.why_label() is not None
+    assert "only" in editor.why_label().full_text()
+
+
+def test_the_two_channels_never_share_a_pixel(qtbot) -> None:
+    """``accent`` means a person set this; ``amber`` means nobody has checked.
+
+    They are opposites, not degrees of one thing, so the accent channel is
+    the row's own ``state`` property and the amber channel is drawn by the
+    editor at the far right. Nothing sets both from one place.
+    """
+
+    from auto_ext.ui import theme
+
+    qss = theme.build_qss()
+    row_rules = [
+        line
+        for line in qss.splitlines()
+        if theme.OBJ_OPTION_ROW in line and "[state=" in line
+    ]
+    assert row_rules, "the state selectors are gone"
+    for line in row_rules:
+        assert theme.WARNING_TEXT_ON_WHITE not in line
+
+
+# ---- spec M section 4: the focused-row strip -----------------------------------
+
+
+def test_the_strip_describes_the_row_that_has_focus(qtbot) -> None:
+    """One row explaining itself on demand, so All view carries no prose.
+
+    Ninety rows each explaining themselves is a page nobody reads.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    bar = screen.detail_bar()
+    assert "focus a setting" in bar.prose_text()
+
+    screen._on_focus_changed(None, screen.editor("temperature_c"))
+
+    assert bar.key() == "temperature_c"
+    assert bar.path_text() == "extraction.temperature_c"
+    prose = bar.prose_text()
+    assert "default" in prose
+    # The question the whole catalog exists to answer: what does this write?
+    assert "ext.cmd" in prose or "dspf.cmd" in prose
+
+
+def test_the_strip_offers_reset_only_when_there_is_something_to_reset(qtbot) -> None:
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    bar = screen.detail_bar()
+    editor = screen.editor("temperature_c")
+
+    screen._on_focus_changed(None, editor)
+    assert bar.reset_button().isEnabled() is False
+
+    editor.line_edit().setText("125.0")
+    editor.line_edit().textEdited.emit("125.0")
+    screen._on_focus_changed(None, editor)
+    assert bar.reset_button().isEnabled() is True
+
+    bar.reset_button().click()
+    assert screen.current_recipe().extraction.temperature_c == 55.0
+    assert bar.reset_button().isEnabled() is False
+
+
+def test_focus_leaving_the_form_keeps_the_last_description(qtbot) -> None:
+    """Otherwise the sentence vanishes at the moment the user acts on it."""
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen._on_focus_changed(None, screen.editor("temperature_c"))
+    was = screen.detail_bar().prose_text()
+
+    screen._on_focus_changed(screen.editor("temperature_c"), screen.save_button())
+
+    assert screen.detail_bar().prose_text() == was
+
+
+def test_escape_puts_the_user_back_where_they_started(qtbot) -> None:
+    """Not just "clear the box".
+
+    The density they were in and the place they had scrolled to are both part
+    of where they were, and search moved both. Dropping someone at the top of
+    Common when they had been halfway down All is the small betrayal that
+    makes people stop using a search box.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.set_density(DENSITY_ALL)
+
+    screen.search_field().setText("temperature")
+    # ``visible_option_keys`` answers the DENSITY question; search is a third
+    # view, so what it hid has to be read off the grid itself.
+    hidden = [
+        key
+        for group in screen.groups().values()
+        for key in group.grid.keys()
+        if key not in group.grid.visible_keys()
+    ]
+    assert hidden, "the search hid nothing"
+
+    screen._on_search_escape()
+
+    assert screen.search_field().text() == ""
+    assert screen.density() == DENSITY_ALL, "search stole the density"
+
+
+def test_the_form_fits_the_three_sizes_the_definition_of_done_names(qtbot) -> None:
+    """940x560, 1280x800, 1600x900 -- "check it, do not assume".
+
+    The plan's own definition of done asks for this by eye. An eye is not
+    available at 3am and does not run in CI, so it is asserted: nothing may
+    demand more width than the floor gives it, at any of the three.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    for width, height in ((940, 560), (1280, 800), (1600, 900)):
+        screen.resize(width, height)
+        qtbot.waitExposed(screen) if screen.isVisible() else None
+        screen.layout().activate()
+        assert screen.minimumSizeHint().width() <= width, (
+            f"the form cannot fold to {width}px"
+        )
+        assert screen.detail_bar().height() <= height // 4

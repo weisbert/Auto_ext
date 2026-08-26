@@ -233,7 +233,7 @@ def test_real_config_produces_one_recipe_named_after_its_parameters(
     report = run_migration(REAL_CONFIG, tmp_path)
     assert [recipe.recipe_id for recipe in report.recipes] == ["rc-typical-55c"]
     recipe = report.recipes[0]
-    assert recipe.extraction.extract_type.value == "rc_coupled"
+    assert [r.type.value for r in recipe.extraction.extract] == ["rc_coupled"]
     assert recipe.extraction.corner == "typical"
     assert recipe.extraction.temperature_c == 55.0
     # project knob 100 is overridden by the task knob 200

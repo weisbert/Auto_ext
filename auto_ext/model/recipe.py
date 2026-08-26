@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import datetime
 from enum import StrEnum
 from io import StringIO
@@ -229,6 +230,38 @@ class ExtractType(StrEnum):
     RLCK_DECOUPLED_TO_SUBSTRATE = "rlck_decoupled_to_substrate"
 
 
+logger = logging.getLogger(__name__)
+
+class ExtractSelection(StrEnum):
+    """``extract -selection``: which nets one extract statement covers.
+
+    Three of the four take an operand, which is why
+    :class:`ExtractRule` carries ``selection_arg`` and why a plain enum could
+    never have expressed this option. The catalog row records which member
+    wants what in its ``choice_args`` column.
+    """
+
+    #: Every net the run covers -- except whatever ``global_nets`` defines,
+    #: which is a real exclusion and one we do not model yet.
+    ALL = "all"
+    #: One net-name pattern.
+    NET = "net"
+    #: A file listing net names.
+    NETS_FILE = "nets_file"
+    #: A file listing selected paths.
+    SELECTED_PATH_FILE = "selected_path_file"
+
+
+#: Which members take an operand, and what kind. Mirrors the catalog row's
+#: ``choice_args`` so the model can validate without reading the catalog.
+SELECTION_ARG_KIND: dict[ExtractSelection, str | None] = {
+    ExtractSelection.ALL: None,
+    ExtractSelection.NET: "pattern",
+    ExtractSelection.NETS_FILE: "file",
+    ExtractSelection.SELECTED_PATH_FILE: "file",
+}
+
+
 class MetalFill(StrEnum):
     """``metal_fill -type``.
 
@@ -336,6 +369,68 @@ class LvsSettings(Base):
     run_qrc_query: bool = True
 
 
+class ExtractRule(Base):
+    """One ``extract`` statement: which nets, and what to extract from them.
+
+    ``extract`` may appear MORE THAN ONCE in a Quantus command file.
+    Specifications accumulate first to last, and **the last one wins for any
+    net it covers**. That is not a curiosity -- it is the vendor's own worked
+    example and the standard RF cost-saving strategy::
+
+        extract -selection all             -type c_only_coupled
+        extract -selection nets_file "clk" -type rc_coupled
+
+    Whole chip gets capacitance only; the nets that matter get R as well.
+    Modelling this as two scalars could not express it at all, which meant
+    the one thing an RF engineer most wants to do with this tool was
+    unreachable from the GUI, the YAML and the CLI alike.
+    """
+
+    selection: ExtractSelection = ExtractSelection.ALL
+    #: The operand for the three members that take one -- a net pattern for
+    #: ``net``, a path for the two file forms. ``None`` for ``all``.
+    selection_arg: str | None = None
+    type: ExtractType = ExtractType.RC_COUPLED
+
+    @field_validator("selection_arg", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def _check_arg(self) -> "ExtractRule":
+        kind = SELECTION_ARG_KIND[self.selection]
+        if kind is None and self.selection_arg is not None:
+            raise ValueError(
+                f"selection {self.selection.value!r} takes no argument, but "
+                f"selection_arg is {self.selection_arg!r}"
+            )
+        if kind is not None and not self.selection_arg:
+            raise ValueError(
+                f"selection {self.selection.value!r} needs a {kind}; "
+                "selection_arg is empty"
+            )
+        return self
+
+    @property
+    def selection_line(self) -> str:
+        """The whole ``-selection`` operand, quotes included.
+
+        One property rather than two placeholders with a conditional
+        between them. The templates bind exactly this, so the emitted
+        line keeps the one-placeholder shape every other line in the
+        command files has -- which is what the import solver aligns
+        against. A conditional tag mid-line matches nothing and drifts
+        the alignment for every row below it.
+        """
+
+        if self.selection_arg is None:
+            return f'"{self.selection.value}"'
+        return f'"{self.selection.value}" "{self.selection_arg}"'
+
+
 class ExtractionSettings(Base):
     """The Quantus extraction conditions, shared by both output forms.
 
@@ -353,8 +448,30 @@ class ExtractionSettings(Base):
     #: ``None`` uses ``CornerSpec.default_temperature_c``.
     temperature_c: AsWritten | None = None
 
-    extract_type: ExtractType = ExtractType.RC_COUPLED
-    selection: str = "all"
+    @field_validator("extract")
+    @classmethod
+    def _at_least_one_rule(cls, value: list[ExtractRule]) -> list[ExtractRule]:
+        """An empty list is a recipe that extracts nothing and says nothing.
+
+        A run with no ``extract`` statement is not an error the tool reports
+        usefully -- it produces an empty parasitic set that looks like a
+        successful extraction of a cell with no parasitics.
+        """
+
+        if not value:
+            raise ValueError(
+                "extraction.extract needs at least one rule; a recipe with "
+                "none would run Quantus and extract nothing"
+            )
+        return value
+
+    #: The ordered ``extract`` statements. At least one, and order matters:
+    #: later rules override earlier ones for any net they cover.
+    #:
+    #: This replaced the ``extract_type`` / ``selection`` scalar pair on
+    #: 2026-08-25. A v1 recipe carrying the two scalars is upgraded to a
+    #: one-rule list on load -- see :func:`upgrade_extraction_payload`.
+    extract: list[ExtractRule] = Field(default_factory=lambda: [ExtractRule()])
     decoupling_factor: AsWritten = 1.0
     net_name_space: str = "SCHEMATIC"
 
@@ -856,11 +973,64 @@ def load_recipe_with_raw(path: Path) -> tuple[Recipe, Any]:
             f"{path}: expected a mapping at top level, got "
             f"{type(data).__name__ if data is not None else 'an empty file'}"
         )
+    payload = _plain(data)
+    if upgrade_extraction_payload(payload):
+        logger.info(
+            "%s: upgraded extraction.extract_type/selection to a one-rule "
+            "extract list",
+            path,
+        )
+        # The comment-carrying tree has to follow, or a later save writes the
+        # v1 keys straight back out and the upgrade un-happens on every load.
+        raw_extraction = data.get("extraction")
+        if isinstance(raw_extraction, dict):
+            raw_extraction.pop("extract_type", None)
+            raw_extraction.pop("selection", None)
+            raw_extraction["extract"] = payload["extraction"]["extract"]
     try:
-        recipe = Recipe.model_validate(_plain(data))
+        recipe = Recipe.model_validate(payload)
     except ValidationError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
     return recipe, data
+
+
+def upgrade_extraction_payload(payload: Any) -> bool:
+    """Turn a v1 ``extract_type`` / ``selection`` pair into a one-rule list.
+
+    In place, silently, on load -- the user ruled that on 2026-08-25 over the
+    alternative of an explicit migration step in the deploy. Returns whether
+    anything moved, so the caller can log it.
+
+    Silent means "does not stop to ask", not "leaves no trace": the caller
+    writes one line to the log naming the file. Three hand-editable recipes
+    already exist on the red-zone disk and a rewrite nobody can see afterwards
+    is the kind of thing that loses work.
+
+    Only fires when the new key is absent. A file carrying both spellings is
+    left alone and the list wins -- guessing which one the author meant is
+    exactly the silent-wrong-answer this project exists to remove.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    extraction = payload.get("extraction")
+    if not isinstance(extraction, dict):
+        return False
+    if "extract" in extraction:
+        extraction.pop("extract_type", None)
+        extraction.pop("selection", None)
+        return False
+    old_type = extraction.pop("extract_type", None)
+    old_selection = extraction.pop("selection", None)
+    if old_type is None and old_selection is None:
+        return False
+    rule: dict[str, Any] = {}
+    if old_selection is not None:
+        rule["selection"] = old_selection
+    if old_type is not None:
+        rule["type"] = old_type
+    extraction["extract"] = [rule]
+    return True
 
 
 def _merge_into(target: Any, source: Any) -> Any:

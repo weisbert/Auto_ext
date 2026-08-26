@@ -541,6 +541,32 @@ class OptionSpec(Frozen):
     #: the named key must exist and must itself have a landing site, so this
     #: can neither chain nor cycle.
     groups_with: str | None = None
+    #: ``member -> what operand it takes`` for an enum whose members are not
+    #: all self-contained. Empty means every member stands alone.
+    #:
+    #: ``extract -selection`` is the case: ``all`` takes nothing, ``net``
+    #: takes a pattern, and the two file forms take a path. A plain enum
+    #: cannot say that, so the form drew a combo whose last three entries
+    #: produced a command line the tool rejects -- three quarters of the
+    #: option unusable with nothing on screen to explain why.
+    #:
+    #: The sub-form reads this to decide whether a rule needs a value field
+    #: beside its combo, and what to label it.
+    choice_args: dict[str, str] = Field(default_factory=dict)
+    #: This row describes ONE FIELD OF ONE MEMBER of the collection at
+    #: :attr:`context_path`, not a scalar the form can bind a control to.
+    #:
+    #: ``extract_selection`` and ``extract_type`` are the two: the value they
+    #: describe lives in ``recipe.extraction.extract[i]``, and how many ``i``
+    #: there are is the user's choice. So there is no single value to read or
+    #: write, no flat template alias, and no place on the form for an
+    #: ordinary row -- the repeating sub-form owns them and reads their
+    #: ``choices`` / ``choice_args`` by key.
+    #:
+    #: They keep a real ``context_path`` because that is where the value
+    #: genuinely lives, and the alternative (``null``) would have made them
+    #: look like the structural rows that bind to nothing at all.
+    describes_member: bool = False
 
     @model_validator(mode="after")
     def _check(self) -> OptionSpec:
@@ -586,6 +612,11 @@ class OptionSpec(Frozen):
             )
         if self.context_path is not None and not _CONTEXT_PATH_RE.match(self.context_path):
             raise ValueError(f"{self.key}: malformed context_path {self.context_path!r}")
+        if self.describes_member and self.context_path is None:
+            raise ValueError(
+                f"{self.key}: describes_member needs a context_path naming the "
+                f"collection the member belongs to"
+            )
         if (
             self.owner is Owner.RECIPE
             and self.currently is not Currently.ABSENT
@@ -644,8 +675,19 @@ class OptionSpec(Frozen):
 
     @property
     def expected_in_templates(self) -> bool:
-        """True when ``template_var`` must literally appear in the templates."""
+        """True when ``template_var`` must literally appear in the templates.
 
+        A :attr:`describes_member` row is excluded. Its value does reach the
+        file, but through a loop over the collection rather than through a
+        flat alias, so there is no ``[[extract_type]]`` to find -- the
+        template says ``[[rule.type]]`` inside
+        ``[% for rule in recipe.extraction.extract %]``. Requiring the alias
+        would force us to keep a scalar binding beside the list, which is the
+        two-sources-of-truth this whole change removes.
+        """
+
+        if self.describes_member:
+            return False
         return self.currently in (Currently.JINJA_VAR, Currently.MANIFEST_KNOB)
 
     @property
@@ -676,9 +718,17 @@ class OptionSpec(Frozen):
 
     @property
     def recipe_field_path(self) -> str | None:
-        """``extraction.min_res_ohm`` for a recipe-owned option, else ``None``."""
+        """``extraction.min_res_ohm`` for a recipe-owned option, else ``None``.
+
+        ``None`` for a :attr:`describes_member` row: the path names a
+        collection, and binding a single control to it would write a scalar
+        over a list. Those rows reach the user through the sub-form that owns
+        the collection, not through the flat form.
+        """
 
         if self.owner is not Owner.RECIPE or self.context_path is None:
+            return None
+        if self.describes_member:
             return None
         if not self.context_path.startswith("recipe."):
             return None
@@ -1034,6 +1084,16 @@ class TemplateVarAudit(Frozen):
         return "\n".join(lines)
 
 
+#: Render-context namespaces a template may walk into directly. Kept here
+#: rather than imported from ``core.render`` because the catalog must stay
+#: importable without Jinja -- ``tests/catalog/test_catalog.py`` asserts the
+#: two lists agree, which is the same trick ``Stage`` uses against
+#: ``patch_models``.
+_CONTEXT_NAMESPACES: frozenset[str] = frozenset(
+    {"env", "paths", "pdk", "recipe", "resources", "run", "site"}
+)
+
+
 def audit_template_vars(
     catalog: Catalog | None = None, *, templates_root: Path | None = None
 ) -> TemplateVarAudit:
@@ -1083,6 +1143,12 @@ def audit_template_vars(
     missing_in_catalog: list[tuple[str, str]] = []
     for target, found in per_target.items():
         for var in sorted(found - claimed.get(target, set())):
+            if var in _CONTEXT_NAMESPACES:
+                # A template reaching into a namespace (``recipe.extraction``)
+                # rather than a flat alias. The namespace is the render
+                # context's own shape, not a value any row could claim, so
+                # demanding a row for it would demand a row for the model.
+                continue
             missing_in_catalog.append((target.value, var))
 
     return TemplateVarAudit(
