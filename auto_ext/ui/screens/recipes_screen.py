@@ -736,6 +736,10 @@ class RecipesScreen(QWidget):
         self._editors: dict[str, OptionEditor] = {}
 
         self._recipes: list[Recipe] = []
+        #: ``path -> reason`` for recipe files in the search path that would
+        #: not load. Drawn as rows of their own -- see
+        #: :meth:`set_broken_recipes`.
+        self._broken: dict[Any, str] = {}
         self._original: Recipe | None = None
         self._working: Recipe | None = None
         self._usage: dict[str, int] = {}
@@ -1575,6 +1579,19 @@ class RecipesScreen(QWidget):
 
     # -- data ----------------------------------------------------------
 
+    def set_broken_recipes(self, broken: Mapping[Any, str]) -> None:
+        """``path -> reason`` for recipe files that would not load.
+
+        They get a row of their own at the top of the list. A file the user
+        can see on disk that the program silently drops is the worst of both
+        worlds: the work looks lost, and the reason is somewhere they are not
+        looking. On 2026-08-28 a file-format break did exactly that to the
+        red-zone library -- the recipes were all still there.
+        """
+
+        self._broken = dict(broken)
+        self.set_recipes(self._recipes, select=self.current_recipe_id())
+
     def set_recipes(
         self, recipes: Sequence[Recipe], *, select: str | None = None
     ) -> None:
@@ -1583,6 +1600,19 @@ class RecipesScreen(QWidget):
         self._recipes = list(recipes)
         self._list.blockSignals(True)
         self._list.clear()
+        for path, reason in sorted(self._broken.items(), key=lambda kv: str(kv[0])):
+            item = QTreeWidgetItem()
+            # No ``UserRole``: there is no recipe behind this row, and
+            # ``_on_current_item_changed`` reads that as "show nothing".
+            item.setText(0, getattr(path, "name", str(path)))
+            item.setText(1, "failed to load")
+            item.setData(0, Qt.UserRole + 1, reason.splitlines()[0])
+            item.setToolTip(0, f"{path}\n\n{reason}")
+            item.setToolTip(1, str(reason))
+            item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+            item.setForeground(0, QColor(theme.WARNING_TEXT_ON_WHITE))
+            item.setForeground(1, QColor(theme.WARNING_TEXT_ON_WHITE))
+            self._list.addTopLevelItem(item)
         for recipe in self._recipes:
             item = QTreeWidgetItem()
             item.setData(0, Qt.UserRole, recipe.recipe_id)
@@ -1956,6 +1986,9 @@ class RecipesScreen(QWidget):
             self._load(None)
             return
         recipe_id = current.data(0, Qt.UserRole)
+        if recipe_id is None:  # a broken-file row -- there is nothing to edit
+            self._load(None)
+            return
         self._load(self._recipe_by_id(str(recipe_id)))
 
     def _on_value_changed(self, key: str, value: Any) -> None:

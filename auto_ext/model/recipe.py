@@ -987,6 +987,21 @@ def load_recipe_with_raw(path: Path) -> tuple[Recipe, Any]:
             raw_extraction.pop("extract_type", None)
             raw_extraction.pop("selection", None)
             raw_extraction["extract"] = payload["extraction"]["extract"]
+    moved = upgrade_three_state_payload(payload)
+    if moved:
+        logger.info(
+            "%s: upgraded %s from YAML booleans to three-state strings",
+            path,
+            ", ".join(moved),
+        )
+        # Same reason as above: the comment tree has to follow, or the next
+        # save writes booleans back and the file breaks again on the load
+        # after that.
+        raw_common = data.get("output")
+        raw_common = raw_common.get("common") if isinstance(raw_common, dict) else None
+        if isinstance(raw_common, dict):
+            for key in moved:
+                raw_common[key] = payload["output"]["common"][key]
     try:
         recipe = Recipe.model_validate(payload)
     except ValidationError as exc:
@@ -1031,6 +1046,54 @@ def upgrade_extraction_payload(payload: Any) -> bool:
         rule["type"] = old_type
     extraction["extract"] = [rule]
     return True
+
+
+#: The four :class:`CommonOutputSettings` fields that were ``bool`` until
+#: 2026-08-25. Every recipe written before then carries YAML booleans here.
+THREE_STATE_KEYS = (
+    "include_cap_model",
+    "include_parasitic_cap_model",
+    "include_res_model",
+    "include_parasitic_res_model",
+)
+
+
+def upgrade_three_state_payload(payload: Any) -> list[str]:
+    """Turn v1 YAML booleans in ``output.common`` into ``"true"`` / ``"false"``.
+
+    In place, silently, on load -- the same policy as
+    :func:`upgrade_extraction_payload`, and for the same reason. Returns the
+    keys that moved so the caller can name them in the log.
+
+    Without this the 2026-08-25 three-state change is a **file format break**:
+    ``include_cap_model: false`` is a YAML ``bool``, the field is now ``str``,
+    and pydantic refuses to coerce one to the other. Every recipe on disk
+    older than that date fails to validate, the UI skips it, and the user sees
+    an empty recipe list. That is exactly what happened on the red zone on
+    2026-08-28.
+
+    ``true``/``false`` are the only values a bool can have meant, so this
+    conversion invents nothing. Contrast the two enum members the same round
+    removed -- ``extract_type: c_only`` and ``metal_fill: actual`` -- which
+    have no unambiguous successor and are deliberately **not** migrated: a
+    recipe carrying either must fail loudly rather than be silently assigned
+    an extraction physics nobody chose.
+    """
+
+    if not isinstance(payload, dict):
+        return []
+    output = payload.get("output")
+    if not isinstance(output, dict):
+        return []
+    common = output.get("common")
+    if not isinstance(common, dict):
+        return []
+    moved: list[str] = []
+    for key in THREE_STATE_KEYS:
+        if isinstance(common.get(key), bool):
+            common[key] = "true" if common[key] else "false"
+            moved.append(key)
+    return moved
 
 
 def _merge_into(target: Any, source: Any) -> Any:

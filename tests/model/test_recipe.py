@@ -527,3 +527,130 @@ def test_the_same_recipe_file_loads_equal_from_two_project_directories(
     text = first.read_text(encoding="utf-8")
     assert "projectA" not in text
     assert str(tmp_path) not in text
+
+
+# ---------------------------------------------------------------------------
+# Loading a file written by an older version
+#
+# Every test above builds its Recipe in Python, where the three-state fields
+# are already ``str``. That is the write-out direction, and it was green
+# through the whole 2026-08-25 round while the read-back direction was broken:
+# a recipe file written before that date carries YAML *booleans* there, and
+# pydantic will not coerce ``bool`` to ``str``. The red-zone library stopped
+# loading on 2026-08-28 and the UI showed it as an empty recipe list.
+# ---------------------------------------------------------------------------
+
+
+def _v1_recipe_text() -> str:
+    """The shape every recipe on disk had before 2026-08-25."""
+
+    return (
+        "schema_version: 1\n"
+        "recipe_id: rc-v1\n"
+        "name: from before the three-state change\n"
+        "extraction:\n"
+        "  extract_type: rc_coupled\n"
+        "  selection: all\n"
+        "output:\n"
+        "  common:\n"
+        "    include_cap_model: false\n"
+        "    include_parasitic_cap_model: true\n"
+        "    include_res_model: false\n"
+    )
+
+
+def test_v1_yaml_booleans_load_as_three_state_strings(tmp_path: Path) -> None:
+    from auto_ext.model.recipe import load_recipe_with_raw
+
+    path = tmp_path / "rc-v1.yaml"
+    path.write_text(_v1_recipe_text(), encoding="utf-8")
+
+    recipe, _raw = load_recipe_with_raw(path)
+
+    assert recipe.output.common.include_cap_model == "false"
+    assert recipe.output.common.include_parasitic_cap_model == "true"
+    assert recipe.output.common.include_res_model == "false"
+    # Untouched by the file, so it keeps the model default rather than
+    # being dragged along by the migration.
+    assert recipe.output.common.include_parasitic_res_model == "comment"
+
+
+def test_v1_upgrade_survives_a_save(tmp_path: Path) -> None:
+    """The comment tree has to follow, or the next save re-breaks the file."""
+
+    from auto_ext.model.recipe import dump_recipe_yaml, load_recipe_with_raw
+
+    path = tmp_path / "rc-v1.yaml"
+    path.write_text(_v1_recipe_text(), encoding="utf-8")
+
+    recipe, raw = load_recipe_with_raw(path)
+    path.write_text(dump_recipe_yaml(recipe, raw=raw), encoding="utf-8")
+
+    again, _ = load_recipe_with_raw(path)
+    assert again.output.common.include_cap_model == "false"
+    assert again.output.common.include_parasitic_cap_model == "true"
+
+
+def test_v1_extract_scalars_still_become_a_one_rule_list(tmp_path: Path) -> None:
+    from auto_ext.model.recipe import load_recipe_with_raw
+
+    path = tmp_path / "rc-v1.yaml"
+    path.write_text(_v1_recipe_text(), encoding="utf-8")
+
+    recipe, _ = load_recipe_with_raw(path)
+    assert [(r.selection.value, r.type.value) for r in recipe.extraction.extract] == [
+        ("all", "rc_coupled")
+    ]
+
+
+@pytest.mark.parametrize(
+    "line, dead_value",
+    [
+        ("  extract_type: c_only\n", "c_only"),
+        ("  metal_fill: actual\n", "actual"),
+    ],
+)
+def test_removed_enum_members_fail_loudly_rather_than_being_guessed(
+    tmp_path: Path, line: str, dead_value: str
+) -> None:
+    """The 2026-08-25 round deleted two members with no unambiguous successor.
+
+    ``c_only`` split into coupled / decoupled / decoupled_to_substrate and
+    ``actual`` into floating / grounded -- picking one for the user would be
+    choosing an extraction physics nobody asked for. So unlike the boolean
+    coercion, these are deliberately *not* migrated. The value of the test is
+    that the refusal stays a decision instead of decaying into an oversight.
+    """
+
+    from auto_ext.model.recipe import load_recipe_with_raw
+
+    text = _v1_recipe_text().replace("  extract_type: rc_coupled\n", "")
+    text = text.replace("extraction:\n", "extraction:\n" + line)
+    path = tmp_path / "rc-dead.yaml"
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_recipe_with_raw(path)
+    # Naming the value and the permitted set is what makes it fixable.
+    assert dead_value in str(excinfo.value)
+
+
+def test_the_recipe_that_shipped_before_the_change_still_loads(tmp_path: Path) -> None:
+    """The regression, in the exact shape the red zone hit it.
+
+    ``recipes/rc-typical-55c.yaml`` is the file the package installs, so it is
+    the one sitting in every deployed ``config/recipes`` directory.
+    """
+
+    from auto_ext.model.recipe import load_recipe_with_raw
+
+    path = tmp_path / "rc-typical-55c.yaml"
+    path.write_text(
+        _v1_recipe_text().replace(
+            "    include_res_model: false\n",
+            "    include_res_model: false\n    include_parasitic_res_model: comment\n",
+        ),
+        encoding="utf-8",
+    )
+    recipe, _ = load_recipe_with_raw(path)
+    assert recipe.output.common.include_parasitic_res_model == "comment"

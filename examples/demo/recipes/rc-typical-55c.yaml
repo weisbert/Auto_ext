@@ -79,10 +79,6 @@ lvs:
 extraction:
   corner: typical
   temperature_c: 55.0
-  # NEEDS CONFIRMATION: Which extraction types do you actually use, and what are
-  # the exact spellings your QRC accepts?
-  extract_type: rc_coupled
-  selection: all
   decoupling_factor: 1.0
   net_name_space: SCHEMATIC
   exclude_self_cap: true
@@ -103,6 +99,12 @@ extraction:
   max_fracture_length: infinite
   max_fracture_length_unit: MICRONS
   max_via_array_size: auto
+  # NEEDS CONFIRMATION: Which extraction types do you actually use, and what are
+  # the exact spellings your QRC accepts?
+  extract:
+  - selection: all
+    selection_arg:
+    type: rc_coupled
 output:
   # NEEDS CONFIRMATION: Do you ever need an extracted view AND a DSPF from one
   # run? Do you need SPEF?
@@ -110,9 +112,9 @@ output:
   - extracted_view
   common:
     device_finger_delimiter: '@'
-    include_cap_model: false
-    include_parasitic_cap_model: false
-    include_res_model: false
+    include_cap_model: 'false'
+    include_parasitic_cap_model: 'false'
+    include_res_model: 'false'
     # NEEDS CONFIRMATION: What does "comment" mean in your post-layout sim, and
     # when is each of the three used?
     include_parasitic_res_model: comment

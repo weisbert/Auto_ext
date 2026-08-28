@@ -90,6 +90,36 @@ def test_one_unreadable_recipe_does_not_lose_the_rest(
 
     assert controller.recipe_ids() == ["rc-coupled-typical"]
     assert any("broken.yaml" in message for message in errors)
+    # And it is still *represented*. An error message the next status line
+    # overwrites is not a report -- the file has to stay reachable from the
+    # controller so the UI can keep drawing a row for it.
+    broken = controller.broken_recipes
+    assert [p.name for p in broken] == ["broken.yaml"]
+    assert "broken.yaml" in next(iter(broken.values()))
+
+
+def test_a_fixed_recipe_stops_being_broken_on_reload(
+    v2_config_dir: Path, isolated_recipe_path: Path, qtbot
+) -> None:
+    """The obvious next move after the UI names the file is to edit it."""
+
+    from auto_ext.model.recipe import Recipe, dump_recipe_yaml
+
+    path = v2_config_dir / "recipes" / "broken.yaml"
+    path.write_text(
+        "recipe_id: broken\nname:\n  - not a string\n", encoding="utf-8"
+    )
+    controller = ConfigController(auto_ext_root=v2_config_dir)
+    controller.load(v2_config_dir / "config")
+    assert list(controller.broken_recipes)
+
+    path.write_text(
+        dump_recipe_yaml(Recipe(recipe_id="broken", name="fixed")), encoding="utf-8"
+    )
+    controller.load(v2_config_dir / "config")
+
+    assert controller.broken_recipes == {}
+    assert "broken" in controller.recipe_ids()
 
 
 def test_later_search_path_directories_shadow_earlier_ones(

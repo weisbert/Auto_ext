@@ -20,6 +20,7 @@ The three claims worth defending:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -1299,3 +1300,54 @@ def test_the_form_fits_the_three_sizes_the_definition_of_done_names(qtbot) -> No
             f"the form cannot fold to {width}px"
         )
         assert screen.detail_bar().height() <= height // 4
+
+
+# ---- a file on disk is never invisible -----------------------------------
+
+
+def test_a_recipe_file_that_will_not_load_still_gets_a_row(qtbot) -> None:
+    """The 2026-08-28 red-zone symptom, in one assertion.
+
+    A file-format break made every recipe fail to validate. The controller
+    skipped them, the list came up empty, and the only explanation was a
+    status-bar line that the next status message overwrote -- so it read as
+    "my recipes are gone" rather than "these four files need one edit".
+    """
+
+    screen = _screen(qtbot)
+    screen.set_broken_recipes({Path("/red/config/recipes/rc-typical-55c.yaml"): "3 validation errors for Recipe"})
+    screen.set_recipes([make_recipe()])
+
+    listing = screen.recipe_list
+    assert listing.topLevelItemCount() == 2
+    broken = listing.topLevelItem(0)
+    assert broken.text(0) == "rc-typical-55c.yaml"
+    assert broken.text(1) == "failed to load"
+    # The reason travels with the row, both on the second line and in full
+    # in the tooltip -- the path is what tells the user which file to edit.
+    assert "3 validation errors" in broken.data(0, Qt.UserRole + 1)
+    assert "rc-typical-55c.yaml" in broken.toolTip(0)
+    assert "3 validation errors" in broken.toolTip(0)
+
+
+def test_selecting_a_broken_row_shows_no_form_rather_than_a_wrong_one(qtbot) -> None:
+    screen = _screen(qtbot)
+    screen.set_broken_recipes({Path("bad.yaml"): "boom"})
+    screen.set_recipes([make_recipe()])
+
+    screen.recipe_list.setCurrentItem(screen.recipe_list.topLevelItem(0))
+
+    assert screen.current_recipe() is None
+    assert screen.current_recipe_id() is None
+
+
+def test_broken_rows_do_not_displace_the_recipes_that_did_load(qtbot) -> None:
+    screen = _screen(qtbot)
+    screen.set_broken_recipes({Path("bad.yaml"): "boom"})
+    screen.set_recipes([make_recipe()])
+
+    ids = [
+        screen.recipe_list.topLevelItem(i).data(0, Qt.UserRole)
+        for i in range(screen.recipe_list.topLevelItemCount())
+    ]
+    assert ids == [None, make_recipe().recipe_id]

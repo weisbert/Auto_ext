@@ -205,6 +205,10 @@ class ConfigController(QObject):
         self._recipes: dict[str, Recipe] = {}
         self._recipe_paths: dict[str, Path] = {}
         self._recipe_raw: dict[str, Any] = {}
+        #: ``path -> why it would not load``, for every ``*.yaml`` in the
+        #: search path that failed. These are the files the user can see on
+        #: disk, so they have to stay visible in the UI too.
+        self._broken_recipes: dict[Path, str] = {}
         self._health: PdkHealthReport | None = None
 
         #: ``document id -> object``; ``None`` means "delete this document".
@@ -315,6 +319,19 @@ class ConfigController(QObject):
 
         found = [self.recipe(rid) for rid in self.recipe_ids()]
         return [r for r in found if r is not None]
+
+    @property
+    def broken_recipes(self) -> dict[Path, str]:
+        """``path -> reason`` for every recipe file that would not load.
+
+        A file that fails to parse used to contribute nothing: it vanished
+        from the library and the only trace was one status-bar line that the
+        next status message overwrote. On 2026-08-28 that turned a file-format
+        break into "my recipes are gone" on the red zone. A file on disk is
+        now always represented, whether or not it validates.
+        """
+
+        return dict(self._broken_recipes)
 
     def recipe_path(self, recipe_id: str) -> Path | None:
         """Where ``recipe_id`` lives, or would be written if it is new."""
@@ -494,7 +511,7 @@ class ConfigController(QObject):
             self.config_error.emit(str(exc))
             return
 
-        recipes, recipe_paths, recipe_raw, recipe_errors = self._read_recipes(config_dir)
+        recipes, recipe_paths, recipe_raw, broken = self._read_recipes(config_dir)
 
         was_dirty = self.is_dirty
         self._config_dir = config_dir
@@ -507,6 +524,7 @@ class ConfigController(QObject):
         self._recipes = recipes
         self._recipe_paths = recipe_paths
         self._recipe_raw = recipe_raw
+        self._broken_recipes = broken
         self._pending.clear()
         self._health = None
 
@@ -517,12 +535,17 @@ class ConfigController(QObject):
         }
         for path in recipe_paths.values():
             self._mtimes[path] = _mtime_ns(path)
+        # Broken files are watched too. Hand-fixing the one the UI just
+        # named is the obvious next move, and the reload prompt should
+        # follow it like any other external edit.
+        for path in broken:
+            self._mtimes[path] = _mtime_ns(path)
 
         if was_dirty:
             self.dirty_changed.emit(False)
         self.config_loaded.emit(config_dir)
-        for message in recipe_errors:
-            self.config_error.emit(message)
+        for path, reason in broken.items():
+            self.config_error.emit(f"skipped recipe {path}: {reason}")
 
     def reload(self) -> None:
         if self._config_dir is not None:
@@ -530,7 +553,9 @@ class ConfigController(QObject):
 
     def _read_recipes(
         self, config_dir: Path
-    ) -> tuple[dict[str, Recipe], dict[str, Path], dict[str, Any], list[str]]:
+    ) -> tuple[
+        dict[str, Recipe], dict[str, Path], dict[str, Any], dict[Path, str]
+    ]:
         """Walk the search path; later directories shadow earlier ones.
 
         A recipe that fails to load does not fail the whole load: the rest of
@@ -541,7 +566,7 @@ class ConfigController(QObject):
         recipes: dict[str, Recipe] = {}
         paths: dict[str, Path] = {}
         raws: dict[str, Any] = {}
-        errors: list[str] = []
+        broken: dict[Path, str] = {}
         for directory in recipe_search_path(
             self._auto_ext_root, config_dir, self._recipes_dir
         ):
@@ -551,12 +576,13 @@ class ConfigController(QObject):
                 try:
                     recipe, raw = load_recipe_with_raw(path)
                 except (AutoExtError, OSError) as exc:
-                    errors.append(f"skipped recipe {path}: {exc}")
+                    broken[path] = str(exc)
                     continue
+                broken.pop(path, None)
                 recipes[recipe.recipe_id] = recipe
                 paths[recipe.recipe_id] = path
                 raws[recipe.recipe_id] = raw
-        return recipes, paths, raws, errors
+        return recipes, paths, raws, broken
 
     # ---- health -------------------------------------------------------
 

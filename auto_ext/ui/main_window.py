@@ -330,6 +330,10 @@ class MainWindow(QMainWindow):
             # the profile, and a recipe pushed into an empty list would show
             # its corner as an unknown extra entry.
             self._recipes.set_profile(controller.profile)
+            # Before set_recipes, so the first paint already carries the
+            # broken-file rows: a file on disk is always represented, even
+            # when it does not validate.
+            self._recipes.set_broken_recipes(controller.broken_recipes)
             self._recipes.set_recipes(controller.recipes)
             self._project.set_project(
                 workspace=controller.workspace,
