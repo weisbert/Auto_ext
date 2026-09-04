@@ -40,9 +40,10 @@ scattered through the class bodies:
   hand does not fail on them.
 * ``TaskConfig.jivaro`` / ``TaskConfig.continue_on_lvs_fail`` were the legacy
   answers to "is reduction on" and "keep going past an LVS mismatch". Both
-  answers now come from the Recipe (``reduction.enabled`` /
-  ``policy.continue_on_lvs_fail``), which is why :func:`tasks_from_cells`
-  leaves them at their defaults.
+  answers now come from the run bar (whether ``jivaro`` is ticked, and the
+  ``continue on LVS fail`` box) with ``policy.continue_on_lvs_fail`` as the
+  recipe-level fallback, which is why :func:`tasks_from_cells` leaves them at
+  their defaults.
 
 All five are on the list for the round that replaces ``ProjectConfig`` with
 :class:`~auto_ext.model.workspace.WorkspaceConfig` outright.

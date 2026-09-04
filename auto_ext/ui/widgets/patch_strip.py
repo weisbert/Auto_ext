@@ -3,7 +3,10 @@
 Artboards ``1f`` (collapsed) and ``1g`` (expanded). Everything the user can
 learn about a ``.j2`` from this application, they learn here -- one strip at
 the foot of the recipe form saying "this recipe has N manual edits", which
-opens into one row per hunk with its intent, its state and a per-hunk Revert.
+opens into one row per hunk with its intent, its state and a per-hunk Drop.
+
+Its undo controls say **Drop**, never Revert. Revert is the form header's
+word and means the whole recipe; see :data:`DROP_ONE`.
 
 Three things this widget is responsible for
 -------------------------------------------
@@ -81,6 +84,9 @@ __all__ = [
     "DIFF_ADD_TEXT",
     "DIFF_DEL_FILL",
     "DIFF_DEL_TEXT",
+    "DROP_ALL",
+    "DROP_ALL_IDLE",
+    "DROP_ONE",
     "GLYPH_COLLAPSED",
     "GLYPH_EXPANDED",
     "NOOP_ADVICE",
@@ -115,6 +121,22 @@ DIFF_DEL_TEXT = "#8f2626"
 #: Disclosure glyphs. Both are in the agreed DejaVu subset.
 GLYPH_COLLAPSED = "▶"
 GLYPH_EXPANDED = "▾"
+
+#: What the strip's two undo controls are called. **Revert belongs to the
+#: recipe and Drop belongs to a manual edit**, and the split is load-bearing
+#: rather than a preference.
+#:
+#: The form header's plain ``Revert`` unstages the WHOLE recipe -- every form
+#: edit, and the patches with them. These two undo only manual edits. Both
+#: used to be called Revert as well, and the strip's read ``Revert all N``,
+#: so of the two controls sitting five pixels apart the one saying "all" was
+#: the *narrower* of the two: a user choosing between them by the plain
+#: English of the labels chose wrong every time. ``Drop`` is not a new word
+#: either -- the per-hunk tooltip has said "Drop this hunk from the recipe"
+#: since the strip was written.
+DROP_ONE = "Drop"
+DROP_ALL = "Drop all {count} manual edits"
+DROP_ALL_IDLE = "Drop all manual edits"
 
 #: The sentence that makes the escape hatch shrink again.
 NOOP_ADVICE = (
@@ -457,9 +479,10 @@ class HunkRow(QFrame):
         _let_shrink(self._chip)
         header_row.addWidget(self._chip, 0)
 
-        self._revert_button = QPushButton("Revert", header)
+        self._revert_button = QPushButton(DROP_ONE, header)
         self._revert_button.setToolTip(
-            "Drop this hunk from the recipe. The other manual edits stay."
+            "Drop this hunk from the recipe. The other manual edits stay, and "
+            "so does everything you have changed on the form."
         )
         self._revert_button.clicked.connect(lambda: self.revert_requested.emit(hunk.id))
         _let_shrink(self._revert_button)
@@ -667,7 +690,11 @@ class PatchStrip(QFrame):
         _let_shrink(self._edit_button)
         row.addWidget(self._edit_button, 0)
 
-        self._revert_all_button = QPushButton("Revert all", bar)
+        self._revert_all_button = QPushButton(DROP_ALL_IDLE, bar)
+        self._revert_all_button.setToolTip(
+            "Drop every manual edit on this recipe. The form's own values are "
+            "untouched -- the header's Revert is what undoes those."
+        )
         self._revert_all_button.clicked.connect(self.revert_all_requested)
         _let_shrink(self._revert_all_button)
         row.addWidget(self._revert_all_button, 0)
@@ -931,7 +958,9 @@ class PatchStrip(QFrame):
         self._toggle_button.setEnabled(has_edits)
         self._toggle_button.setText("Hide diff" if self._expanded else "Show diff")
         self._revert_all_button.setVisible(self._expanded and has_edits)
-        self._revert_all_button.setText(f"Revert all {count}" if count else "Revert all")
+        self._revert_all_button.setText(
+            DROP_ALL.format(count=count) if count else DROP_ALL_IDLE
+        )
         self._edit_button.setVisible(self._expanded or not has_edits)
 
         self._body.setVisible(self._expanded and has_edits)

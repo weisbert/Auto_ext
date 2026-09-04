@@ -12,12 +12,6 @@ version: '1'
 tags:
 - migrated
 derived_from:
-stages:
-- si
-- strmout
-- calibre
-- quantus
-- jivaro
 netlist:
   simulator: auCdl
   view_list:
@@ -142,7 +136,6 @@ output:
     - BIPOLAR
     - GENERIC
 reduction:
-  enabled: true
   frequency_limit_ghz: 14.0
   error_max_pct: 2.0
   # NEEDS CONFIRMATION: What other criteria does the Jivaro UI offer?
@@ -150,12 +143,6 @@ reduction:
   reduce_floating_nets: false
   decoupling_auto_threshold: false
   log_verbose_level: trace
-  # Deliberately unset: it then follows the DUT's out_file, which is what the
-  # old script did by never touching the line. Pinning a literal here froze
-  # `av_extracted` into every recipe while the real flow used `av_ext` -- the
-  # named case of the frozen-default class in OLD_VS_NEW_FLOW.md section 0.
-  # Set it only to reduce a view some earlier run produced.
-  views_to_reduce:
   output_view_suffix: _red
 policy:
   continue_on_lvs_fail: false

@@ -96,7 +96,7 @@ from auto_ext.core.template import (
 )
 from auto_ext.model.common import STAGE_ORDER, RenderTarget, Stage
 from auto_ext.model.pdk import PdkProfile
-from auto_ext.model.recipe import OutputKind, Recipe, ResourceProfile
+from auto_ext.model.recipe import ExtractSelection, OutputKind, Recipe, ResourceProfile
 from auto_ext.model.run import DutSnapshot, JsonScalar
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,7 @@ __all__ = [
     "RenderedFile",
     "ResolvedCorner",
     "RunFacts",
+    "ShadowedRule",
     "SiteFacts",
     "TargetPlan",
     "Unrepresentable",
@@ -121,6 +122,7 @@ __all__ = [
     "render_one",
     "required_env_vars",
     "resolve_corner",
+    "shadowed_extract_rules",
     "template_path_for",
 ]
 
@@ -484,14 +486,18 @@ def _recipe_tree(
     *resolved* values so no template needs to know about the fallback, while
     ``pdk.corner`` carries the tool literal.
 
-    ``reduction.views_to_reduce`` is the same idea against the DUT rather than
-    the profile (``auto_ext.model.recipe.DUT_FALLBACK_FIELDS``): unset means
-    "the view Quantus just wrote", which is ``out_file`` -- the same name
-    ``inputView`` and ``-view_name`` already carry. It resolves to ``None``
-    when the cell has no ``out_file``, exactly as the flat ``out_file`` alias
-    beside it does; a DUT with no extracted view is a reduction that should
-    not have been scheduled, and that belongs to the runner's stage gate, not
-    to a silent substitution here.
+    ``reduction.views_to_reduce`` is no longer a field at all. It is derived
+    here, unconditionally, from the DUT: the view Jivaro reduces IS the view
+    Quantus just wrote, which is ``out_file`` -- the same name ``inputView``
+    and ``-view_name`` already carry. Until 2026-09-04 the recipe could
+    override it, and a typed value won for Jivaro alone while Quantus went on
+    writing ``out_file``; that is exactly the "Jivaro reduces a view that does
+    not exist" bug the 2026-08-24 ruling closed, one keystroke away.
+
+    It resolves to ``None`` when the cell has no ``out_file``, exactly as the
+    flat ``out_file`` alias beside it does; a DUT with no extracted view is a
+    reduction that should not have been scheduled, and that belongs to the
+    runner's pre-flight, not to a silent substitution here.
     """
 
     tree = _model_tree(recipe)
@@ -503,8 +509,7 @@ def _recipe_tree(
     tree["id"] = recipe.recipe_id
     tree["extraction"]["corner"] = corner.name
     tree["extraction"]["temperature_c"] = corner.temperature_c
-    if tree["reduction"].get("views_to_reduce") is None:
-        tree["reduction"]["views_to_reduce"] = dut.out_file
+    tree["reduction"]["views_to_reduce"] = dut.out_file
     return tree
 
 
@@ -879,6 +884,61 @@ def check_representable(
     return found
 
 
+@dataclass(frozen=True)
+class ShadowedRule:
+    """One ``extract`` rule that discards every rule above it.
+
+    Not an error: the vendor documents the accumulation and the override, and
+    a deliberate ``all`` at the END is a legal way to say "and everything else
+    like this". It is reported because it is almost never what was meant, and
+    because nothing else in the pipeline can tell the difference between a
+    rule that was overridden and a rule that was never written.
+    """
+
+    #: 1-based position of the offending rule in ``extraction.extract``.
+    position: int
+    #: How many earlier rules it discards.
+    shadows: int
+    #: The ``-type`` the whole design ends up extracted with.
+    extract_type: str
+
+    def describe(self) -> str:
+        earlier = "rule" if self.shadows == 1 else "rules"
+        return (
+            f"extract rule {self.position} uses -selection all, which overrides "
+            f"the {self.shadows} {earlier} above it: every net is extracted as "
+            f"{self.extract_type!r}. Quantus accumulates extract statements and "
+            f"the LAST one wins, so a catch-all belongs FIRST."
+        )
+
+
+def shadowed_extract_rules(recipe: Recipe) -> list[ShadowedRule]:
+    """Rules made dead by a later ``-selection all``.
+
+    ``extract`` statements accumulate first to last and the last one wins for
+    any net it covers, so an ``all`` rule anywhere but the first position
+    discards everything before it. The manual's own worked pair puts ``all``
+    first for exactly this reason -- whole chip cheap, the nets that matter
+    expensive -- and reversing the two lines gives the whole chip the cheap
+    treatment with no complaint from anywhere.
+
+    Returns a list rather than raising: :func:`render_one` logs it, and the
+    Recipes form draws the same finding as a chip beside the rule.
+    """
+
+    found: list[ShadowedRule] = []
+    for index, rule in enumerate(recipe.extraction.extract):
+        if index and rule.selection is ExtractSelection.ALL:
+            found.append(
+                ShadowedRule(
+                    position=index + 1,
+                    shadows=index,
+                    extract_type=rule.type.value,
+                )
+            )
+    return found
+
+
 def _raise_unrepresentable(items: Sequence[Unrepresentable], recipe: Recipe) -> None:
     lines = "\n  ".join(item.describe() for item in items)
     raise RenderError(
@@ -919,10 +979,15 @@ def plan_targets(
     express that at all: ``ProjectConfig.templates`` has a single quantus slot,
     so a run emitted one form and structurally could not emit the other.
 
-    ``stages`` narrows the plan the way the CLI's ``--stage`` does; ``None``
-    means "every stage this recipe declares". ``strmout`` never appears here:
-    it renders nothing, its argv is built from the context by
-    :class:`~auto_ext.tools.strmout.StrmoutTool`.
+    ``stages`` is the requested set -- the run bar's tick boxes or the CLI's
+    ``--stage`` -- and it is the **only** stage input. ``None`` means "every
+    stage there is a target for". Until 2026-09-04 the recipe carried a second
+    list and this function intersected the two in silence, so a stage ticked
+    on the bar but absent from the recipe simply did not run with no line
+    anywhere; the owner ruled that the stage selector owns the decision.
+
+    ``strmout`` never appears here: it renders nothing, its argv is built from
+    the context by :class:`~auto_ext.tools.strmout.StrmoutTool`.
     """
 
     cat = catalog if catalog is not None else builtin_catalog()
@@ -936,12 +1001,11 @@ def plan_targets(
     per_stage[Stage.QUANTUS] = [EMIT_TARGETS[kind] for kind in recipe.output.emit]
 
     plans: list[TargetPlan] = []
-    # Canonical stage order, not the order the recipe happens to list them in:
-    # si must netlist before Calibre compares against it, whatever the YAML says.
-    declared = set(recipe.stages)
+    # Canonical stage order, not the order the caller happens to ask in:
+    # si must netlist before Calibre compares against it, whatever the request
+    # says. There is no second filter here any more -- ``recipe.stages`` was
+    # retired on 2026-09-04 and the requested set is the only stage input.
     for stage in STAGE_ORDER:
-        if stage not in declared:
-            continue
         if wanted is not None and stage.value not in wanted:
             continue
         for target in per_stage.get(stage, []):
@@ -1086,6 +1150,14 @@ def render_one(
     )
     if blocked:
         _raise_unrepresentable(blocked, recipe)
+
+    # Non-fatal, and only for the files that carry the extract statements: the
+    # ordering is legal, so the run proceeds -- but the run log is where a
+    # user looks after an extraction came back with the wrong type on every
+    # net, and until now it said nothing at all.
+    if plan.stage is Stage.QUANTUS:
+        for shadowed in shadowed_extract_rules(recipe):
+            logger.warning("%s: %s", plan.target.value, shadowed.describe())
 
     template_path = template_path_for(plan.spec, templates_root=templates_root)
     try:

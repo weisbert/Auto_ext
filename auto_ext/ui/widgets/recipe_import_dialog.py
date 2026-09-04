@@ -245,6 +245,13 @@ def default_rows(result: RecipeImportResult) -> list[DefaultRow]:
     and any disagreement with the user's file is in the second section as a
     hunk. Reporting them apart would make the user add two numbers together to
     answer "how much of my file does this thing not understand".
+
+    ``left_at_default`` rather than ``unread``: a key the literal reader
+    refused can still have reached the recipe by another route -- a boolean
+    spelled as a word is recovered from whether its line is written at all --
+    and listing it here contradicts the section above, which says where it
+    went. That filter lives on the result, so this window and the CLI's report
+    give one answer instead of two.
     """
 
     rows = [
@@ -259,7 +266,7 @@ def default_rows(result: RecipeImportResult) -> list[DefaultRow]:
     ]
     rows.extend(
         DefaultRow(key=key, value="", reason=reason, where="")
-        for key, reason in result.unread.items()
+        for key, reason in result.left_at_default.items()
     )
     return sorted(rows, key=lambda row: row.key)
 

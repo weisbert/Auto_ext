@@ -388,12 +388,23 @@ def test_stage_narrowing_intersects_recipe_and_caller(recipe: Recipe) -> None:
     assert [p.stage_key for p in plans] == ["calibre", "quantus"]
 
 
-def test_a_recipe_that_omits_a_stage_never_plans_it() -> None:
-    recipe = Recipe(
-        recipe_id="lvs-only", name="lvs only", stages=[Stage.SI, Stage.CALIBRE]
-    )
-    plans = render.plan_targets(recipe, stages=list(s.value for s in Stage))
+def test_the_recipe_cannot_narrow_the_plan_any_more() -> None:
+    """Only the requested set decides. 2026-09-04: one concept, one owner.
+
+    ``plan_targets`` used to filter by ``recipe.stages`` *before* applying the
+    caller's request, so a stage the user asked for and the recipe did not
+    declare vanished from the plan with nothing said. That was one of two
+    intersections (the other was in ``runner._recipe_steps``); the recipe side
+    of both is gone.
+    """
+
+    recipe = Recipe(recipe_id="lvs-only", name="lvs only")
+    plans = render.plan_targets(recipe, stages=["si", "calibre"])
     assert [p.stage_key for p in plans] == ["si", "calibre"]
+    # ``None`` means "every stage there is a target for", not "every stage the
+    # recipe declares" -- there is no such list to consult.
+    every = render.plan_targets(recipe, stages=None)
+    assert [p.stage_key for p in every] == ["si", "calibre", "quantus", "jivaro"]
 
 
 def test_every_target_has_a_filename_and_a_stage_key() -> None:
@@ -846,16 +857,28 @@ def test_the_optional_connect_by_name_line_keeps_the_hugging_form(
     assert lines[i + 2] == "*cmnSpecifyLicenseWaitTime: 1"
 
 
-def _extraction_setup(text: str) -> list[str]:
-    """The extraction_setup statement, from its head to its last line."""
+def _statement(text: str, head: str) -> list[str]:
+    """One Quantus command statement, from its head line to its last line.
+
+    A Quantus command file is a sequence of backslash-continued statements, so
+    "is this option in the deck" is almost never the question worth asking --
+    the question is which STATEMENT carries it, because the vendor documents a
+    different option set under each one.
+    """
 
     lines = text.splitlines()
-    i = lines.index("extraction_setup \\")
+    i = next(n for n, line in enumerate(lines) if line.startswith(head))
     out = [lines[i]]
     while out[-1].rstrip().endswith("\\"):
         i += 1
         out.append(lines[i])
     return out
+
+
+def _extraction_setup(text: str) -> list[str]:
+    """The extraction_setup statement, from its head to its last line."""
+
+    return _statement(text, "extraction_setup")
 
 
 def test_the_inductor_blocking_type_is_omitted_until_it_is_asked_for(
@@ -944,6 +967,226 @@ def test_both_quantus_forms_render_to_different_files(
     assert "-type extracted_view" in files["quantus.ext"].text
     assert "-type dspf" in files["quantus.dspf"].text
     assert f'-file_name "{WORK}/inv.dspf"' in files["quantus.dspf"].text
+
+
+def _rules(*selections: str) -> Recipe:
+    """A recipe whose extract list is the given selections, in order."""
+
+    return Recipe(
+        recipe_id="rules",
+        name="rules",
+        extraction={
+            "extract": [
+                {"selection": s, "type": "rc_coupled"}
+                if s == "all"
+                else {"selection": "nets_file", "selection_arg": s, "type": "rc_coupled"}
+                for s in selections
+            ]
+        },
+    )
+
+
+def test_a_later_selection_all_is_reported_as_overriding_the_rules_above_it() -> None:
+    """Extract statements accumulate and the LAST one wins for any net.
+
+    So a rule list that ends in ``-selection all`` silently discards every
+    rule above it: the user adds a second rule for the clock nets, puts it
+    second, and the whole chip comes back with the first rule's type. It is
+    legal -- the manual documents the accumulation -- so this warns rather
+    than refuses, and the manual's own worked pair, which puts ``all`` FIRST
+    on purpose, must stay silent.
+    """
+
+    manual_ordering = _rules("all", "clk_nets")
+    assert render.shadowed_extract_rules(manual_ordering) == []
+
+    reversed_ordering = _rules("clk_nets", "all")
+    shadowed = render.shadowed_extract_rules(reversed_ordering)
+    assert len(shadowed) == 1
+    assert shadowed[0].position == 2
+    assert shadowed[0].shadows == 1
+    assert "2" in shadowed[0].describe()
+    assert "all" in shadowed[0].describe()
+
+    three = _rules("clk_nets", "vco_nets", "all")
+    assert [s.shadows for s in render.shadowed_extract_rules(three)] == [2]
+
+    assert render.shadowed_extract_rules(Recipe(recipe_id="d", name="d")) == []
+
+
+def test_the_shadowed_rule_warning_reaches_the_run_log(
+    tmp_path: Path, profile: PdkProfile, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A warning nobody emits is a warning nobody reads.
+
+    The editor grows a chip for this too, but the deck is what the tool runs
+    and the run log is what a user reads afterwards, so the render says it as
+    well -- once per quantus deck, at WARNING, naming the position.
+    """
+
+    recipe = _rules("clk_nets", "all")
+    ctx = render.build_context(
+        dut=make_dut(),
+        recipe=recipe,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    plan = next(p for p in render.plan_targets(recipe) if p.stage is Stage.QUANTUS)
+    with caplog.at_level("WARNING", logger="auto_ext.core.render"):
+        render.render_one(
+            plan,
+            context=ctx,
+            recipe=recipe,
+            profile=profile,
+            resolved_env=ENV,
+            out_dir=tmp_path / "rendered",
+        )
+    assert any("-selection all" in record.getMessage() for record in caplog.records)
+
+    caplog.clear()
+    fine = _rules("all", "clk_nets")
+    fine_ctx = render.build_context(
+        dut=make_dut(),
+        recipe=fine,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    with caplog.at_level("WARNING", logger="auto_ext.core.render"):
+        render.render_one(
+            next(p for p in render.plan_targets(fine) if p.stage is Stage.QUANTUS),
+            context=fine_ctx,
+            recipe=fine,
+            profile=profile,
+            resolved_env=ENV,
+            out_dir=tmp_path / "fine",
+        )
+    assert caplog.records == []
+
+
+def _both_quantus_decks(
+    tmp_path: Path, profile: PdkProfile
+) -> dict[str, render.RenderedFile]:
+    """Both quantus decks from one recipe that emits both output forms."""
+
+    both = Recipe(
+        recipe_id="both",
+        name="both",
+        output={"emit": [OutputKind.EXTRACTED_VIEW, OutputKind.DSPF]},
+    )
+    ctx = render.build_context(
+        dut=make_dut(),
+        recipe=both,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    return {
+        plan.stage_key: render.render_one(
+            plan,
+            context=ctx,
+            recipe=both,
+            profile=profile,
+            resolved_env=ENV,
+            out_dir=tmp_path / "rendered",
+        )
+        for plan in render.plan_targets(both)
+        if plan.stage is Stage.QUANTUS
+    }
+
+
+def test_no_assura_only_option_reaches_the_calibre_input_statement(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    """``input_db -format`` is documented for Assura input, not for Calibre.
+
+    The vendor prints a separate option table per ``input_db -type``, and the
+    Calibre one has twelve entries with ``-format`` not among them; the option
+    is defined one page later as "the input data format for Assura". Our
+    ``ext.cmd`` wrote it anyway and ``dspf.cmd`` never did, which had been read
+    as a difference between the two output forms rather than as one file being
+    wrong. If QRC ever validates its option names, every extracted-view run
+    dies at the last stage, hours in.
+    """
+
+    for key, deck in _both_quantus_decks(tmp_path, profile).items():
+        statement = _statement(deck.text, "input_db -type calibre")
+        offenders = [line for line in statement if "-format" in line]
+        assert not offenders, (
+            f"{key} writes {offenders} inside input_db -type calibre; -format "
+            "belongs to the Assura input table"
+        )
+
+
+def test_the_two_quantus_decks_cannot_collide_in_one_rcx_temp(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    """A recipe emitting both forms runs Quantus twice out of one directory.
+
+    Quantus builds its scratch tree at
+    ``<output_setup -directory_name>/<-temporary_directory_name>/rcx_temp``,
+    and the manual is blunt: "you cannot launch two Quantus jobs from the same
+    directory" unless the temporary directory name points somewhere different
+    per run. Both templates hardcode the same pair, so both invocations
+    resolve to the same path. Two ways out and the test accepts either: give
+    the two decks different temp directories, or take the vendor's own
+    uniqueness option, which costs nothing.
+    """
+
+    decks = _both_quantus_decks(tmp_path, profile)
+    assert len(decks) == 2, "this test needs both quantus forms"
+
+    def _setup(text: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for line in _statement(text, "output_setup"):
+            body = line.strip().removesuffix("\\").strip()
+            if body.startswith("-"):
+                name, _, value = body.partition(" ")
+                out[name] = value.strip()
+        return out
+
+    setups = {key: _setup(deck.text) for key, deck in decks.items()}
+    scratch = {
+        key: (s.get("-directory_name"), s.get("-temporary_directory_name"))
+        for key, s in setups.items()
+    }
+    if len(set(scratch.values())) == len(scratch):
+        return  # the two decks already name different temp directories
+    for key, s in setups.items():
+        assert s.get("-unique_qrctemp_name") == "true", (
+            f"{key} shares {scratch[key]} with the other quantus deck and does "
+            "not ask Quantus for a unique rcx_temp"
+        )
+
+
+def test_no_quantus_option_reaches_a_deck_without_an_operand(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    """Every ``-option`` line in a command file must carry a value.
+
+    The shape this guards is ``-output_xy \\`` immediately followed by the
+    next option: the option name is written outside the loop that writes its
+    values, so an empty collection leaves the switch standing alone. Stated
+    over the whole deck rather than over that one line, because the same
+    outside-the-loop shape is how every multi-valued option would be written.
+    """
+
+    for key, deck in _both_quantus_decks(tmp_path, profile).items():
+        lines = deck.text.splitlines()
+        for number, raw in enumerate(lines, start=1):
+            body = raw.rstrip().removesuffix("\\").strip()
+            if not body.startswith("-") or len(body.split(None, 1)) == 2:
+                continue
+            # Three options in these files put their value on the NEXT line
+            # (-cdl_out_map_directory, -technology_corner, -temperature), so a
+            # lone switch is only wrong when nothing follows it.
+            following = lines[number].strip() if number < len(lines) else ""
+            operand = following.removesuffix("\\").strip()
+            assert operand and not operand.startswith("-"), (
+                f"{key} line {number} writes an option with no operand: "
+                f"{raw!r} followed by {following!r}"
+            )
 
 
 def test_rendering_refuses_a_setting_the_template_hardcodes(

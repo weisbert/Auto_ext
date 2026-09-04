@@ -112,14 +112,16 @@ def _profile(workarea: Path):
 
 
 def _recipe(**overrides):
-    """Reduction on, mirroring what these tables' ``jivaro:`` blocks said
-    before that switch moved from the task to the Recipe."""
+    """The Recipe these runs share. It has no reduction switch to set.
+
+    Whether the reduction runs is whether ``jivaro`` is in the ``stages`` a
+    call asks for (2026-09-04 ownership ruling), so it is decided per dispatch
+    below rather than in a fixture.
+    """
 
     from tests.support.v2 import make_recipe
 
-    fields = {"reduction": {"enabled": True}}
-    fields.update(overrides)
-    return make_recipe(**fields)
+    return make_recipe(**overrides)
 
 
 @symlink_required

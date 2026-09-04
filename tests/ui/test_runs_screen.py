@@ -393,15 +393,27 @@ def test_handoff_reports_a_refused_plan_instead_of_launching(
 def test_opening_a_log_goes_through_os_open_and_is_announced(
     qtbot, history, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The screen opens it, once, and says so on the status line.
+
+    It does *not* re-emit ``log_requested``: a host connected to that signal
+    (``MainWindow`` is) opened the same file a second time -- see
+    ``tests/ui/test_runs_screen_host.py``.
+    """
+
     opened: list[Path] = []
     monkeypatch.setattr(rs, "open_in_os", opened.append)
     screen = RunsScreen(runs_root=history)
     qtbot.addWidget(screen)
     target = screen.entries[0].run_dir / "logs" / "calibre.log"
-    with qtbot.waitSignal(screen.log_requested, timeout=1000) as blocker:
+
+    requests: list[object] = []
+    screen.log_requested.connect(requests.append)
+    with qtbot.waitSignal(screen.status_message, timeout=1000) as blocker:
         screen.result_card.log_requested.emit(target)
+
     assert opened == [target]
-    assert blocker.args == [target]
+    assert str(target) in blocker.args[0]
+    assert requests == [], "re-emitting is what made the host open it twice"
 
 
 def test_clicking_an_artifact_path_opens_it_with_the_os_handler(
@@ -422,10 +434,12 @@ def test_clicking_an_artifact_path_opens_it_with_the_os_handler(
         if label.is_live()
     ]
     assert live, "at least the run directory always exists"
-    with qtbot.waitSignal(screen.artifact_requested, timeout=1000) as blocker:
+    requests: list[object] = []
+    screen.artifact_requested.connect(requests.append)
+    with qtbot.waitSignal(screen.status_message, timeout=1000):
         live[0].clicked.emit(live[0].path)
     assert opened == [live[0].path]
-    assert blocker.args == [live[0].path]
+    assert requests == []
 
 
 def test_a_missing_path_is_reported_not_raised(
@@ -504,6 +518,45 @@ def test_note_shows_up_on_the_card(
 # ============================================================================
 
 
+def test_right_click_acts_on_the_row_it_landed_on(qtbot, history) -> None:
+    """M-62: the menu read the row under the cursor and left the selection --
+    and the card -- on another run, so Re-run queued a cell nobody was
+    looking at. The Cells table already selects first."""
+
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+    screen.show()
+    screen._list.setCurrentRow(0)
+    first = screen.selected_entry
+    assert first is not None
+
+    other = screen.visible_entries[1]
+    pos = screen._list.visualItemRect(screen._list.item(1)).center()
+
+    actions: dict[str, object] = {}
+    real_exec = rs.QMenu.exec_
+
+    def capture(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        actions.update({a.text(): a for a in self.actions() if a.text()})
+        return None
+
+    rs.QMenu.exec_ = capture  # type: ignore[method-assign]
+    try:
+        screen._on_list_menu(pos)
+        qtbot.wait(10)
+    finally:
+        rs.QMenu.exec_ = real_exec  # type: ignore[method-assign]
+
+    assert screen.selected_entry is not None
+    assert screen.selected_entry.run_id == other.run_id
+    assert screen.result_card.record is not None
+    assert screen.result_card.record.run_id == other.run_id
+
+    with qtbot.waitSignal(screen.rerun_requested, timeout=1000) as blocker:
+        actions["Re-run this cell"].trigger()
+    assert blocker.args[0].run_id == other.run_id
+
+
 def test_run_list_context_menu_is_deferred_by_one_tick(qtbot, history) -> None:
     """X11 delivers the menu event on press; a synchronous exec_ is dismissed
     by the release, which is the "you have to right-click twice" bug."""
@@ -535,6 +588,7 @@ def test_run_list_context_menu_is_deferred_by_one_tick(qtbot, history) -> None:
         "Open run directory",
         "Copy run id",
         "Re-run this cell",
+        "Delete this unfinished run...",
     ]
 
 
@@ -550,6 +604,292 @@ def test_run_list_context_menu_ignores_empty_space(qtbot, history) -> None:
     finally:
         rs.QMenu.exec_ = real_exec  # type: ignore[method-assign]
     assert opened == []
+
+
+# ============================================================================
+# review 2026-09-04: what the history hides, and what it refuses
+# ============================================================================
+
+
+def _unreadable_dirs(runs_root: Path, *names: str) -> list[Path]:
+    """Directories that look like runs and are not: no record, half a record."""
+
+    made: list[Path] = []
+    for index, name in enumerate(names):
+        directory = runs_root / f"2026090{index + 1}T000000Z_{name}"
+        directory.mkdir()
+        if index % 2:
+            (directory / "run.json").write_text('{"schema_version": 2', encoding="utf-8")
+        made.append(directory)
+    return made
+
+
+def test_the_status_line_counts_the_runs_it_could_not_read(qtbot, history) -> None:
+    """M-27: five silent skip paths under a line promising the whole history.
+
+    The warnings go to a logger nothing attaches a handler to, so on the real
+    server ten directories left the list with nothing said.
+    """
+
+    _unreadable_dirs(history, "ghost-ext", "half-ext")
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+
+    text = screen.status_text()
+    assert "3 runs kept" in text
+    assert "2" in text and "could not be read" in text
+
+
+def test_a_history_of_nothing_but_unreadable_directories_says_so(
+    qtbot, runs_root: Path
+) -> None:
+    """The empty state must not claim there are no runs when there are five."""
+
+    _unreadable_dirs(runs_root, "a-ext", "b-ext", "c-ext", "d-ext", "e-ext")
+    screen = RunsScreen(runs_root=runs_root)
+    qtbot.addWidget(screen)
+
+    assert screen._stack.currentWidget() is screen._empty
+    assert "No runs recorded yet" not in screen._empty.text()
+    assert "5" in screen._empty.text()
+    assert "could not be read" in screen._empty.text()
+
+
+def test_refresh_survives_a_runs_directory_that_cannot_be_listed(
+    qtbot, history, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-37: iterdir() raises EACCES / ESTALE straight out of a Qt slot."""
+
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+    screen.show()
+
+    def denied(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "iterdir", denied)
+    screen._refresh_btn.click()
+
+    assert screen.isVisible(), "the window is still there"
+    assert screen.entries == []
+    assert screen._stack.currentWidget() is screen._empty
+    assert "Permission denied" in screen._empty.text()
+
+
+def test_refresh_says_it_did_something_even_when_nothing_changed(
+    qtbot, history
+) -> None:
+    """M-51: same rows, same selection, same status line -- no pixel moved."""
+
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+    seen: list[str] = []
+    screen.status_message.connect(seen.append)
+
+    screen._refresh_btn.click()
+    first = seen[-1]
+    assert "3 runs" in first
+
+    qtbot.wait(1100)  # the acknowledgement carries a wall-clock time
+    screen._refresh_btn.click()
+    assert seen[-1] != first
+
+
+def test_renaming_a_run_whose_directory_is_gone_explains_itself(
+    qtbot, runs_root: Path, make_run_record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-41: the atomic write recreated the directory with only annotations in
+    it, the listing then skipped it, and the run left the history."""
+
+    import shutil
+
+    run_dir, record = _write_run(runs_root, make_run_record)
+    screen = RunsScreen(runs_root=runs_root)
+    qtbot.addWidget(screen)
+    shutil.rmtree(run_dir)
+
+    warned: list[tuple] = []
+    monkeypatch.setattr(
+        rs.QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a))
+    )
+    monkeypatch.setattr(
+        QInputDialog, "getText", staticmethod(lambda *a, **k: ("golden run", True))
+    )
+    screen._rename(screen.entries[0])
+
+    assert not run_dir.exists(), "no ghost directory holding only annotations"
+    assert warned, "the user is told the rename did not happen"
+    assert str(run_dir) in warned[0][2]
+
+
+def test_a_run_whose_directory_vanished_cannot_be_re_run(
+    qtbot, runs_root: Path, make_run_record
+) -> None:
+    """M-47: the header lit Re-run for a record it could not even read."""
+
+    import shutil
+
+    run_dir, _ = _write_run(runs_root, make_run_record)
+    screen = RunsScreen(runs_root=runs_root)
+    qtbot.addWidget(screen)
+    assert screen._rerun_btn.isEnabled()
+
+    shutil.rmtree(run_dir)
+    screen._list.setCurrentRow(-1)
+    screen._list.setCurrentRow(0)
+
+    assert screen.result_card.record is None
+    assert str(run_dir) in screen.result_card._placeholder.text()
+    assert not screen._rerun_btn.isEnabled()
+    assert str(run_dir) in screen._rerun_btn.toolTip()
+
+
+def _skeleton(runs_root: Path, make_run_record) -> Path:
+    """The record the runner writes at task start and nothing ever finishes."""
+
+    run_dir = allocate_run_dir(runs_root, "amp2-ext")
+    write_record(
+        run_dir,
+        make_run_record(run_dir=run_dir, overall=TaskStatus.PENDING, stages=[]),
+    )
+    return run_dir
+
+
+def test_a_run_stuck_in_pending_explains_itself_and_can_be_removed(
+    qtbot, runs_root: Path, make_run_record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-43: prune_runs refuses a pending run on purpose and the GUI offered
+    no delete, so a run killed mid-flight stayed in the list for ever over an
+    empty stage table that explained nothing."""
+
+    from PyQt5.QtWidgets import QMessageBox
+
+    run_dir = _skeleton(runs_root, make_run_record)
+    screen = RunsScreen(runs_root=runs_root)
+    qtbot.addWidget(screen)
+    screen.show()
+
+    card = screen.result_card
+    assert card.record is not None
+    assert card._stage_tree.topLevelItemCount() == 0
+    assert "no stage" in card._stop_reason.text()
+    assert not card._stop_reason.isHidden()
+
+    actions: dict[str, object] = {}
+    real_exec = rs.QMenu.exec_
+    rs.QMenu.exec_ = lambda self, *a, **k: actions.update(  # type: ignore
+        {a.text(): a for a in self.actions() if a.text()}
+    )
+    try:
+        screen._on_list_menu(screen._list.visualItemRect(screen._list.item(0)).center())
+        qtbot.wait(10)
+    finally:
+        rs.QMenu.exec_ = real_exec  # type: ignore[method-assign]
+
+    remove = actions["Delete this unfinished run..."]
+    assert remove.isEnabled()
+    monkeypatch.setattr(
+        rs.QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes)
+    )
+    remove.trigger()
+
+    assert not run_dir.exists()
+    assert screen.entries == []
+
+
+def test_a_finished_run_is_never_offered_for_deletion(qtbot, history) -> None:
+    """History is immutable; only the skeleton of a run that never ran goes."""
+
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+    screen.show()
+
+    actions: dict[str, object] = {}
+    real_exec = rs.QMenu.exec_
+    rs.QMenu.exec_ = lambda self, *a, **k: actions.update(  # type: ignore
+        {a.text(): a for a in self.actions() if a.text()}
+    )
+    try:
+        screen._on_list_menu(screen._list.visualItemRect(screen._list.item(0)).center())
+        qtbot.wait(10)
+    finally:
+        rs.QMenu.exec_ = real_exec  # type: ignore[method-assign]
+
+    remove = actions["Delete this unfinished run..."]
+    assert not remove.isEnabled()
+    assert remove.toolTip()
+
+
+# ============================================================================
+# review 2026-09-04: opening a file on a host that cannot (M-21)
+# ============================================================================
+
+
+def test_a_launcher_that_refuses_falls_back_to_the_built_in_viewer(
+    qtbot, history, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """xdg-open is installed, starts, finds no handler for a .log and exits 3.
+
+    Before, that was indistinguishable from success: the click did nothing at
+    all and the user was left looking at an unchanged screen.
+    """
+
+    def refuses(_path):
+        raise OSError("nothing on this host could open it: xdg-open exited 3")
+
+    monkeypatch.setattr(rs, "open_in_os", refuses)
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+
+    target = screen.entries[0].run_dir / "logs" / "calibre.log"
+    screen._open_path(target)
+
+    assert screen.in_app_view_path() == target
+    assert "output" in screen._log_view.text()
+    assert "exited 3" in screen._log_note.text()
+
+
+def test_the_built_in_viewer_refuses_a_binary_and_says_so_instead(
+    qtbot, history, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane full of NULs helps nobody; that one gets a dialog naming it."""
+
+    warned: list[tuple] = []
+    monkeypatch.setattr(rs, "can_open", lambda *a, **k: False)
+    monkeypatch.setattr(
+        rs.QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a))
+    )
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+
+    blob = history / "svdb.bin"
+    blob.write_bytes(b"\x00\x01\x02binary\x00")
+    screen._open_path(blob)
+
+    assert screen.in_app_view_path() is None
+    assert warned and str(blob) in warned[0][2]
+
+
+def test_the_built_in_viewer_refuses_a_file_too_large_to_hold(
+    qtbot, history, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An extracted DSPF is hundreds of megabytes; loading one would take the
+    session with it."""
+
+    monkeypatch.setattr(rs, "can_open", lambda *a, **k: False)
+    monkeypatch.setattr(rs, "IN_APP_VIEW_MAX_BYTES", 16)
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+
+    big = history / "amp2.dspf"
+    big.write_text("* extracted netlist, and then some\n", encoding="utf-8")
+    assert screen.show_in_app(big) is False
+
+
+def test_a_directory_is_never_shown_in_the_built_in_viewer(qtbot, history) -> None:
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+    assert screen.show_in_app(screen.entries[0].run_dir) is False
 
 
 # ============================================================================

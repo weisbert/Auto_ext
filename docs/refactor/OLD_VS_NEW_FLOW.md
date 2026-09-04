@@ -100,14 +100,23 @@ si 被强杀之后可以直接重试。
 ### D3. jivaro 开关的作用域变了 ⚠️ **改变你的日常操作方式**
 
 - **老**：`ifJivaro: Yes/No` —— **每个 task 一个**。
-- **新**：`recipe.reduction.enabled` —— **每个配方一个**，而配方是多单元共享的。
+- **中间态（2026-08 ~ 2026-09-04）**：`recipe.reduction.enabled` —— 每个配方一个。
+- **新（2026-09-04 起）**：**run bar 上的 jivaro 勾选框，每次运行一个**。
+
+那个中间态有两个开关管一个结果：勾了 stage 还得配方里 `reduction.enabled` 也为真，
+任一为假就静默跳过，而两行在表单里隔得很远。owner 2026-09-04 裁定
+「关于这一次运行的决定归 run bar」（`UX_VALIDATION.md` §5.7），
+`reduction.enabled` 因此整个删掉：**勾了 jivaro 就跑，没勾就不跑**。
+配方里剩下的 `reduction:` 段是 Jivaro 真正跑起来之后**拿到的参数**
+（频率上限、误差上限、criterion、输出 view 后缀）。
 
 `ReductionSettings` 的 docstring 明说：per-cell 的 `JivaroOverride` 是**故意删掉**的，
-"需要不同 reduction 设置的单元，就该用第二份配方"。
+"需要不同 reduction 设置的单元，就该用第二份配方"—— 这一条仍然成立，它说的是**参数**，
+不是开关。
 
-**后果**：以前一张任务表里"A 单元做 jivaro、B 单元不做"是一行配置；
-现在需要两份配方，单元表里分别指过去。这是**设计决定不是 bug**，但它改变了你的操作习惯，
-所以要你点头。
+**后果**：以前一张任务表里"A 单元做 jivaro、B 单元不做"是一行配置；现在是**分两次跑**
+（勾上 jivaro 跑 A，取消勾选跑 B），而不是两份配方 —— 只有当两个单元需要**不同的
+Jivaro 参数**时才需要第二份配方。这是**设计决定不是 bug**。
 
 ### D4. `viewsToReduce`：从"不碰"到"托管但抄错初值"
 

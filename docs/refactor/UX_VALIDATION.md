@@ -154,3 +154,225 @@ agent，给它一个具体任务，例如：
   **Setup 编辑器落地那天，把这两个对象加进第 1 层。**
 - DECISIONS #19 已按用户裁定改写（猜测枚举 → 可编辑下拉框）。**其余 22 条决定同样是在
   一台没有 Cadence 的机器上替用户做的**，同样没有经过第 3 层。它们排在 backlog 里。
+
+## 五、第二轮（2026-09-04）：三层没量到的维度，和补上的七把尺子
+
+> 立档于 2026-09-04。起因是用户在真实使用里又撞到四条：LVS 失败后两个「看报告」按钮一个没用；
+> recipe 改了忘保存、回来就没了，而且「连 RC / R only 这种常见 extraction type 都没有」；cells 列
+> 「高亮即选中」；点过一次 Run 之后再新增、再点 Run 就做不到。全部是用户侧才暴露的，全部不是逻辑错误。
+
+### 5.1 为什么三层全绿
+
+第三节的三层各量一件事：层 1 量「字段 → 是否绑了控件」，层 2 量「用户能碰的 → 用户能看见的」，
+层 3 量「控件文本够不够一个不知道答案的人用」。这四条各自落在**三层都没量的维度**上：
+
+| 样本 | 三层为什么没拦住 | 缺的尺子 |
+|---|---|---|
+| 「Show N discrepancies」点了没反应 | 层 1 只量「字段→控件」，没人量反方向「控件→效果」；层 2 的 16 条旅程没有一条走到失败态；`test_result_card.py` 直接调 `show_lvs_detail()` 只断言「不抛异常」 | **A 控件→可见效果**（含退化态：滚动范围 0、路径不存在、N=0/1/多）；**E 错误路径旅程** |
+| 切到另一个 recipe，编辑没了 | 层 2 的旅程是线性的「编→存→读回」；没人枚举「带着未保存编辑时发生的每一种迁移」 | **T 状态迁移 × 未保存编辑矩阵**：行 = 每个可编辑处，列 = 每种会重建/替换/写盘的迁移；每格只能是 保留 / 询问 / 静默丢弃 / 失步 / 静默使用 |
+| 「连 R only 都没有」 | 15 个 extract type 早就在模型和 catalog 里；层 1 到「字段绑了控件」为止，不问**控件在默认密度下有没有画出来**；层 3 的 dump 只出一种密度 | **V 渲染可见性**（isVisible 而非 isBound，按密度各 dump 一次） |
+| 「想复刻 Quantus 界面」 | 没人拿**厂商工具**当 field list 做可达性审计；catalog 只和自己的模型互查 | **D 领域对齐**：Quantus GUI / 手册 → catalog 行 → 控件 → 模板行 → readback，每一跳都要闭合 |
+| 高亮即选中 | 判断题 | **W 走查 + 交互约定核对表**（所有「选择/悬停/焦点驱动的状态变化」和「同义控件成对出现」列出来让人判） |
+| 第二次 Run 做不到 | 全套 GUI 测试每个动作只做**一次**；`v2.py` 的「二有其二」只用在数据上 | **N 动作二有其二**：run→改→run、import→import、revert→edit、切项目→切回，第二次必须和第一次不同 |
+
+### 5.2 两条元规则
+
+1. **两个客户端。** 每个屏幕有两个客户端：测试和用户。一条测试若能在用户失败时仍然通过，它量的就是
+   错的客户端。本轮每条修复都必须带一条**穿过控件**（`click()` / `trigger()` / `keyClicks`）、
+   **断言用户可见结果或磁盘内容**、**对旧代码失败**的测试。`test_project_screen.py` 里有一条
+   点了真按钮然后 `assertNotEmitted(save_requested)` 的测试——它证明按钮什么都不做，并把这叫通过。
+   这是这条规则要禁止的形状。
+2. **仪器本身也要被量。** 走查发现层 3 依赖的 `scripts/ui_inventory.py` 自己有 12 处盲区：它跳过
+   `editor is None` 的行（整个 extract 子表单不可见）、把 Cells 的 recipe 下拉列报成只读、根本没有
+   Runs 屏的 dumper、把指针行的那句提示丢掉、没有密度开关。**上一轮的走查根本量不到这一轮的东西。**
+   规则：每把尺子的机械半必须有自己的自检（dump 必须点到每个屏幕的名字；行数 ≥ 树上 isVisible 的控件数）。
+
+### 5.3 六把尺子各量出了什么
+
+（第七把尺子「单一归属」不在这张表里：它是 2026-09-04 owner 那条重叠裁定带出来的，
+展开在 5.7，机械半也落在 `tests/ui/test_reachability.py` 上。）
+
+六份只读账本共 147 条，去重后 **135 条**（高 52 / 中 65 / 低 18），全文在 backlog 的
+`docs/gui-review-2026-09-04-master-ledger.md`。用户报的四条只是其中 4 条。最重的几类：
+
+- **假动作**：`Import…` 成功提示「34 options set」但 `recipe_imported` 在主窗口没有任何接收者；
+  run bar 的「continue on LVS fail」读进 RunRequest 后被丢掉，runner 只看 recipe，卡片还反过来说
+  「这个选项是关的」；Cells 的「Import from tasks.yaml」被接到了新建项目向导上。
+- **失步**：切 recipe 时表单从过期的 `self._recipes` 重画，controller 里还留着旧编辑，下一次 Save 写的是
+  屏幕上已经看不到的值；Project 屏所有字段只在失焦提交，Ctrl+S 写旧值、关窗不问；按过一次
+  `File → Revert` 后 Recipes 屏再也不把编辑送进 controller。
+- **绿色的假 PASSED**：请求 stage 与 recipe stage 交集为空照样建目录写 `overall=passed`；工具退出 0
+  但没写 DSPF 记为 passed，界面标成「Not on this host」；runner 从不写失败判决，签名表是空的。
+- **崩溃**：`MainWindow._open_path` 没有 try/except，路径不存在或服务器上没有打开器时整个程序 abort；
+  同一次点击还会打开两次（RunsScreen 开一次、MainWindow 再开一次）。
+- **领域缺口**：`rlck_*` 静默出不含电感的网表（模板不发 `-ind_component`）；`*_to_substrate` 因
+  `-substrate_nets_file` 不可达而什么都不提；`global_nets` 整条命令没建模；手写的单行
+  `extract -selection all -type ...` 导入时被静默丢弃。
+- **能用但没法用**：整张 87 行表单的下拉框在 `currentTextChanged` 上提交、仓库里没有任何 `wheelEvent`
+  拦截，鼠标滚过表单会静默改掉光标下的下拉框，包括 extract type；`default X` 和 `unset — X` 是两种
+  契约共用一个词。
+
+### 5.4 进仓库的东西（机械半）
+
+| 尺子 | 文件 | 形状 |
+|---|---|---|
+| A 控件→效果 | `tests/ui/test_affordances.py` | 每个 QAbstractButton / QAction / 可点标签 要么有 ≥1 个接收者，要么在带理由的豁免集里；ResultCard / RunsScreen 的动作按钮在每种退化态下穿过控件点击必须产生可观察变化，且先断言 `scrollbar.maximum() > 0`，0 滚动范围永远不能算证据 |
+| T 迁移矩阵 | `tests/ui/test_transitions.py` | 矩阵参数化；对 HEAD 失败的格用 `xfail(strict=True, reason="M-nn")` 钉住，修复必须翻掉自己的 xfail |
+| E 错误路径 | `tests/ui/test_failure_journeys.py` | 15 条失败旅程：磁盘上造一个失败态的 run 目录，MainWindow + RunsScreen 接在一起，点每个按钮，断言打开了哪个文件 |
+| N 二有其二 | `tests/support/v2.py` + `tests/ui/test_second_run.py` | 「动作做两遍、第二遍不同」的 helper 和它的第一批用例 |
+| V/W 仪器 | `scripts/ui_inventory.py` + `tests/test_ui_inventory.py` | 修 12 处盲区，加密度开关、enabled/visible/receivers/scroll-range 列、Runs 屏 dumper，以及仪器自检 |
+| D 领域对齐 | `tests/ui/test_reachability.py` 扩展 | `currently: absent` 的行必须画成禁用的「未接线」行或进带理由的豁免集 |
+| **O 单一归属** | `tests/ui/test_reachability.py` 再扩展 | 带 `screen:` 的行只在那个屏幕被编辑、别处只许放无值的链接；每个 run bar 控件恰好接到一个 GUI 真的传了的 runner 入参，且没有 recipe 孪生行。**这一把量的是屏幕之间的关系，前六把量的都是单个界面自己** —— 见 5.7 |
+
+判断半（W 走查、D 对手册的映射）不进 CI，每轮 GUI 改动之后、送红区之前跑一次。
+`extUser.pdf` 第 3 章是 Quantus GUI 的逐字段参考（每节末尾有 `Quantus: <cmd> -<opt>` / `RSF: ?<var>` 对），
+不用截图也能做映射——探针命令在主账本 M-128。
+
+### 5.5 分波
+
+按「能不能立刻动」而不是按严重度：波 0 仪器（15）→ 波 1 干净文件（63）并行修，各簇独立 worktree，
+合并到 `review/rulers-2026-09-04`；波 2（43）撞另一个会话正在改的 `main_window.py` /
+`cells_screen.py` / `run_bar.py`，等它提交；波 3（14）要 owner 拍板（电感器件名、衬底网表、
+电源地寄生算不算、拒绝还是警告）或红区探针。用户报的四条原始 bug 里，三条在波 2。
+
+**波 3 的拍板 2026-09-04 回来了，而且不是逐条回来的。** owner 的原话是「你列给我让我
+决定的这些旋钮，说实话我一个都不懂，不懂的东西我大概率永远不会用」——这条比任何一条
+单独的答案都上位：**不理解 = 不提供**。它把尺子 D 的参照物从厂商手册换成了 owner 在
+Quantus GUI 里真正会动的那些，八条波 3 的账因此不是「实现」而是「记录一个决定」结掉的。
+展开在 5.6。
+
+### 5.6 尺子 D 换了参照物：「不理解 = 不提供」（2026-09-04 裁定）
+
+> 波 3 的 14 条里有 6 条是「等 owner 拍板」。把这 6 条列成一张选择题交上去，回来的
+> 不是答案，是一条更上位的规则：
+>
+> **「你列给我让我决定的这些旋钮 —— 说实话我一个都不懂，不懂的东西我大概率永远不会用。」**
+
+这句话推翻了本项目一直默认的那把尺子。**领域对齐（尺子 D）原来的参照物是厂商手册**：
+手册里有的选项，catalog 里就该有一行，表单上就该有一个控件，缺了就是缺口。裁定之后
+参照物变成了**owner 在 Quantus GUI 里真正会去动的那些**。规则一条：
+
+> **不理解 = 不提供。** owner 用不到的厂商选项不画进表单，走工具默认值，
+> **catalog 行上写清楚是哪个默认值、为什么不画** —— 豁免是一条被记录的决定，
+> 而「控件不存在」不是。
+> 反过来同样成立：**表单提供的东西，绝不允许悄悄产出一份不完整或非法的 deck。**
+
+两条推论，本轮各落地一次：
+
+- `extract -type` 十五个成员里**只画六个**（`none` / `r_only` / `c_only_decoupled` /
+  `c_only_coupled` / `rc_decoupled` / `rc_coupled`）。另外九个模板补不齐它们的契约 ——
+  六个 `rlc*`/`rlck*` 缺 `-ind_component`、`substrate_only` 和三个 `*_to_substrate`
+  缺 `substrate_nets_file` —— 选中就是**跑得通、报成功、网表里没有电感 / 没有衬底网络**。
+  新增 catalog 列 `choices_not_offered` + `not_offered_reason` 把「工具没有这个值」和
+  「工具有，我们不提供」分成两件事：`choices` 保持完整，否则 readback 和导入就再也
+  叫不出同事那份 deck 里写的是什么。model 拒绝这九个并在报错里点名缺的是哪个契约，
+  导入则降级成 catalog 默认值**并留下一行报告**说明降的是哪一条、为什么、降成了什么。
+- **假动作要么实现、要么撤掉。** `fail_on_unparsable_lvs_report` 是唯一一个
+  `currently: absent` 却还带着 `context_path`、因而被画成活控件的行 —— 勾与不勾毫无区别，
+  因为判决发生在 `CalibreTool.parse_result`，那里根本拿不到 recipe。实现它要把 policy
+  穿过整个 Tool 协议或挪到 runner 里判，都不小；所以撤掉 `context_path`，控件消失，
+  行和字段留下，把「实现它要付什么代价」写在原地。
+
+两条配套的规矩，都落在 `tests/ui/test_reachability.py` 的 `CATALOG_UNREACHABLE` 上：
+
+- **豁免理由必须自报是哪一种决定**：`owner ruled 2026-09-04` / `BLOCKED ON A PROBE` /
+  `NO LANDING SITE` / `RETIRED`。改之前十五条理由是「catalog 还不知道」「手册那一轮
+  还没回来」这种**等待**穿着决定的衣服——而 C5 早已把手册答案写到那些行上了。等待和
+  遗漏一年之后长得一模一样，所以理由必须说清自己在等谁。
+- **被裁掉的行必须交代工具默认是什么**（field solver 默认关、via cap 默认 true、
+  fringing cap 自 11.1 起默认 true、`min_res_centering` 默认 false、subnode 默认写出、
+  没有 `global_nets` 则 `-selection all` 真的包含 VDD/VSS）。手册没写默认值的行，
+  理由里必须**明说手册没写**，不许编——这和 `range_verified` 那一列是同一条规矩。
+
+还有一条不是「不提供」而是「提供但说清楚」：`metal_fill -type virtual` 在 Calibre LVS
+输入下是空转（手册原话如此），但它在 owner 跑了多年的每一份老 deck 里都有。删掉只省
+一行、代价是把那些 deck 全 diff 一遍，所以**留着**，事实写在 catalog 行和模板的一行
+Jinja 注释里，免得下一个人当成整洁化再删一次。至于「这颗 PDK 的 dummy fill 到底该怎么
+建模」——那是另一个问题，`question:` 保持打开。
+
+### 5.7 第七把尺子：单一归属（ONE CONCEPT, ONE OWNER，2026-09-04 裁定）
+
+> owner 原话：**「Recipe 和 Cell 两个屏幕有重叠：要跑哪些 stage 两边都有 —— 很乱，
+> 应该由 stage 选择器（run bar）说了算；输出的 av_extracted view 名字两边也都有 ——
+> 应该由 cell 说了算。」**
+
+**为什么前六把尺子全绿。** 5.3 的六把尺子每一把都只量**一个界面自己**：字段有没有绑控件
+（层 1）、控件点了有没有效果（尺子 A）、控件文本够不够（层 3）、动作做第二遍还行不行
+（尺子 N）。**一个概念的两份拷贝，每一份都单独通过全部六把。** 这就是 `stages`
+能同时长在 Recipes 表单和 run bar 上四个月、979 条 GUI 测试全绿的原因；也是
+Recipes 表单能在「set per cell, not per recipe」这句话旁边画出一个 catalog 默认值
+`av_ext` 的原因 —— 那个值不属于任何一个 cell，也不属于任何一个 project。
+
+**规则（backlog decision-008）。** 每个用户可见的概念，**有且只有一个屏幕显示并编辑它的值**：
+
+| 概念是什么 | 归属 |
+|---|---|
+| 关于**这一次运行**的决定（跑哪些 stage、几个 job、dry run、LVS 失败要不要继续） | **run bar** |
+| **每个 cell 自己的事实**（library / cell / view / ground net / 输出 view 名） | **Cells** |
+| **萃取物理**（corner、extract 规则、耦合门限、Jivaro 参数） | **recipe** |
+| **PDK 事实**（corner 字面量、deck 路径、寄生器件名） | **profile** |
+
+别的屏幕可以放一条**链接**指过去，但**不许显示值**。「链接」在
+`tests/ui/test_reachability.py` 里是机械定义的：`EditorKind.POINTER` 且
+`displayed_value() == ""`。不是「显示的值要保持正确」—— 要保护的性质不是正确性，
+是单一归属；一条重新开始显示东西的行，无论显示得对不对都必须挂。
+
+**这一轮退役的五样东西。** 每一样都是「一个决定，两个所有者，runner 在中间**静默地**
+把两边合起来」：
+
+1. **`Recipe.stages`** —— runner 交集了两次（`render.plan_targets` 在应用请求集合*之前*
+   过一遍，`runner._recipe_steps` 再过一遍）。在 Run 按钮正上方勾了、而九十行深的表单里
+   没写的 stage，**就是不跑，任何地方都不留一行字**。M-23 的拒绝留下来了，但只剩下唯一
+   还可能发生的那种：**请求集合为空**，在 run 目录被创建之前拒绝，并报出它接受的集合。
+2. **`Recipe.reduction.enabled`** —— 同一个缺陷的第二张脸：一个跨两个 section 的 AND，
+   任一为假就静默跳过整个 reduction。现在 **jivaro 勾了就跑，没勾就不在 record 里出现**
+   —— 不再有一行 `skipped` 让人去猜是谁决定的。
+3. **`Recipe.reduction.views_to_reduce`** —— cell 的 `out_file` 的第二份拷贝。
+   2026-08-24 那一轮把默认值改成 null 并从 DUT 解析，但**控件留着**：一旦填进去，
+   它只对 Jivaro 生效，而 Quantus 照旧写 `out_file` —— 那个「Jivaro 指向一个不存在的 view」
+   的 bug 只差一次敲键盘。**一个通常为空、空的时候去别处取值的可空控件，仍然是两个所有者**，
+   只不过其中一个平时不出声。
+4. **`ResourceProfile.max_workers`** —— 这把尺子的退化情形：**零个所有者**。
+   持久化在 `config/resources.yaml` 里，grep 证明没有任何代码解析它，它自己的注释还承认
+   `--jobs` 会覆盖它。删掉，而不是把它接成同一个决定的第四个输入。
+5. **指针行的「值」那一半**（`out_file` 和 `dspf_out_path`）—— 画的是
+   `_display_default(spec)`，即 **catalog 默认值**。这比一份过期拷贝更糟：它断言了一件
+   可能对这个项目里任何一个 cell 都不成立的事。改一次 widget 修掉整类，包括以后任何
+   带 `screen:` 的新行。
+
+**磁盘上的东西怎么办。** 红区那三份真配方带着 `stages:`、`reduction.enabled` 和
+`views_to_reduce: av_extracted`，`Recipe` 又是 `extra="forbid"` —— 不迁移就是
+**每一个配方都加载失败、列表空白、没有解释**，也就是 2026-08-28 那次红区事故本身。
+所以走 `upgrade_three_state_payload` 的先例：**加载时就地丢掉，一行日志点名丢了什么，
+并且同步改掉带注释的 raw 树**，否则下一次保存又把旧 key 写回去、升级在每次加载时重新发生。
+*「静默」是指「不停下来问」，不是「不留痕迹」*：一个被收窄过的 `stages: [si, calibre]`
+是某个人的意图，日志必须把它念出来，run bar 第一次打开这个项目时应当用它做种子
+（见 `scratchpad/handover_runbar.md`）。`config/resources.yaml` 的
+`max_workers` 同理，因为 migrate 和新建项目向导都写过它。
+
+**`continue_on_lvs_fail` 是半成品，而且它自己说了。** 它是关于**这一次尝试**的决定，
+所以概念上完全归 run bar。今天：`run_tasks` / `RunWorker` 都收
+`continue_on_lvs_fail: bool | None` 了，`None` 表示「调用方没有意见」，回退到
+`recipe.policy`；解析出来的那个值就是 `RunRecord` 记下的值，所以**结果卡片不可能再和
+这次运行说的不一样** —— 而在此之前，run bar 的勾选框被读进 `RunRequest` 然后被丢掉，
+卡片再回过头告诉用户「continue_on_lvs_fail 是关的」。剩下的一步在
+`cells_screen._dispatch` 里，那个文件另一个会话正在重写，所以 recipe 上那一行**暂时留着**，
+`tests/ui/test_reachability.py` 用 `xfail(strict=True, reason="M-133/E-1: …")` 钉住这一格
+—— **接手的会话必须翻掉自己的 xfail**，这是 5.4 的规矩。
+
+**机械半**（`tests/ui/test_reachability.py`，两条断言就是整把尺子）：
+
+| 断言 | 形状 |
+|---|---|
+| (a) 带 `screen:` 的行在**且仅在**那个屏幕上被编辑，别的屏幕不显示它的值 | `SCREEN_BINDERS` 三张表 + 对每条 pointer 行断言 `displayed_value() == ""`、`link_label()` 非空 |
+| (b) 每个 run bar 控件恰好接到一个 runner 入参，**GUI 真的传了它**，且 catalog 里没有绑到 Recipe 字段的孪生行 | `inspect.signature(run_tasks)`；用 `ast` 读 `cells_screen.py` 里 `RunWorker(...)` 的关键字（要量的是这个参数**有没有被写出来**）；`recipe_field_path is None` |
+
+**判断半（不进 CI）**：新增一条带 `screen:` 的 catalog 行、或者往 run bar 上加一个控件时，
+先问一句「这个概念今天由谁拥有」，再问「另一边要不要一条链接」。
+
+**尺子的下一格，本轮没做。** catalog 侧还有一条便宜的检查：断言没有两行落在同一个
+`(target, section, option)` 三元组上。今天有 15 处三元组重合，但其中大部分是
+**一行由几个事实拼出来**（`inputView` = library/cell/out_file，`-design_cell_name` =
+cell/layout_view/library）—— 合法的组合和真正的双所有者长得一样，分开它们需要逐条判断
+「这是拼装还是重复」，那是一次独立的复核，不是这一轮能顺手带过的。
+

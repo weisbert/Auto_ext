@@ -163,7 +163,11 @@ def assert_semantics_preserved(config_dir: Path, report: MigrationReport) -> Non
                 assert option.recipe_field_path is not None, name
                 assert _get(recipe, option.recipe_field_path) == value, name
 
-        assert recipe.reduction.enabled == task.jivaro.enabled
+        # ``task.jivaro.enabled`` has no Recipe field to land in any more:
+        # whether the reduction runs is ticked on the run bar per dispatch.
+        # The migration reports the drop rather than silently losing it -- see
+        # test_the_jivaro_switch_is_reported_as_moving_to_the_run_bar.
+        assert not hasattr(recipe.reduction, "enabled")
         if task.jivaro.frequency_limit is not None:
             assert recipe.reduction.frequency_limit_ghz == task.jivaro.frequency_limit
         if task.jivaro.error_max is not None:
@@ -246,9 +250,10 @@ def test_demo_config_carries_the_jivaro_block_into_the_recipe(
 ) -> None:
     report = run_migration(DEMO_CONFIG, tmp_path)
     recipe = report.recipes[0]
-    assert recipe.reduction.enabled is True
+    # The parameters, and only the parameters.
     assert recipe.reduction.frequency_limit_ghz == 14.0
     assert recipe.reduction.error_max_pct == 2.0
+    assert not hasattr(recipe.reduction, "enabled")
     assert report.profile.profile_id == "hn001"
     assert report.profile.tech_name == "HN001"
 
@@ -496,6 +501,46 @@ def test_two_knob_sets_become_two_recipes_named_by_what_differs(
 
 
 def test_two_jivaro_settings_become_two_recipes(tmp_path: Path, elsewhere: None) -> None:
+    """Different reduction *parameters* still split. Different on/off no longer does.
+
+    Two cells whose only difference was ``enabled`` used to become
+    ``...-red`` and ``...-nored``. After the 2026-09-04 ownership ruling those
+    two recipes would be byte identical -- nothing on a Recipe decides whether
+    the reduction runs -- so the pair collapses and the switch is reported as
+    moving to the run bar instead. What still splits a library is a real
+    difference in what Jivaro is *given*.
+    """
+
+    config = write_config(
+        tmp_path / "cfg",
+        project=BASE_PROJECT,
+        tasks=(
+            "- library: LIB\n  cell: inv\n  lvs_layout_view: layout\n  out_file: av_ext\n"
+            "  jivaro: {enabled: true, frequency_limit: 14, error_max: 2}\n"
+            "- library: LIB\n  cell: buf\n  lvs_layout_view: layout\n  out_file: av_ext\n"
+            "  jivaro: {enabled: true, frequency_limit: 40, error_max: 5}\n"
+        ),
+    )
+    report = run_migration(config, tmp_path / "out")
+    assert sorted(r.recipe_id for r in report.recipes) == [
+        "rc-typical-55c-14ghz",
+        "rc-typical-55c-40ghz",
+    ]
+    by_id = {r.recipe_id: r for r in report.recipes}
+    assert by_id["rc-typical-55c-14ghz"].reduction.error_max_pct == 2.0
+    assert by_id["rc-typical-55c-40ghz"].reduction.error_max_pct == 5.0
+
+
+def test_two_cells_that_differ_only_in_reduction_on_off_become_one_recipe(
+    tmp_path: Path, elsewhere: None
+) -> None:
+    """And the dropped switch is reported, not silently lost.
+
+    "Silent" is what this project exists to remove: a user who wrote
+    ``jivaro: {enabled: false}`` meant something, and the migration report is
+    where they find out where that meaning went.
+    """
+
     config = write_config(
         tmp_path / "cfg",
         project=BASE_PROJECT,
@@ -507,13 +552,15 @@ def test_two_jivaro_settings_become_two_recipes(tmp_path: Path, elsewhere: None)
         ),
     )
     report = run_migration(config, tmp_path / "out")
-    assert sorted(r.recipe_id for r in report.recipes) == [
-        "rc-typical-55c-nored",
-        "rc-typical-55c-red",
+    assert [r.recipe_id for r in report.recipes] == ["rc-typical-55c"]
+
+    dropped = [
+        d
+        for d in report.dispositions
+        if d.source == "tasks.yaml:jivaro.enabled" and d.action == "dropped"
     ]
-    by_id = {r.recipe_id: r for r in report.recipes}
-    assert by_id["rc-typical-55c-red"].reduction.enabled is True
-    assert by_id["rc-typical-55c-nored"].reduction.enabled is False
+    assert dropped, "the reduction switch vanished with nothing said about it"
+    assert "run bar" in (dropped[0].target or "")
 
 
 def test_recipe_ids_are_stable_across_runs(tmp_path: Path, elsewhere: None) -> None:
@@ -984,15 +1031,41 @@ def test_open_questions_only_name_values_that_were_written(
 def test_open_questions_are_written_next_to_the_value(
     tmp_path: Path, elsewhere: None
 ) -> None:
+    """The example row is chosen by predicate, never by name.
+
+    This used to name ``coupling_cap_threshold_absolute`` as its specimen of a
+    value nobody has confirmed. Reading the vendor manual and answering that
+    question -- deleting the row's ``question:`` -- then turned this test red,
+    which is exactly backwards: answering a question is progress, and the
+    thing worth guarding is that *whatever* is still unconfirmed reaches the
+    file beside its own value. So ask the report which questions landed in
+    this recipe and check every one of them.
+    """
+
     report = run_migration(REAL_CONFIG, tmp_path)
-    recipe_text = (tmp_path / "recipes" / f"{report.recipes[0].recipe_id}.yaml").read_text(
-        encoding="utf-8"
-    )
+    recipe_id = report.recipes[0].recipe_id
+    recipe_text = (tmp_path / "recipes" / f"{recipe_id}.yaml").read_text(encoding="utf-8")
+
+    asked = [q for q in report.open_questions if q.file == f"recipes/{recipe_id}.yaml"]
+    assert asked, "the migration reported no open question against this recipe"
     assert "NEEDS CONFIRMATION" in recipe_text
-    assert "coupling_cap_threshold_absolute" in recipe_text
+
     lines = recipe_text.splitlines()
-    index = next(i for i, line in enumerate(lines) if "coupling_cap_threshold_absolute:" in line)
-    assert any("NEEDS CONFIRMATION" in line for line in lines[max(0, index - 3) : index])
+    for question in asked:
+        leaf = question.field_path.rsplit(".", 1)[-1]
+        index = next(
+            (i for i, line in enumerate(lines) if line.strip().startswith(f"{leaf}:")),
+            None,
+        )
+        assert index is not None, f"{question.field_path} was asked about but never written"
+        # The comment block immediately above the value, however many lines the
+        # question wrapped to.
+        above = []
+        cursor = index - 1
+        while cursor >= 0 and lines[cursor].strip().startswith("#"):
+            above.append(lines[cursor])
+            cursor -= 1
+        assert any("NEEDS CONFIRMATION" in line for line in above), question.field_path
 
 
 def test_generated_files_say_the_sources_were_left_alone(

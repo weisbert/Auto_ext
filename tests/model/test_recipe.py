@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from auto_ext.catalog.spec import Owner, builtin_catalog
 from auto_ext.core.errors import ConfigError
 from auto_ext.core.patch_models import BaseFingerprint, PatchHunk, TemplatePatch
-from auto_ext.model.common import STAGE_ORDER, Stage
+from auto_ext.model.common import Stage
 from auto_ext.model.recipe import (
     CATALOG_EXEMPT_FIELDS,
     PROFILE_FALLBACK_FIELDS,
@@ -89,13 +89,11 @@ def _get(obj: object, path: str) -> object:
 def test_a_default_recipe_is_grouped_and_complete() -> None:
     recipe = make_recipe()
     assert recipe.schema_version == RECIPE_SCHEMA_VERSION
-    assert recipe.stages == list(STAGE_ORDER)
     assert recipe.extraction.extract[0].type is ExtractType.RC_COUPLED
     assert len(recipe.extraction.extract) == 1, "one rule unless asked otherwise"
     assert recipe.extraction.metal_fill is MetalFill.VIRTUAL
     assert recipe.output.emit == [OutputKind.EXTRACTED_VIEW]
     assert recipe.lvs.deck_variant == "wodio"
-    assert recipe.reduction.enabled is False
     assert recipe.policy.continue_on_lvs_fail is False
     assert recipe.patches == []
 
@@ -115,12 +113,17 @@ def test_recipe_id_must_be_a_slug() -> None:
             make_recipe(recipe_id=bad)
 
 
-def test_stages_must_be_non_empty_and_unique() -> None:
-    with pytest.raises(ValidationError, match="must not be empty"):
-        make_recipe(stages=[])
-    with pytest.raises(ValidationError, match="duplicates"):
-        make_recipe(stages=[Stage.SI, Stage.SI])
-    assert make_recipe(stages=[Stage.SI, Stage.CALIBRE]).stages == [Stage.SI, Stage.CALIBRE]
+def test_a_recipe_refuses_a_stage_list_outright() -> None:
+    """The field is gone, so passing one is a typo and must read as one.
+
+    ``Base`` forbids extra keys, which is what turns "this recipe still
+    declares stages" from a value that silently does nothing into an error
+    naming the key. Files on disk are the exception and are migrated instead
+    -- see :func:`test_a_recipe_that_still_declares_stages_loads_without_them`.
+    """
+
+    with pytest.raises(ValidationError, match="stages"):
+        make_recipe(stages=[Stage.SI, Stage.CALIBRE])
 
 
 def test_emit_must_name_at_least_one_output_form() -> None:
@@ -128,6 +131,62 @@ def test_emit_must_name_at_least_one_output_form() -> None:
         make_recipe(output={"emit": []})
     with pytest.raises(ValidationError, match="duplicates"):
         make_recipe(output={"emit": ["dspf", "dspf"]})
+
+
+def test_unticking_every_xy_class_is_refused_rather_than_written_as_a_bare_option() -> None:
+    """The DSPF form's checkbox list can be emptied in one click.
+
+    ``-output_xy`` is emitted outside the loop that writes its values, so an
+    empty list used to produce a bare ``-output_xy \\`` followed straight by
+    the next option -- an option with no operand, in a file Quantus reads
+    hours after the user clicked. Its two siblings, ``extraction.extract`` and
+    ``output.emit``, have refused an empty list from the start; this one was
+    the odd one out.
+    """
+
+    with pytest.raises(ValidationError, match="output_xy"):
+        make_recipe(output={"dspf": {"output_xy": []}})
+    assert make_recipe(output={"dspf": {"output_xy": ["MOS"]}}).output.dspf.output_xy == [
+        "MOS"
+    ]
+
+
+def test_a_fracture_length_under_five_is_refused_here_and_not_by_quantus() -> None:
+    """The tool errors on the whole command file, hours after the click.
+
+    A tight RF transmission line invites exactly the number that is refused:
+    the vendor floor is 5 (microns or squares, whichever unit is selected) and
+    below it Quantus rejects the deck outright. The literal ``infinite`` is
+    the LVS-input default and stays legal; 100 is what the manual recommends
+    for long transmission lines, and 50 is the accuracy floor it warns about.
+    """
+
+    with pytest.raises(ValidationError, match="5"):
+        make_recipe(extraction={"max_fracture_length": "3"})
+    for good in ("infinite", "5", "50", "100"):
+        recipe = make_recipe(extraction={"max_fracture_length": good})
+        assert recipe.extraction.max_fracture_length == good
+    with pytest.raises(ValidationError, match="infinite"):
+        make_recipe(extraction={"max_fracture_length": "as long as it takes"})
+
+
+def test_the_coupling_threshold_is_bounded_by_the_documented_femtofarad_range() -> None:
+    """0.01 was never 10 mF; the unit is femtofarads and the range is 0 to 100.
+
+    The catalog carried ``unit: F`` and a note saying the default was
+    physically impossible, which made the one knob that decides how many
+    coupling caps survive look untrustworthy. It is not: 0.01 fF is the
+    vendor's own example value, and anything above 100 is out of range.
+    """
+
+    assert make_recipe().extraction.coupling_cap_threshold_absolute == 0.01
+    assert make_recipe(
+        extraction={"coupling_cap_threshold_absolute": 100.0}
+    ).extraction.coupling_cap_threshold_absolute == 100.0
+    with pytest.raises(ValidationError):
+        make_recipe(extraction={"coupling_cap_threshold_absolute": 500.0})
+    with pytest.raises(ValidationError):
+        make_recipe(extraction={"coupling_cap_threshold_absolute": -1.0})
 
 
 def test_emit_is_a_list_so_one_run_can_produce_both_forms() -> None:
@@ -233,9 +292,10 @@ def test_recipe_from_catalog_reproduces_todays_values() -> None:
     assert recipe.extraction.max_fracture_length == "infinite"
     assert recipe.output.common.include_parasitic_res_model == "comment"
     assert recipe.output.dspf.output_xy[0] == "CANONICAL_RES"
-    # Unset, not "av_extracted": the literal was the live Jivaro bug, and the
-    # view to reduce now follows the DUT's out_file. See DUT_FALLBACK_FIELDS.
-    assert recipe.reduction.views_to_reduce is None
+    # No views_to_reduce at all since 2026-09-04: the view Jivaro reduces is
+    # the cell's out_file, derived in render._recipe_tree. A settable copy was
+    # the live Jivaro bug and, kept as an override, the way back to it.
+    assert "views_to_reduce" not in type(recipe.reduction).model_fields
     assert recipe.lvs.report_options == "S"
 
 
@@ -370,13 +430,15 @@ def test_to_snapshot_carries_the_seven_legacy_knobs_under_their_old_names() -> N
 
 
 def test_to_snapshot_carries_the_reduction_settings() -> None:
-    recipe = make_recipe(
-        reduction={"enabled": True, "frequency_limit_ghz": 40.0, "error_max_pct": 5.0}
-    )
-    snap = recipe.to_snapshot()
-    assert snap.jivaro.enabled is True
+    recipe = make_recipe(reduction={"frequency_limit_ghz": 40.0, "error_max_pct": 5.0})
+    snap = recipe.to_snapshot(jivaro_enabled=True)
     assert snap.jivaro.frequency_limit == 40.0
     assert snap.jivaro.error_max == 5.0
+    # ``enabled`` is the caller's answer now, not the recipe's: whether the
+    # reduction ran is a property of the dispatch. The recipe supplies what
+    # Jivaro is given once it runs, and nothing else.
+    assert snap.jivaro.enabled is True
+    assert make_recipe().to_snapshot().jivaro.enabled is False
 
 
 # ---- YAML round trip -----------------------------------------------------------
@@ -654,3 +716,127 @@ def test_the_recipe_that_shipped_before_the_change_still_loads(tmp_path: Path) -
     )
     recipe, _ = load_recipe_with_raw(path)
     assert recipe.output.common.include_parasitic_res_model == "comment"
+
+
+# ---- ONE CONCEPT, ONE OWNER (2026-09-04) -------------------------------------
+# The owner's ruling: "which stages to run appears on both screens -- the stage
+# selector should own it". Generalised in backlog decision-008 to one rule --
+# a run-time decision belongs to the run bar, a per-cell fact to Cells,
+# extraction physics to the recipe, a PDK fact to the profile. Four Recipe
+# fields lost their claim that day, and the three real recipes on the red-zone
+# disk still carry two of them, so the retirement has to be a load-time
+# migration and not a hand edit somebody is asked to remember.
+
+
+def _retired_recipe_text() -> str:
+    """A recipe written before the 2026-09-04 ownership ruling.
+
+    ``stages`` is deliberately *narrower* than the full order: a narrowed set
+    was an intent, so the log line has to name it rather than dropping it in
+    silence.
+    """
+
+    return (
+        "schema_version: 1\n"
+        "recipe_id: rc-owned-elsewhere\n"
+        "name: written before the ownership ruling\n"
+        "# which steps this recipe intends to run\n"
+        "stages:\n"
+        "- si\n"
+        "- calibre\n"
+        "reduction:\n"
+        "  enabled: true\n"
+        "  views_to_reduce: av_extracted\n"
+        "  output_view_suffix: _red\n"
+    )
+
+
+def test_a_recipe_that_still_declares_stages_loads_without_them(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``stages`` moved to the run bar, so the Recipe must not carry it.
+
+    The field is dropped on load -- the 2026-08-28 precedent, in place and
+    without stopping to ask -- and *silent means "does not stop to ask", not
+    "leaves no trace"*: one line names the file and the set that was dropped,
+    because a narrower set was somebody's intent.
+    """
+
+    import logging
+
+    path = tmp_path / "rc-owned-elsewhere.yaml"
+    path.write_text(_retired_recipe_text(), encoding="utf-8")
+
+    with caplog.at_level(logging.INFO, logger="auto_ext.model.recipe"):
+        recipe, raw = load_recipe_with_raw(path)
+
+    assert not hasattr(recipe, "stages"), (
+        "Recipe still carries stages; the run bar owns which stages run"
+    )
+    assert "stages" not in raw, (
+        "the comment-carrying tree still has stages, so the next save writes "
+        "it straight back and the upgrade un-happens on every load"
+    )
+    line = "\n".join(caplog.messages)
+    assert "stages" in line and "si, calibre" in line, (
+        f"the dropped set was not named in the log: {line!r}"
+    )
+
+
+def test_the_two_jivaro_fields_the_ruling_retired_are_dropped_on_load(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``reduction.enabled`` and ``reduction.views_to_reduce`` go the same way.
+
+    ``enabled`` was half of an AND nobody could see -- the stage had to be
+    ticked *and* the flag set, and either one false skipped the reduction in
+    silence. ``views_to_reduce`` was a live second copy of the cell's
+    ``out_file``: typed non-null it still won for Jivaro alone, which is
+    exactly the "Jivaro pointed at a view that does not exist" bug the
+    2026-08-24 ruling closed.
+    """
+
+    import logging
+
+    path = tmp_path / "rc-owned-elsewhere.yaml"
+    path.write_text(_retired_recipe_text(), encoding="utf-8")
+
+    with caplog.at_level(logging.INFO, logger="auto_ext.model.recipe"):
+        recipe, raw = load_recipe_with_raw(path)
+
+    assert not hasattr(recipe.reduction, "enabled")
+    assert not hasattr(recipe.reduction, "views_to_reduce")
+    # The parameters Jivaro genuinely owns stay put.
+    assert recipe.reduction.output_view_suffix == "_red"
+    assert "enabled" not in raw["reduction"]
+    assert "views_to_reduce" not in raw["reduction"]
+    line = "\n".join(caplog.messages)
+    assert "reduction.enabled" in line and "reduction.views_to_reduce" in line
+
+
+def test_the_retirement_survives_a_save(tmp_path: Path) -> None:
+    """The 2026-08-28 non-negotiable: the raw tree has to follow the payload."""
+
+    path = tmp_path / "rc-owned-elsewhere.yaml"
+    path.write_text(_retired_recipe_text(), encoding="utf-8")
+
+    recipe, raw = load_recipe_with_raw(path)
+    text = dump_recipe_yaml(recipe, raw=raw)
+
+    assert "stages:" not in text
+    assert "views_to_reduce" not in text
+    assert "\n  enabled:" not in text
+    path.write_text(text, encoding="utf-8")
+    again, _ = load_recipe_with_raw(path)
+    assert again.reduction.output_view_suffix == "_red"
+
+
+def test_the_resource_profile_no_longer_carries_max_workers() -> None:
+    """A persisted field nothing read: the ruler's degenerate case.
+
+    ``--jobs`` / the run bar's spin box is the only thing that has ever set
+    parallelism -- grep proved nothing resolves ``resources.max_workers`` --
+    so the field was a third copy with **zero** owners.
+    """
+
+    assert "max_workers" not in ResourceProfile.model_fields

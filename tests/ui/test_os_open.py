@@ -23,6 +23,25 @@ def _phase59_bc_make_file(tmp_path: Path, name: str = "rendered.qci") -> Path:
     return p
 
 
+class _FakeProcess:
+    """Enough of ``Popen`` for :func:`auto_ext.ui.os_open._settle`.
+
+    ``status=None`` means the launcher is still running when the settle window
+    expires, which is what a launcher that *is* the viewer's parent does and
+    which the module reads as success.
+    """
+
+    def __init__(self, status: int | None = 0) -> None:
+        self.status = status
+        self.waits: list[float] = []
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.waits.append(timeout if timeout is not None else -1.0)
+        if self.status is None:
+            raise subprocess.TimeoutExpired(cmd="launcher", timeout=timeout or 0)
+        return self.status
+
+
 def test_phase59_bc_open_in_os_dispatches_startfile_on_windows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -53,11 +72,7 @@ def test_phase59_bc_open_in_os_dispatches_open_on_macos(
 
     def fake_popen(argv, *args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(argv))
-
-        class _Dummy:
-            pass
-
-        return _Dummy()
+        return _FakeProcess(0)
 
     monkeypatch.setattr(os_open.subprocess, "Popen", fake_popen)
 
@@ -75,11 +90,7 @@ def test_phase59_bc_open_in_os_dispatches_xdg_open_on_linux(
 
     def fake_popen(argv, *args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(argv))
-
-        class _Dummy:
-            pass
-
-        return _Dummy()
+        return _FakeProcess(0)
 
     monkeypatch.setattr(os_open.subprocess, "Popen", fake_popen)
 
@@ -132,17 +143,32 @@ def test_phase59_bc_open_in_os_missing_launcher_raises_oserror(
 
 
 class _Recorder:
-    """Stand-in for ``subprocess.Popen`` that records argv and kwargs."""
+    """Stand-in for ``subprocess.Popen`` that records argv and kwargs.
 
-    def __init__(self, missing: tuple[str, ...] = ()) -> None:
+    ``missing`` names launchers whose binary is not installed (``Popen``
+    itself raises); ``refuses`` names launchers that start and then exit with
+    the given status, which is what ``xdg-open`` does when no application is
+    registered for the file type.
+    """
+
+    def __init__(
+        self,
+        missing: tuple[str, ...] = (),
+        refuses: dict[str, int] | None = None,
+        status: int | None = 0,
+    ) -> None:
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
         self._missing = missing
+        self._refuses = refuses or {}
+        self._status = status
 
     def __call__(self, argv: list[str], **kwargs: Any) -> object:
         self.calls.append((list(argv), dict(kwargs)))
         if argv[0] in self._missing:
             raise FileNotFoundError(2, f"No such file or directory: {argv[0]!r}")
-        return object()
+        if argv[0] in self._refuses:
+            return _FakeProcess(self._refuses[argv[0]])
+        return _FakeProcess(self._status)
 
     @property
     def argvs(self) -> list[list[str]]:
@@ -245,13 +271,14 @@ def test_error_names_every_launcher_that_was_tried(
     assert str(target) in message
 
 
-def test_a_launcher_that_starts_and_then_fails_is_not_retried(
+def test_a_launcher_that_cannot_be_executed_is_not_retried(
     target: Path, linux: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only a *missing binary* justifies trying the next launcher.
+    """A launcher that cannot be *started* is a real problem the user must see.
 
-    Anything else (permission denied, exec format error) is a real problem the
-    user must see, not something a second launcher would fix.
+    Permission denied, exec format error: a second launcher would not fix any
+    of those, so they are raised rather than swallowed. (A launcher that does
+    start and then exits non-zero is a different case -- see below.)
     """
 
     attempts: list[list[str]] = []
@@ -362,3 +389,130 @@ def test_containing_folder_of_a_missing_path_raises_file_not_found(
 ) -> None:
     with pytest.raises(FileNotFoundError):
         open_containing_folder(tmp_path / "never_written.dspf")
+
+
+# ---- M-21: a launcher that starts and then does nothing --------------------
+#
+# The symptom this section exists for: "I click Open LVS report and nothing
+# happens. No window, no error, nothing." xdg-open is installed, it starts, it
+# finds no application registered for the file type, and it exits 3 -- long
+# after the old code had stopped watching.
+
+
+def test_a_launcher_that_refuses_the_file_is_reported(
+    target: Path, linux: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    popen = _Recorder(refuses={"xdg-open": 3, "gio": 3})
+    monkeypatch.setattr(os_open.subprocess, "Popen", popen)
+
+    with pytest.raises(OSError) as exc_info:
+        open_in_os(target)
+    message = str(exc_info.value)
+    assert str(target) in message
+    assert "xdg-open exited 3" in message
+    assert "gio exited 3" in message
+
+
+def test_the_next_launcher_is_tried_when_the_first_one_refuses(
+    target: Path, linux: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """xdg-utils installed but useless, GLib's opener right behind it."""
+
+    popen = _Recorder(refuses={"xdg-open": 4})
+    monkeypatch.setattr(os_open.subprocess, "Popen", popen)
+
+    open_in_os(target)
+    assert popen.argvs == [
+        ["xdg-open", str(target)],
+        ["gio", "open", str(target)],
+    ]
+
+
+def test_a_launcher_still_running_after_the_settle_window_counts_as_success(
+    target: Path, linux: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """xdg-open's generic fallback *is* the viewer's parent and never exits.
+
+    Waiting for it would be waiting for the user to close the document, so the
+    wait is bounded and "still running" is the answer we want.
+    """
+
+    popen = _Recorder(status=None)
+    monkeypatch.setattr(os_open.subprocess, "Popen", popen)
+
+    open_in_os(target)
+    assert popen.argvs == [["xdg-open", str(target)]]
+
+
+def test_the_gui_thread_is_never_blocked_for_longer_than_the_settle_window(
+    target: Path, linux: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    processes: list[_FakeProcess] = []
+
+    def popen(argv: list[str], **kwargs: Any) -> object:
+        process = _FakeProcess(None)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(os_open.subprocess, "Popen", popen)
+    open_in_os(target)
+    assert processes[0].waits == [os_open.LAUNCH_SETTLE_S]
+    assert os_open.LAUNCH_SETTLE_S <= 1.0, "this blocks the GUI thread"
+
+
+def test_settle_zero_is_the_old_fire_and_forget(
+    target: Path, linux: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that must not block can still have the old behaviour."""
+
+    popen = _Recorder(refuses={"xdg-open": 3})
+    monkeypatch.setattr(os_open.subprocess, "Popen", popen)
+
+    open_in_os(target, settle_s=0)  # does not raise: nothing was watched
+    assert popen.argvs == [["xdg-open", str(target)]]
+
+
+# ---- can this host open a file at all? -------------------------------------
+
+
+def test_can_open_is_false_when_no_launcher_is_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The office server: no xdg-utils, no GLib tools, X11 forwarding only."""
+
+    monkeypatch.setattr(os_open.shutil, "which", lambda _name: None)
+    assert os_open.can_open("linux") is False
+    assert os_open.file_opener("linux") is None
+
+
+def test_can_open_names_the_launcher_it_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        os_open.shutil, "which", lambda name: "/usr/bin/gio" if name == "gio" else None
+    )
+    assert os_open.can_open("linux") is True
+    assert os_open.file_opener("linux") == "/usr/bin/gio"
+
+
+def test_windows_can_always_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ShellExecuteW is part of the OS; there is nothing to look for on PATH."""
+
+    monkeypatch.setattr(os_open.shutil, "which", lambda _name: None)
+    assert os_open.can_open("win32") is True
+    assert os_open.launcher_names("win32") == ()
+
+
+def test_the_launcher_list_is_the_one_the_probes_report() -> None:
+    """core/health.py cannot import this module (core never imports ui) and
+    deploy/doctor.sh is not Python at all, so the three lists are asserted to
+    agree here rather than trusted to."""
+
+    from pathlib import Path as _Path
+
+    from auto_ext.core import health
+
+    assert os_open.launcher_names("linux") == health.FILE_OPENERS
+
+    doctor = _Path(__file__).resolve().parents[2] / "deploy" / "doctor.sh"
+    text = doctor.read_text(encoding="utf-8")
+    for name in health.FILE_OPENERS:
+        assert name in text, f"deploy/doctor.sh does not probe {name}"

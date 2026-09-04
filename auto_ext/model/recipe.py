@@ -92,7 +92,6 @@ from auto_ext.core.patch_models import (
     TemplatePatch,
 )
 from auto_ext.model.common import (
-    STAGE_ORDER,
     AsWritten,
     Base,
     Frozen,
@@ -106,8 +105,11 @@ from auto_ext.model.run import JivaroSnapshot, RecipeSnapshot
 __all__ = [
     "CATALOG_EXEMPT_FIELDS",
     "DUT_FALLBACK_FIELDS",
+    "INDUCTOR_CONTRACT",
+    "NOT_OFFERED_EXTRACT_TYPES",
     "PROFILE_FALLBACK_FIELDS",
     "RECIPE_SCHEMA_VERSION",
+    "SUBSTRATE_CONTRACT",
     "BaseFingerprint",
     "CommonOutputSettings",
     "DspfOutput",
@@ -128,12 +130,17 @@ __all__ = [
     "RunPolicy",
     "TemplatePatch",
     "dump_recipe_yaml",
+    "RETIRED_RECIPE_FIELDS",
+    "RETIRED_RESOURCE_FIELDS",
     "load_recipe",
     "load_recipe_with_raw",
+    "offered_extract_types",
     "recipe_field_paths",
     "recipe_filename",
     "recipe_from_catalog",
     "save_recipe",
+    "upgrade_retired_fields",
+    "upgrade_retired_resource_fields",
 ]
 
 RECIPE_SCHEMA_VERSION = 1
@@ -161,15 +168,20 @@ PROFILE_FALLBACK_FIELDS: frozenset[str] = frozenset(
 #: is separate because the resolution needs the cell row, not the profile, and
 #: therefore happens in :func:`auto_ext.core.render._recipe_tree` against the
 #: ``DutSnapshot`` rather than in ``resolve_corner``.
-DUT_FALLBACK_FIELDS: frozenset[str] = frozenset(
-    {
-        #: "the view Quantus just wrote" -- the cell's ``out_file``. See the
-        #: field's own comment for why the old literal was a bug.
-        "reduction.views_to_reduce",
-    }
-)
+#:
+#: **Empty since 2026-09-04.** Its only member was
+#: ``reduction.views_to_reduce``, and a fallback is still two copies of one
+#: concept -- one of them merely usually unset. The ONE CONCEPT, ONE OWNER
+#: ruling collapsed it into the cell's ``out_file``, which the render tree now
+#: supplies unconditionally. The set stays as the place the next such field
+#: would be declared, and empty is the statement that there is not one.
+DUT_FALLBACK_FIELDS: frozenset[str] = frozenset()
 
-#: Recipe fields with no catalog row, and why. Everything else must have one.
+#: Recipe fields with no catalog row *that binds to them*, and why. Everything
+#: else must have one. Two shapes qualify: a field the catalog has never
+#: described at all, and a field whose row deliberately points at nothing --
+#: the second was added on 2026-09-04 and is the honest way to retire a
+#: control without deleting a field recipes on disk still carry.
 CATALOG_EXEMPT_FIELDS: frozenset[str] = frozenset(
     {
         # Envelope: identity, lineage and bookkeeping, not extraction settings.
@@ -183,6 +195,11 @@ CATALOG_EXEMPT_FIELDS: frozenset[str] = frozenset(
         "updated_at",
         # The escape hatch. By definition it holds what the catalog cannot.
         "patches",
+        # Has a catalog row; the row binds to nothing on purpose. Nothing
+        # reads this policy -- the LVS verdict is made where no recipe is in
+        # scope -- so on 2026-09-04 the row's context_path was dropped and the
+        # form stopped drawing a live control for it. See RunPolicy.
+        "policy.fail_on_unparsable_lvs_report",
     }
 )
 
@@ -211,6 +228,13 @@ class ExtractType(StrEnum):
     need ``-ind_component`` / ``-mutual_ind_component`` in the output section
     and neither template emits them. That is a template gap, tracked on the
     catalog row, not a reason to hide legal values here.
+
+    Nine members are nevertheless **not offered** and are refused by
+    :class:`ExtractRule` -- see :data:`NOT_OFFERED_EXTRACT_TYPES`. The enum
+    keeps all fifteen anyway, because refusing a value and being unable to
+    *name* it are different things: readback has to recognise the deck a
+    colleague wrote, the importer has to report what it read, and the refusal
+    message itself has to quote the member it is refusing.
     """
 
     NONE = "none"
@@ -228,6 +252,55 @@ class ExtractType(StrEnum):
     RLCK_DECOUPLED = "rlck_decoupled"
     RLCK_COUPLED = "rlck_coupled"
     RLCK_DECOUPLED_TO_SUBSTRATE = "rlck_decoupled_to_substrate"
+
+
+#: The two contracts an ``extract -type`` member can depend on and that this
+#: repository cannot supply today. Named separately from the member list
+#: because the refusal message has to say WHICH one is missing: "not offered"
+#: on its own tells a user nothing they can act on, while "no template emits
+#: -ind_component" tells them exactly what would have to change.
+INDUCTOR_CONTRACT = (
+    "the inductor half of the parasitic device contract -- no template emits "
+    "-ind_component or -mutual_ind_component, so the netlist would carry no "
+    "inductor at all"
+)
+SUBSTRATE_CONTRACT = (
+    "substrate_nets_file, which the manual says must be given explicitly or "
+    "no nets are extracted as connected to the substrate -- so the run would "
+    "produce no substrate network at all"
+)
+
+#: ``extract -type`` members the form does not offer, and the contract each
+#: one is missing. Mirrors the catalog row's ``choices_not_offered``; a
+#: catalog test asserts the two stay equal, the same way
+#: :data:`SELECTION_ARG_KIND` mirrors ``choice_args``.
+#:
+#: The owner ruled on 2026-09-04: *"the knobs you listed for me to decide on
+#: -- honestly I do not understand any of them, and if I do not understand
+#: them I will most likely never use them."* The ruler for this form is what
+#: they use in the Quantus GUI, not what the vendor manual contains, so a
+#: member that is not understood is not offered. Every one of these nine also
+#: renders a deck that runs, reports success, and silently omits the thing it
+#: was chosen for, which is why they are refused here rather than merely
+#: hidden: a value the form will not draw but the model will hold comes back
+#: through YAML, import and Duplicate.
+NOT_OFFERED_EXTRACT_TYPES: dict[ExtractType, str] = {
+    ExtractType.SUBSTRATE_ONLY: SUBSTRATE_CONTRACT,
+    ExtractType.C_ONLY_DECOUPLED_TO_SUBSTRATE: SUBSTRATE_CONTRACT,
+    ExtractType.RC_DECOUPLED_TO_SUBSTRATE: SUBSTRATE_CONTRACT,
+    ExtractType.RLC_DECOUPLED: INDUCTOR_CONTRACT,
+    ExtractType.RLC_COUPLED: INDUCTOR_CONTRACT,
+    ExtractType.RLC_DECOUPLED_TO_SUBSTRATE: INDUCTOR_CONTRACT,
+    ExtractType.RLCK_DECOUPLED: INDUCTOR_CONTRACT,
+    ExtractType.RLCK_COUPLED: INDUCTOR_CONTRACT,
+    ExtractType.RLCK_DECOUPLED_TO_SUBSTRATE: INDUCTOR_CONTRACT,
+}
+
+
+def offered_extract_types() -> tuple[ExtractType, ...]:
+    """The six members a form may draw and a rule may hold, in enum order."""
+
+    return tuple(t for t in ExtractType if t not in NOT_OFFERED_EXTRACT_TYPES)
 
 
 logger = logging.getLogger(__name__)
@@ -436,6 +509,16 @@ class ExtractRule(Base):
                 f"selection {self.selection.value!r} needs a {kind}; "
                 "selection_arg is empty"
             )
+        missing = NOT_OFFERED_EXTRACT_TYPES.get(self.type)
+        if missing is not None:
+            raise ValueError(
+                f"{self.type.value!r} is not offered here: it needs {missing}. "
+                "The owner ruled these nine types out on 2026-09-04 -- a deck "
+                "that runs, reports success and omits the one thing the type "
+                "was chosen for is worse than not offering the type at all. "
+                f"Use one of {', '.join(t.value for t in offered_extract_types())} "
+                "instead."
+            )
         return self
 
     @property
@@ -504,10 +587,15 @@ class ExtractionSettings(Base):
     #: The live specimen of the four-layer knob problem: manifest 5000,
     #: project.yaml 100, tasks.yaml 200, and ``--knob`` for a fourth answer.
     exclude_floating_nets_limit: int = Field(default=5000, ge=100, le=100_000)
-    #: Unit and magnitude disagree with physics: 0.01 F is a 10 mF threshold.
-    #: Carried over unchanged so behaviour does not silently shift, but it is
-    #: NOT a verified fact -- the manifest it came from was written by hand.
-    coupling_cap_threshold_absolute: AsWritten = 0.01
+    #: In FEMTOfarads, and the documented range is 0 to 100. The catalog used
+    #: to record this as farads with a note that 0.01 F is a 10 mF threshold
+    #: and therefore impossible; the unit was the wrong half. 0.01 fF is the
+    #: vendor's own worked example, so the value inherited from the
+    #: hand-written manifest was right all along -- the label was not.
+    coupling_cap_threshold_absolute: AsWritten = Field(default=0.01, ge=0.0, le=100.0)
+    #: No documented bound: the vendor's syntax table gives ``<value>`` with no
+    #: range, so this one is deliberately left unconstrained rather than given
+    #: an invented twin of its neighbour's.
     coupling_cap_threshold_relative: AsWritten = 0.001
     min_res_ohm: AsWritten = 0.001
     merge_parallel_res: bool = True
@@ -515,6 +603,9 @@ class ExtractionSettings(Base):
 
     metal_fill: MetalFill = MetalFill.VIRTUAL
     array_vias_spacing: str = "auto"
+    #: ``infinite`` (the LVS-input default) or a number of
+    #: :attr:`max_fracture_length_unit`, never below 5. See
+    #: :meth:`_fracture_length_is_infinite_or_at_least_five`.
     max_fracture_length: str = "infinite"
     #: Meaningless apart from :attr:`max_fracture_length`, and missing from the
     #: section 1.2 sketch.
@@ -525,6 +616,44 @@ class ExtractionSettings(Base):
     #: Kept as the default so adding this field moves no existing output;
     #: an RF block that blocks its inductor almost certainly wants ``gray``.
     parasitic_blocking_device_cells_type: ParasiticBlocking | None = None
+
+    @field_validator("max_fracture_length")
+    @classmethod
+    def _fracture_length_is_infinite_or_at_least_five(cls, value: str) -> str:
+        """Below 5, Quantus refuses the entire command file.
+
+        The floor is the vendor's, it applies to both units, and it is a hard
+        error rather than a warning -- so a value under it does not degrade an
+        extraction, it kills the run. The number that invites it is exactly
+        the one an RF engineer reaches for on a tight transmission line, and
+        nothing between the text box and the deck looked at it:
+        ``check_representable`` compares against the catalog to find settings
+        the template FREEZES, which is a different question from whether a
+        value is legal.
+
+        Stays ``str`` because ``infinite`` is a legal value and the field has
+        to be able to hold it.
+        """
+
+        text = value.strip()
+        if text.lower() == "infinite":
+            return text
+        try:
+            number = float(text)
+        except ValueError:
+            raise ValueError(
+                f"extraction.max_fracture_length is {value!r}; it takes either "
+                f"'infinite' or a number of "
+                f"extraction.max_fracture_length_unit"
+            ) from None
+        if number < 5:
+            raise ValueError(
+                f"extraction.max_fracture_length is {text}, and Quantus errors "
+                f"on the whole command file below 5. For a long RF "
+                f"transmission line the manual recommends 100; below 50 it "
+                f"warns that accuracy suffers."
+            )
+        return text
 
 
 class CommonOutputSettings(Base):
@@ -589,6 +718,11 @@ class DspfOutput(Base):
     add_bulk_terminal: bool = False
     disable_instances: bool = False
     net_name_space: str = "SCHEMATIC"
+    #: Which element classes get XY coordinates in the DSPF. ``list[str]`` and
+    #: not a list of the enum on purpose: the eight members are confirmed but
+    #: their CASE is not -- we emit uppercase because that is what the Cadence
+    #: UI export wrote, the manual spells them lowercase, and closing the type
+    #: would lock the user out of whichever spelling their tool wants.
     output_xy: list[str] = Field(
         default_factory=lambda: [
             "CANONICAL_RES",
@@ -601,6 +735,30 @@ class DspfOutput(Base):
             "GENERIC",
         ]
     )
+
+    @field_validator("output_xy")
+    @classmethod
+    def _at_least_one_class(cls, value: list[str]) -> list[str]:
+        """Emptying the list writes a switch with no operand, not a smaller DSPF.
+
+        The template writes ``-output_xy`` once and then loops the values, so
+        an empty list leaves the option standing alone in front of the next
+        one. The form's control is a checkbox list, and unticking all eight is
+        one click; the failure lands hours later inside Quantus. Refused here
+        rather than guarded in the template, because silently dropping the
+        option would produce a *different* deck -- a DSPF with no coordinates
+        at all -- and quietly giving somebody a different extraction is the
+        failure mode this model exists to prevent.
+        """
+
+        if not value:
+            raise ValueError(
+                "output.dspf.output_xy needs at least one element class; an "
+                "empty list writes a bare -output_xy into the command file. "
+                "To ask for a smaller DSPF, untick the classes you do not "
+                "need and keep one."
+            )
+        return value
 
 
 class OutputSettings(Base):
@@ -636,7 +794,15 @@ class ReductionSettings(Base):
     device models moved to ``PdkProfile.parasitics``.
     """
 
-    enabled: bool = False
+    #: ``enabled`` is GONE since 2026-09-04. It was half of an AND nobody
+    #: could see: the runner ran the reduction only when this flag was true
+    #: *and* ``jivaro`` was in ``recipe.stages``, and either one false skipped
+    #: the stage in silence, from two different sections of the same form.
+    #: Under ONE CONCEPT, ONE OWNER the jivaro stage is a run-time decision,
+    #: so it is the run bar's tick box alone: jivaro runs iff jivaro is
+    #: requested. What stays here is what Jivaro is *given* once it runs.
+    #: :func:`upgrade_retired_fields` drops it from recipes on disk.
+
     #: The template carried ``| default(14)`` / ``| default(2)`` fallbacks;
     #: those go away and these defaults take the job.
     frequency_limit_ghz: AsWritten = 14.0
@@ -645,48 +811,39 @@ class ReductionSettings(Base):
     reduce_floating_nets: bool = False
     decoupling_auto_threshold: bool = False
     log_verbose_level: str = "trace"
-    #: Which view Jivaro reduces. ``None`` -- the default -- means "the view
-    #: Quantus just wrote", i.e. the cell's ``out_file``, which is also what
-    #: ``inputView`` and Quantus ``-view_name`` already use.
+    #: ``views_to_reduce`` is GONE since 2026-09-04. Which view Jivaro reduces
+    #: is the cell's ``out_file`` and nothing else -- that was the 2026-08-24
+    #: ruling, and this field was the way back to the bug it closed. Its null
+    #: default already resolved to the DUT, but a *typed* value still won for
+    #: Jivaro alone while Quantus went on writing ``out_file``, so one
+    #: keystroke on the Recipes form re-created "Jivaro pointed at a view that
+    #: does not exist". The three real recipes on the red-zone disk carry
+    #: ``views_to_reduce: av_extracted`` to this day; the load-time drop in
+    #: :func:`upgrade_retired_fields` is what finally clears them.
     #:
-    #: RESOLVED 2026-08-24. This was the catalog's most suspicious row: it
-    #: held the separate literal ``"av_extracted"`` while both shipped task
-    #: tables set ``out_file`` to ``"av_ext"``, so Jivaro was being pointed at
-    #: a view that does not exist. In a run that has just extracted, the view
-    #: to reduce is *necessarily* the extraction output, so the two cannot
-    #: legitimately differ and the literal was never a setting.
-    #:
-    #: It stays overridable rather than being deleted: reducing a view some
-    #: earlier run produced, without re-extracting, is the one case where an
-    #: explicit name is right. Set it and it wins; leave it unset and it
-    #: follows the DUT. :func:`auto_ext.core.render._recipe_tree` resolves it.
-    views_to_reduce: str | None = None
+    #: The one case it was kept for -- reducing a view an earlier run produced,
+    #: with no extraction this time -- is a run over a cell whose ``out_file``
+    #: already names that view. It needs a cell row, not a recipe field.
+
     #: ``outputView`` = ``out_file`` + this. The reduced view is the one
-    #: post-layout simulation actually runs on, so its name matters.
+    #: post-layout simulation actually runs on, so its name matters. NOT a
+    #: second copy of the output view: it names a different artefact.
     output_view_suffix: str = "_red"
-
-    @field_validator("views_to_reduce", mode="before")
-    @classmethod
-    def _blank_to_none(cls, value: Any) -> Any:
-        """``""`` means unset, not a view called the empty string.
-
-        A GUI that clears a text box writes ``""``, and ``""`` stored here
-        would defeat the DUT fallback in
-        :func:`auto_ext.core.render._recipe_tree` and render an empty
-        ``viewsToReduce``. Same rule ``CellEntry`` applies to ``out_file``.
-        """
-
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
 
 
 class RunPolicy(Base):
     """How the run behaves when something goes wrong."""
 
     continue_on_lvs_fail: bool = False
-    #: Today an unparsable LVS report raises and the run fails, with no way to
-    #: say otherwise. Same behaviour by default, now stated.
+    #: NOT HONOURED YET, and the field says so rather than the form pretending
+    #: otherwise. An unparsable LVS report fails the run whatever this says:
+    #: the verdict is made in ``CalibreTool.parse_result``, whose only input is
+    #: a ``ToolResult``, so no recipe policy is in scope where the decision
+    #: happens. The catalog row's ``context_path`` was dropped on 2026-09-04
+    #: so the Recipes form stops drawing a tick box that changes nothing --
+    #: see ``options.yaml``'s ``fail_on_unparsable_lvs_report`` for what
+    #: implementing it would cost. The field itself stays because recipes on
+    #: disk carry it, and because ``True`` is exactly today's behaviour.
     fail_on_unparsable_lvs_report: bool = True
 
 
@@ -719,8 +876,14 @@ class ResourceProfile(Base):
     quantus_cpu_count: int = Field(default=1, ge=1)
     #: Jivaro ``<cpu>``.
     reduction_cpu: int = Field(default=1, ge=1)
-    #: How many runs execute at once (CLI ``--jobs`` overrides per invocation).
-    max_workers: int = Field(default=1, ge=1)
+    #: ``max_workers`` is GONE since 2026-09-04. It was persisted here and
+    #: read by **nothing**: how many runs execute at once has only ever come
+    #: from the caller's argument -- the run bar's ``jobs`` spin box or the
+    #: CLI's ``--jobs`` -- and its own comment conceded as much by saying
+    #: ``--jobs`` overrode it. A copy with zero owners is the degenerate case
+    #: of the ONE CONCEPT, ONE OWNER ruler, and the honest fix is to delete it
+    #: rather than to wire a fourth thing into the parallelism decision.
+    #: :func:`upgrade_retired_resource_fields` drops it from files on disk.
 
 
 # ---- the recipe -------------------------------------------------------------
@@ -748,10 +911,14 @@ class Recipe(Base):
     #: Lineage for "save as". Replaces the preset concept.
     derived_from: Slug | None = None
 
-    #: Which stages this recipe intends to run. Replaces CLI ``--stage`` as a
-    #: persisted default; a CLI flag may still narrow it for one invocation,
-    #: and the narrowed set is what ``RunRecord.requested_stages`` records.
-    stages: list[Stage] = Field(default_factory=lambda: list(STAGE_ORDER))
+    #: ``stages`` is GONE since 2026-09-04, by the owner's ruling: *"which
+    #: stages to run appears on both screens -- the stage selector should own
+    #: it"*. It was a second copy of a decision the run bar and ``--stages``
+    #: already make, and the runner intersected the two **silently** -- a
+    #: stage ticked on the bar but missing from the recipe simply did not run,
+    #: with no line anywhere. The run bar is what a user sees first, it sits
+    #: above the Run button, and it is where a decision about *this attempt*
+    #: belongs. :func:`upgrade_retired_fields` drops it from recipes on disk.
 
     netlist: NetlistSettings = Field(default_factory=NetlistSettings)
     lvs: LvsSettings = Field(default_factory=LvsSettings)
@@ -769,16 +936,20 @@ class Recipe(Base):
 
     @model_validator(mode="after")
     def _check(self) -> Recipe:
-        if not self.stages:
-            raise ValueError("recipe.stages must not be empty")
-        if len(set(self.stages)) != len(self.stages):
-            raise ValueError(f"recipe.stages has duplicates: {[s.value for s in self.stages]}")
         keys = [(p.stage, p.template_id) for p in self.patches]
         if len(keys) != len(set(keys)):
             raise ValueError(
                 "at most one TemplatePatch per (stage, template_id); merge the hunks instead"
             )
         return self
+
+    # ``_check_qrc_query_feeds_quantus`` used to live here. It keyed on
+    # ``stages``, which the recipe no longer has, so the check moved to where
+    # the requested stage set actually exists: a runner pre-flight
+    # (``auto_ext.core.runner._validate_qrc_query_feeds_quantus``), refused
+    # before a run directory is created and carrying the same message. The
+    # combination it refuses has not become legal -- it has one home instead
+    # of two.
 
     # -- derived --------------------------------------------------------
 
@@ -829,6 +1000,7 @@ class Recipe(Base):
         templates: dict[str, str] | None = None,
         dspf_out_path: str | None = None,
         paths: dict[str, str] | None = None,
+        jivaro_enabled: bool = False,
     ) -> RecipeSnapshot:
         """Convert to the S1 :class:`~auto_ext.model.run.RecipeSnapshot`.
 
@@ -841,6 +1013,14 @@ class Recipe(Base):
         recipe-driven run stays comparable with a knob-driven one. ``templates``
         / ``dspf_out_path`` / ``paths`` are not recipe facts (they belong to
         the catalog, the workspace and the profile) and are passed in.
+
+        ``jivaro_enabled`` joined them on 2026-09-04. The S1 snapshot has a
+        ``JivaroSnapshot.enabled`` slot and readers depend on it, but "is the
+        reduction on" stopped being a recipe fact that day: it is whether the
+        dispatch asked for the jivaro stage. The runner passes what it
+        actually did, so the snapshot keeps meaning what it always claimed to
+        mean -- *effective* settings for this run -- rather than echoing a
+        field that no longer decides anything.
         """
 
         return RecipeSnapshot(
@@ -866,7 +1046,7 @@ class Recipe(Base):
                 },
             },
             jivaro=JivaroSnapshot(
-                enabled=self.reduction.enabled,
+                enabled=jivaro_enabled,
                 frequency_limit=self.reduction.frequency_limit_ghz,
                 error_max=self.reduction.error_max_pct,
             ),
@@ -1016,6 +1196,21 @@ def load_recipe_with_raw(path: Path) -> tuple[Recipe, Any]:
             raw_extraction.pop("extract_type", None)
             raw_extraction.pop("selection", None)
             raw_extraction["extract"] = payload["extraction"]["extract"]
+    retired = upgrade_retired_fields(payload)
+    if retired:
+        logger.info(
+            "%s: dropped %s -- 2026-09-04 ownership ruling, the run bar and "
+            "the cell row own these now",
+            path,
+            ", ".join(f"{key} ({_shown(value)})" for key, value in retired.items()),
+        )
+        # A narrowed ``stages`` was an intent, so it is named rather than
+        # dropped in silence -- see :func:`upgrade_retired_fields`. The
+        # comment-carrying tree has to follow the payload here for the same
+        # reason as below, and it also takes the retired key's own comment
+        # with it, which would otherwise outlive the field it explained.
+        for dotted in retired:
+            _pop_path(data, dotted)
     moved = upgrade_three_state_payload(payload)
     if moved:
         logger.info(
@@ -1123,6 +1318,99 @@ def upgrade_three_state_payload(payload: Any) -> list[str]:
             common[key] = "true" if common[key] else "false"
             moved.append(key)
     return moved
+
+
+#: Recipe fields the 2026-09-04 ONE CONCEPT, ONE OWNER ruling retired, and who
+#: owns the concept instead. Dotted paths, dropped on load in this order.
+#:
+#: Each one was a *second* copy of a decision another surface already made,
+#: and in all three cases the runner combined the two silently -- the failure
+#: mode this project exists to remove. They are dropped rather than validated
+#: away because ``Base`` forbids extra keys: leaving them would make every
+#: recipe on the red-zone disk fail to load, which is precisely the 2026-08-28
+#: red-zone outage (every recipe refused, empty list, no explanation).
+RETIRED_RECIPE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("stages", "the run bar's stage tick boxes / CLI --stage"),
+    ("reduction.enabled", "the run bar's jivaro tick box"),
+    ("reduction.views_to_reduce", "the cell row's out_file"),
+)
+
+#: The same, for :class:`ResourceProfile`. ``max_workers`` had zero owners --
+#: nothing ever read it -- so there is not even a silent combination to point
+#: at, only a persisted number that never did anything.
+RETIRED_RESOURCE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("max_workers", "the run bar's jobs spin box / CLI --jobs"),
+)
+
+
+def _shown(value: Any) -> str:
+    """A dropped value as the log line should name it."""
+
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value) or "empty"
+    return str(value)
+
+
+def _pop_path(tree: Any, dotted: str) -> Any:
+    """Remove ``dotted`` from a nested mapping, returning what was there."""
+
+    parts = dotted.split(".")
+    for part in parts[:-1]:
+        if not isinstance(tree, dict):
+            return None
+        tree = tree.get(part)
+    if not isinstance(tree, dict):
+        return None
+    return tree.pop(parts[-1], None)
+
+
+def upgrade_retired_fields(payload: Any) -> dict[str, Any]:
+    """Drop the fields the 2026-09-04 ownership ruling took off the Recipe.
+
+    In place, on load, without stopping to ask -- the same policy as
+    :func:`upgrade_three_state_payload`, and for the same reason. Returns
+    ``{dotted path: the value that was there}`` so the caller can name each
+    one in the log.
+
+    *Silent means "does not stop to ask", not "leaves no trace".* A narrowed
+    ``stages: [si, calibre]`` was somebody's intent, and dropping it without a
+    word is the silent-wrong-answer this project exists to remove -- so the
+    caller's line carries the set, and the run bar seeds from it the first
+    time that project is opened (``docs/refactor/UX_VALIDATION.md`` 5.7).
+
+    A field that is simply absent is not reported: only a file that actually
+    carried the old key produces a log line.
+    """
+
+    if not isinstance(payload, dict):
+        return {}
+    dropped: dict[str, Any] = {}
+    for dotted, _owner in RETIRED_RECIPE_FIELDS:
+        parts = dotted.split(".")
+        parent: Any = payload
+        for part in parts[:-1]:
+            parent = parent.get(part) if isinstance(parent, dict) else None
+        if isinstance(parent, dict) and parts[-1] in parent:
+            dropped[dotted] = parent.pop(parts[-1])
+    return dropped
+
+
+def upgrade_retired_resource_fields(payload: Any) -> dict[str, Any]:
+    """The :class:`ResourceProfile` half of :func:`upgrade_retired_fields`.
+
+    ``config/resources.yaml`` is written by ``auto-ext migrate`` and by the
+    new-project wizard, so every deployed copy carries ``max_workers: 1``.
+    Refusing those files would be a worse answer than dropping a number
+    nothing ever read.
+    """
+
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        name: payload.pop(name)
+        for name, _owner in RETIRED_RESOURCE_FIELDS
+        if name in payload
+    }
 
 
 def _merge_into(target: Any, source: Any) -> Any:

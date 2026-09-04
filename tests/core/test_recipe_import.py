@@ -263,21 +263,26 @@ def test_each_target_imports_on_its_own_and_round_trips(
 def test_all_five_targets_import_into_one_recipe(shipped: dict[RenderTarget, str]) -> None:
     result = ri.import_recipe(_sources(shipped), recipe_id="all-five")
     assert set(result.targets) == set(shipped)
-    assert [stage.value for stage in result.recipe.stages] == [
-        "si",
-        "calibre",
-        "quantus",
-        "jivaro",
-    ]
+    # Which files arrived is reported as ``targets`` and nowhere else. It used
+    # to be written into ``recipe.stages`` as well, which made the recipe a
+    # second owner of a decision the run bar makes per dispatch.
+    assert not hasattr(result.recipe, "stages")
     assert result.recipe.output.emit == [OutputKind.EXTRACTED_VIEW, OutputKind.DSPF]
     assert result.clean_roundtrip, [t.diff for t in result.roundtrip.values()]
     assert result.hunk_count == 0
     assert result.summary().endswith("round trip clean")
 
 
-def test_only_the_imported_stages_end_up_in_the_recipe(
+def test_the_imported_files_are_reported_but_not_written_into_the_recipe(
     shipped: dict[RenderTarget, str],
 ) -> None:
+    """Which files came in is import provenance, not an extraction condition.
+
+    Before 2026-09-04 this wrote ``recipe.stages``, so importing an si.env and
+    a jivaro.xml produced a recipe that would refuse to run calibre -- from a
+    row the importing user never saw, against tick boxes above the Run button.
+    """
+
     result = ri.import_recipe(
         [
             ri.ImportSource(label="a.env", text=shipped[RenderTarget.SI_ENV]),
@@ -285,7 +290,8 @@ def test_only_the_imported_stages_end_up_in_the_recipe(
         ],
         recipe_id="two-stages",
     )
-    assert result.recipe.stages == [Stage.SI, Stage.JIVARO]
+    assert set(result.targets) == {RenderTarget.SI_ENV, RenderTarget.JIVARO_XML}
+    assert not hasattr(result.recipe, "stages")
 
 
 def test_one_quantus_file_selects_the_matching_output_kind(
@@ -575,10 +581,19 @@ def test_the_gui_export_needs_only_its_version_banner_as_a_hunk(
 ) -> None:
     """A file this tool never rendered: different Quantus version, different
     PDK, different cell, five different values. Everything but the banner
-    comment is understood, and the banner is kept rather than dropped."""
+    comment and the two options this build's own deck no longer agrees with is
+    understood, and none of the three is dropped.
+
+    The three are the banner (belongs to no catalog row at all), the legacy
+    ``-format "DFII"`` the ext template stopped emitting under a Calibre input,
+    and the ``-unique_qrctemp_name`` the template now emits and this old export
+    never had. The last two are a property of the shipped deck, not of the
+    file: any GUI export from before those two template changes imports with
+    exactly these two extra hunks.
+    """
 
     result = ri.import_recipe([gui_export], recipe_id="gui-export")
-    assert result.hunk_count == 1
+    assert result.hunk_count == 3
     assert "19.14-s012" in result.as_patch[0].summary
     assert result.unmodelled_ratio < 0.05
     assert not result.high_unmodelled
@@ -646,7 +661,11 @@ def test_a_value_that_landed_in_the_recipe_or_the_profile_is_never_also_pinned_b
     So: every line the import claims to understand must be absent from every
     hunk. What is left in the patch is what the catalog does not model -- here
     a whole ``rf_analysis`` statement and the tool's own version banner, which
-    is ``owner: fixed`` and belongs to no object at all.
+    is ``owner: fixed`` and belongs to no object at all -- plus the two options
+    on which this build's ext deck and a pre-existing hand-written file simply
+    disagree: ``-format "DFII"``, which the template no longer emits under a
+    Calibre input, and ``-unique_qrctemp_name``, which it now emits and this
+    file never had.
     """
 
     catalog = builtin_catalog()
@@ -668,10 +687,12 @@ def test_a_value_that_landed_in_the_recipe_or_the_profile_is_never_also_pinned_b
             assert line.strip() not in pinned, f"{key} is both a field and a patch: {line!r}"
 
     # ...and what is left in the patch is only what nothing models.
-    assert result.hunk_count == 2
+    assert result.hunk_count == 4
     summaries = [hunk.summary for hunk in result.as_patch]
     assert any("rf_analysis" in summary for summary in summaries)
     assert any("Quantus UI Version" in summary for summary in summaries)
+    assert any("-format" in summary for summary in summaries)
+    assert any("unique_qrctemp_name" in summary for summary in summaries)
     assert result.roundtrip[RenderTarget.QUANTUS_EXT].identical
 
 

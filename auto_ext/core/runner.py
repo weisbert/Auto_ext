@@ -52,14 +52,18 @@ Failure handling (identical in both modes):
 - Stage raises :class:`AutoExtError` → that stage is marked failed,
   remaining stages for the task are skipped, runner continues with the
   next task (or the other workers, in parallel mode).
-- ``calibre`` stage returning ``success=False``: if the recipe's
-  ``policy.continue_on_lvs_fail`` is True, log a warning and proceed to the
-  next stage. Otherwise skip remaining stages for this task (same as a
-  generic failure).
+- ``calibre`` stage returning ``success=False``: if this dispatch's
+  ``continue_on_lvs_fail`` is True -- the caller's argument, falling back to
+  ``recipe.policy.continue_on_lvs_fail`` when the caller passes ``None`` --
+  log a warning and proceed to the next stage. Otherwise skip remaining
+  stages for this task (same as a generic failure). The resolved value is
+  what ``RunRecord.continue_on_lvs_fail`` reports.
 - Any other stage returning ``success=False``: skip remaining stages for
   this task.
-- ``jivaro`` stage is silently skipped (not failed) when
-  ``recipe.reduction.enabled`` is False.
+- ``jivaro`` runs iff ``jivaro`` is in the requested stages. There is no
+  second switch: ``recipe.reduction.enabled`` was retired on 2026-09-04
+  because ticking the stage and leaving the flag alone skipped the reduction
+  in silence.
 
 Observability:
 
@@ -78,7 +82,10 @@ Observability:
   each stage and forwarded into :func:`run_subprocess`; when set
   mid-subprocess, the in-flight EDA process is terminated (SIGTERM
   with a 10s grace, then SIGKILL) and the stage is marked
-  :attr:`StageStatus.CANCELLED`.
+  :attr:`StageStatus.CANCELLED`. It is also checked before each *task*:
+  once one task has been claimed, a cancelled dispatch stops handing out
+  run directories, so stopping a twenty-cell batch adds one run to the
+  history rather than twenty.
 """
 
 from __future__ import annotations
@@ -89,6 +96,7 @@ import platform
 import re
 import shutil
 import socket
+import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -108,6 +116,12 @@ from auto_ext.core.env import (
     substitute_env,
 )
 from auto_ext.core.errors import AutoExtError, ConfigError, WorkdirError
+from auto_ext.core.failure_class import (
+    DETAILS_FAILURE_KEY,
+    FailureVerdict,
+    classify_failure,
+    classify_tool_result,
+)
 from auto_ext.core.progress import (
     CancelToken,
     NullReporter,
@@ -291,10 +305,14 @@ class RecipePipeline:
     corner literal              ``PdkProfile.corners`` lookup
     manual edits                ``Recipe.patches``
     quantus invocations         one per ``output.emit``
-    stage set                   ``recipe.stages`` ∩ the caller's ``stages``
-    jivaro on/off               ``recipe.reduction.enabled``
-    continue on LVS fail        ``recipe.policy.continue_on_lvs_fail``
+    stage set                   the caller's ``stages``, and nothing else
+    jivaro on/off               ``jivaro`` being in the caller's ``stages``
+    continue on LVS fail        the caller's, falling back to the recipe
     ==========================  ==============================================
+
+    The last three rows changed on 2026-09-04 (ONE CONCEPT, ONE OWNER): each
+    of them used to have a recipe copy that the runner combined with the
+    caller's answer, and every combination was silent.
     """
 
     recipe: Recipe
@@ -351,6 +369,7 @@ def run_tasks(
     profile: PdkProfile,
     verbose: bool = False,
     dry_run: bool = False,
+    continue_on_lvs_fail: bool | None = None,
     max_workers: int | None = None,
     reporter: ProgressReporter | None = None,
     cancel_token: CancelToken | None = None,
@@ -364,8 +383,12 @@ def run_tasks(
     Pre-flight:
 
     - Validates ``stages`` (must be a non-empty subset of :data:`STAGE_ORDER`).
-    - If ``jivaro`` is among ``stages`` and the recipe enables reduction, every
-      task must have ``out_file`` set, else :class:`ConfigError`.
+      It is the *only* stage input: the recipe stopped carrying a second list
+      on 2026-09-04, so nothing narrows what the caller asked for.
+    - If ``quantus`` is among ``stages``, the recipe's ``lvs.run_qrc_query``
+      must be on -- Quantus reads what that trigger writes.
+    - If ``jivaro`` is among ``stages``, every task must have ``out_file``
+      set, else :class:`ConfigError`.
     - Checks whether tasks share a resolved ``extraction_output_dir``. In
       serial that is legal (the workspace is reused, not contended) and only
       logged; in parallel it is refused, because two concurrent tasks writing
@@ -379,6 +402,17 @@ def run_tasks(
     serially (cwd = ``workarea``, si.env swapped via
     :func:`serial_workdir`); ``>= 2`` runs tasks on a thread pool, each
     task isolated under its own ``runs/<run_id>/work/``.
+
+    ``continue_on_lvs_fail`` is this dispatch's answer to "keep going past an
+    LVS mismatch". ``None`` means the caller has no opinion and
+    ``recipe.policy.continue_on_lvs_fail`` decides, which is the transitional
+    state: it is a decision about *this attempt*, so the run bar should own
+    it outright, and the recipe row survives only until the bar's checkbox is
+    wired into the dispatch (``docs/refactor/UX_VALIDATION.md`` section 5.7).
+    Whatever is resolved here is what ``RunRecord.continue_on_lvs_fail``
+    records, so the result card cannot report a different answer from the one
+    the run used -- which is precisely what it did while the GUI checkbox was
+    read into ``RunRequest`` and then dropped.
 
     ``reporter`` / ``cancel_token`` default to a :class:`NullReporter`
     and a fresh :class:`CancelToken` that is never set — same blocking
@@ -401,6 +435,7 @@ def run_tasks(
     )
 
     _validate_stages(stages)
+    _validate_qrc_query_feeds_quantus(stages, pipeline=pipeline)
     _validate_tasks(tasks, stages, pipeline=pipeline)
     if layout_export_path is not None:
         layout_export_path = _validate_layout_export(layout_export_path, stages, tasks)
@@ -440,7 +475,39 @@ def run_tasks(
     summary = RunSummary(batch_id=batch_id, runs_root=runs_root)
     _safe_call(reporter, "on_run_start", len(tasks), list(stages))
 
+    def _never_started(task: TaskConfig) -> TaskResult:
+        """Account for a task the cancel reached before it began.
+
+        It gets a :class:`TaskResult` and a start/end pair on the reporter --
+        a GUI tree that saw ``on_task_start`` without an end would sit on
+        "running" forever, and a summary missing a task would misreport the
+        dispatch -- but **no run directory**. Cancelling a twenty-cell batch
+        used to write twenty complete run directories, nineteen of them
+        recording that nothing happened, and the history the user then had to
+        scroll through was nineteen rows of noise around the one run they
+        actually stopped.
+        """
+
+        _safe_call(reporter, "on_task_start", task.task_id, list(stages))
+        result = TaskResult(task_id=task.task_id, overall=TaskStatus.CANCELLED)
+        _safe_call(reporter, "on_task_end", task.task_id, TaskStatus.CANCELLED)
+        return result
+
+    # The dispatch always leaves exactly one receipt for having been asked:
+    # the first task goes through the recording path even when the token is
+    # already set, so a cancelled run is still a complete, readable run
+    # directory. Every task after that one is skipped outright — it never
+    # began, so there is nothing about it to record.
+    claimed: list[str] = []
+    claim_lock = threading.Lock()
+
     def _submit(task: TaskConfig) -> TaskResult:
+        with claim_lock:
+            skip = bool(claimed) and cancel_token.is_cancelled()
+            if not skip:
+                claimed.append(task.task_id)
+        if skip:
+            return _never_started(task)
         return _run_single_task(
             project=project,
             task=task,
@@ -455,6 +522,7 @@ def run_tasks(
             pipeline=pipeline,
             verbose=verbose,
             dry_run=dry_run,
+            continue_on_lvs_fail=continue_on_lvs_fail,
             parallel=parallel,
             max_workers=max_workers or 1,
             batch_id=batch_id,
@@ -675,6 +743,7 @@ def _run_single_task(
     pipeline: RecipePipeline,
     verbose: bool,
     dry_run: bool,
+    continue_on_lvs_fail: bool | None = None,
     parallel: bool = False,
     max_workers: int,
     batch_id: str | None,
@@ -743,7 +812,15 @@ def _run_single_task(
 
     exec_ctx = _TaskExecCtx(cwd=cwd, run_dir=run_dir, paths=paths, parallel=parallel)
     active_stages = [step.key for step in steps]
-    continue_on_lvs_fail = pipeline.recipe.policy.continue_on_lvs_fail
+    # The caller's answer wins; the recipe is the fallback while the run bar's
+    # checkbox is still being wired up. Resolved once, here, so the value the
+    # stage loop honours and the value the record reports are the same object
+    # -- the card used to read the recipe while the user had ticked the bar.
+    effective_continue = (
+        pipeline.recipe.policy.continue_on_lvs_fail
+        if continue_on_lvs_fail is None
+        else continue_on_lvs_fail
+    )
 
     base_fields: dict[str, Any] = {
         "run_id": run_id,
@@ -754,12 +831,18 @@ def _run_single_task(
         "recipe": recipe,
         "requested_stages": active_stages,
         "dry_run": dry_run,
-        "continue_on_lvs_fail": continue_on_lvs_fail,
+        "continue_on_lvs_fail": effective_continue,
         "max_workers": max_workers,
         "workspace_dir": str(context["output_dir"]),
         "intermediate_dir": _opt_str(context.get("intermediate_dir")),
         "dspf_path": _opt_str(context.get("dspf_out_path")),
         "workarea": str(workarea),
+        # Which project's paths these are. One runs/ root serves every project
+        # opened against this Auto_ext, so a card offering an output dir has
+        # to be able to say whose it is.
+        "config_dir": (
+            str(project.source_path.parent) if project.source_path is not None else None
+        ),
         "run_dir": str(run_dir),
         "work_dir": str(cwd) if parallel and setup_error is None else None,
         "env": EnvBinding.from_resolution(resolution),
@@ -813,7 +896,7 @@ def _run_single_task(
                 subprocess_env=subprocess_env,
                 tools=tools,
                 pipeline=pipeline,
-                continue_on_lvs_fail=continue_on_lvs_fail,
+                continue_on_lvs_fail=effective_continue,
                 dry_run=dry_run,
                 cancel_token=cancel_token,
                 reporter=reporter,
@@ -879,7 +962,6 @@ def _execute_stages(
 
     abort = False
     cancel_seen = False  # once set: first stage marked CANCELLED, rest SKIPPED
-    jivaro_enabled = pipeline.recipe.reduction.enabled
 
     for step in steps:
         stage = step.stage
@@ -901,13 +983,11 @@ def _execute_stages(
             )
             continue
 
-        if stage == "jivaro" and not jivaro_enabled:
-            _append_synthetic_stage(
-                task_result, reporter, task.task_id, step,
-                StageStatus.SKIPPED, "jivaro disabled in recipe", run_dir=run_dir,
-            )
-            continue
-
+        # There is no second jivaro switch any more. Until 2026-09-04 this
+        # loop also consulted ``recipe.reduction.enabled`` and skipped the
+        # stage when it was false -- so ticking jivaro on the run bar and
+        # leaving a flag alone in a different section of the Recipes form got
+        # no reduction and no complaint. Jivaro runs iff jivaro is requested.
         if abort:
             _append_synthetic_stage(
                 task_result, reporter, task.task_id, step,
@@ -989,9 +1069,20 @@ def _append_synthetic_stage(
     ``stages`` list silently omitted everything that was skipped would be
     unreadable six months later, when "did jivaro not run, or did it not get
     recorded?" is exactly the question being asked.
+
+    A synthetic *failure* -- the work dir that could not be prepared, the
+    workspace another run holds the lock on -- is classified like any other,
+    so the card shows a diagnosis rather than a bare red row. It never
+    started, so the verdict is a never-started one and points at the reason
+    instead of at a stage log that does not exist.
     """
     _safe_call(reporter, "on_stage_start", task_id, step.key)
     moment = utcnow()
+    details: dict[str, Any] = {}
+    if status == StageStatus.FAILED:
+        details[DETAILS_FAILURE_KEY] = _jsonable(
+            classify_failure(stage=step.stage, precondition_error=reason).as_dict()
+        )
     record = StageRecord(
         key=step.key,
         stage=step.stage,
@@ -999,6 +1090,7 @@ def _append_synthetic_stage(
         started_at=moment,
         ended_at=moment,
         duration_s=0.0,
+        details=details,
         error=reason if status in (StageStatus.CANCELLED, StageStatus.FAILED) else None,
         skip_reason=reason,
         render_target=step.plan.target.value if step.plan is not None else None,
@@ -1009,6 +1101,38 @@ def _append_synthetic_stage(
     task_result.stages.append(result)
     _safe_store(append_event, run_dir, _stage_end_event(result))
     _safe_call(reporter, "on_stage_end", task_id, step.key, status, reason)
+
+
+def _stage_verdict(
+    *,
+    stage: str,
+    tool_result: ToolResult | None,
+    log_path: Path | None,
+    render_error: str | None = None,
+    precondition_error: str | None = None,
+) -> FailureVerdict:
+    """Why this stage failed, decided while the evidence is still in hand.
+
+    Two shapes of failure reach here. A stage that *ran* has a
+    :class:`~auto_ext.tools.base.ToolResult` carrying the exit code, the
+    parsed LVS report and the declared-but-absent outputs, and
+    :func:`~auto_ext.core.failure_class.classify_tool_result` reads all three
+    out of it. A stage that never started has none of that -- only the reason
+    it refused -- and its verdict must not tell the user to read a stage log
+    that was never opened.
+
+    Never raises: the classifier promises not to, and a run that fell over
+    while explaining why it fell over would be the worst outcome of all.
+    """
+
+    if tool_result is not None:
+        return classify_tool_result(tool_result, stage=stage)
+    return classify_failure(
+        stage=stage,
+        render_error=render_error,
+        precondition_error=precondition_error,
+        log_path=log_path,
+    )
 
 
 def _run_single_stage(
@@ -1037,7 +1161,29 @@ def _run_single_stage(
         rendered: Path | None = None,
         argv: list[str] | None = None,
         logged: bool = False,
+        render_error: str | None = None,
+        precondition_error: str | None = None,
     ) -> StageResult:
+        details = _jsonable_diagnostics(tool_result)
+        if status == StageStatus.FAILED:
+            # Classify here, once, while the facts are still live. The record
+            # keeps the exit code but not the parsed LvsReport, not the render
+            # error and not "the tool never wrote what it declared", so a
+            # consumer re-deriving the diagnosis months later gets a worse
+            # answer than the runner could give now.
+            details[DETAILS_FAILURE_KEY] = _jsonable(
+                _stage_verdict(
+                    stage=stage,
+                    tool_result=tool_result,
+                    log_path=log_path if logged else None,
+                    render_error=render_error,
+                    # A stage that raised before any log existed never really
+                    # started, so its own message is the whole evidence and
+                    # the verdict must not send the reader to a missing log.
+                    precondition_error=precondition_error
+                    or (None if logged or render_error else error),
+                ).as_dict()
+            )
         record = StageRecord(
             key=step.key,
             stage=stage,
@@ -1052,7 +1198,7 @@ def _run_single_stage(
             rendered_path=_run_relative(exec_ctx.run_dir, rendered),
             render_target=step.plan.target.value if step.plan is not None else None,
             artifacts=[str(p) for p in (tool_result.artifact_paths if tool_result else [])],
-            details=_jsonable_diagnostics(tool_result),
+            details=details,
             error=error,
         )
         return StageResult(
@@ -1084,7 +1230,11 @@ def _run_single_stage(
                 templates_root=pipeline.templates_root,
             )
         except AutoExtError as exc:
-            return _finish(StageStatus.FAILED, error=f"render failed: {exc}")
+            return _finish(
+                StageStatus.FAILED,
+                error=f"render failed: {exc}",
+                render_error=str(exc),
+            )
         patch_report = rendered.patch_report
         rendered_path = rendered.out_path
         rendered_record: Path | None = rendered_path
@@ -1114,7 +1264,12 @@ def _run_single_stage(
     if step.plan is not None and step.plan.target is render.RenderTarget.QUANTUS_DSPF:
         problem = _ensure_dspf_parent(context, dry_run=dry_run)
         if problem is not None:
-            return _finish(StageStatus.FAILED, error=problem, rendered=rendered_record)
+            return _finish(
+                StageStatus.FAILED,
+                error=problem,
+                rendered=rendered_record,
+                precondition_error=problem,
+            )
 
     if dry_run:
         return _finish(StageStatus.DRY_RUN, rendered=rendered_record)
@@ -1173,10 +1328,12 @@ def _run_single_stage(
 def _recipe_steps(pipeline: RecipePipeline, stages: list[str]) -> list[_Step]:
     """Expand a Recipe into the ordered list of steps this run executes.
 
-    The stage set is ``recipe.stages`` intersected with the caller's ``stages``
-    (the CLI's ``--stage``), so a recipe that declares no jivaro stage cannot
-    be talked into running one, and ``--stage calibre`` still narrows a
-    five-stage recipe to one stage.
+    The stage set is the caller's ``stages`` -- the run bar's tick boxes or
+    the CLI's ``--stage`` -- and nothing else. Until 2026-09-04 it was that
+    set intersected with ``recipe.stages``, twice (here and in
+    :func:`~auto_ext.core.render.plan_targets`), and the intersection was
+    silent: a stage the user ticked and the recipe did not name just did not
+    run. One decision, one owner, and the owner is the stage selector.
 
     ``strmout`` is added by hand: it renders nothing, so
     :func:`auto_ext.core.render.plan_targets` has no target to report for it,
@@ -1199,8 +1356,6 @@ def _recipe_steps(pipeline: RecipePipeline, stages: list[str]) -> list[_Step]:
     steps: list[_Step] = []
     for stage in STAGE_ORDER:
         if stage not in stages:
-            continue
-        if Stage(stage) not in pipeline.recipe.stages:
             continue
         targets = by_stage.get(stage)
         if targets:
@@ -1391,6 +1546,9 @@ def _recipe_snapshot_from_recipe(
         templates=templates,
         dspf_out_path=project.dspf_out_path,
         paths=paths,
+        # What this run is actually doing, which since 2026-09-04 is the only
+        # thing "reduction on" can mean: the jivaro step is in the plan.
+        jivaro_enabled=any(step.stage == "jivaro" for step in steps),
     )
 
 
@@ -1913,13 +2071,70 @@ def _validate_layout_export(
 
 
 def _validate_stages(stages: list[str]) -> None:
+    """Refuse a dispatch that would run nothing, and say which side is empty.
+
+    This is what M-23 became. Until 2026-09-04 an empty run could also arise
+    from an *intersection*: the caller's stages against ``recipe.stages``,
+    with nothing in common. That run used to be legal -- it claimed a run
+    directory, took the workspace lock, executed nothing, and
+    ``_compute_overall`` found no failure and returned PASSED. A green
+    "PASSED" over an empty stage strip is the worst answer available, because
+    the one thing the user came for ("did my cell extract?") is answered yes
+    by a run that never looked.
+
+    The recipe side is gone, so only one way to ask for nothing survives:
+    asking for nothing. It is refused *here*, before a run directory exists,
+    and the message names the requested set rather than saying "empty", so a
+    caller that computed the set can see what it computed. The GUI covers its
+    own side earlier and better -- the Run button is disabled at zero ticked
+    stages -- which leaves this for the CLI and for anything programmatic.
+    """
+
     if not stages:
-        raise ConfigError("stages list is empty")
+        raise ConfigError(
+            "the requested stage set is empty, so nothing would run and "
+            "nothing is started. Tick at least one stage on the run bar, or "
+            f"pass --stage with one of {list(STAGE_ORDER)}."
+        )
     unknown = set(stages) - set(STAGE_ORDER)
     if unknown:
         raise ConfigError(
             f"unknown stage(s): {sorted(unknown)}; valid: {list(STAGE_ORDER)}"
         )
+
+
+def _validate_qrc_query_feeds_quantus(
+    stages: list[str], *, pipeline: RecipePipeline
+) -> None:
+    """Quantus reads what the LVS query trigger writes, so it must run.
+
+    ``lvs.run_qrc_query`` gates the Calibre post-trigger ``calibre
+    -query_input <deck>/query_cmd -query svdb``, which is the only thing that
+    fills ``<output_dir>/query_output``. Both Quantus decks point at that
+    directory unconditionally -- ``input_db -directory_name``,
+    ``-layer_map_file .../Design.gds.map``, ``-device_properties_file
+    .../Design.props`` -- so turning the trigger off while quantus is
+    requested sends Quantus after three files nobody wrote. It does not fail
+    early either: si and Calibre run first, and the crash lands at the last
+    stage, hours in.
+
+    This was a ``Recipe`` model validator until 2026-09-04. It keyed on
+    ``recipe.stages``, which no longer exists, so it moved to the one place
+    the requested stage set is in hand -- and it is a better home: a recipe
+    with ``run_qrc_query`` off is perfectly legal on its own, and what is
+    refused is the *dispatch* that pairs it with quantus. Refused before a run
+    directory exists, naming both sides so the user can pick which to change.
+    """
+
+    if pipeline.recipe.lvs.run_qrc_query or Stage.QUANTUS.value not in stages:
+        return
+    raise ConfigError(
+        f"recipe {pipeline.recipe.recipe_id!r} has lvs.run_qrc_query off while "
+        "'quantus' is in the requested stages. The query trigger it disables is "
+        "what writes <output_dir>/query_output, and both Quantus decks read "
+        "Design.gds.map and Design.props out of that directory. Either turn "
+        "run_qrc_query back on, or untick quantus for this LVS-only run."
+    )
 
 
 def _validate_tasks(
@@ -1931,24 +2146,24 @@ def _validate_tasks(
     """Refuse a dispatch that cannot produce a valid jivaro input.
 
     ``inputView`` is ``library/cell/out_file``, so a reduction run without an
-    ``out_file`` would render a two-segment view name. Reduction is on when the
-    recipe says so *and* declares the jivaro stage; neither alone is enough.
+    ``out_file`` would render a two-segment view name. One condition now, not
+    three: jivaro runs iff jivaro was requested. ``recipe.reduction.enabled``
+    and ``recipe.stages`` were the other two, and both were retired on
+    2026-09-04 -- between them they were a switch the user could leave off in
+    two different places and get no reduction and no complaint.
     """
 
     if not tasks:
         raise ConfigError("no tasks to run")
     if "jivaro" not in stages:
         return
-    if not pipeline.recipe.reduction.enabled:
-        return
-    if Stage.JIVARO not in pipeline.recipe.stages:
-        return
     for t in tasks:
         if t.out_file is None:
             raise ConfigError(
-                f"task {t.task_id}: recipe {pipeline.recipe.recipe_id!r} enables "
-                "reduction but out_file is not set "
-                "(jivaro inputView renders to library/cell/out_file)"
+                f"task {t.task_id}: 'jivaro' is in the requested stages but "
+                "out_file is not set on this cell "
+                "(jivaro inputView renders to library/cell/out_file). Set the "
+                "cell's out view, or untick jivaro."
             )
 
 

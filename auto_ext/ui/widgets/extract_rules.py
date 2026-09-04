@@ -27,6 +27,16 @@ they cannot predict.
 **The last row cannot be removed.** A recipe with no extract statement runs
 Quantus and extracts nothing, which reports as a successful extraction of a
 cell that happens to have no parasitics -- the worst kind of wrong answer.
+
+**The type combo offers six of the vendor's fifteen members.** The other nine
+are on the catalog row as ``choices_not_offered`` with a written reason, and
+the model refuses them: each one needs a contract no template emits, so
+picking it would produce the same silent success the paragraph above exists to
+prevent. The owner ruled on 2026-09-04 that a knob they do not understand is a
+knob they will never use -- the ruler for this form is the Quantus GUI they
+actually drive, not the manual's full option table. A rule read back off disk
+carrying one of the nine is still *shown* (see :meth:`ExtractRuleRow.set_value`);
+what the form will not do is offer it fresh.
 """
 
 from __future__ import annotations
@@ -35,7 +45,6 @@ from typing import Any
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -46,6 +55,7 @@ from PyQt5.QtWidgets import (
 
 from auto_ext.catalog import OptionSpec
 from auto_ext.ui import theme
+from auto_ext.ui.widgets.option_editor import FormComboBox
 
 __all__ = [
     "OBJ_RULE_INDEX",
@@ -98,8 +108,11 @@ class ExtractRuleRow(QWidget):
         self._index.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         row.addWidget(self._index, 0)
 
-        self._selection = QComboBox(self)
-        for choice in selection_spec.choices or []:
+        # :class:`FormComboBox`, not a bare one: these two sit in the same
+        # scrolled column as the rest of the form, and a wheel notch over an
+        # unfocused combo used to rewrite the rule under the cursor.
+        self._selection = FormComboBox(self)
+        for choice in selection_spec.offered_choices:
             self._selection.addItem(str(choice))
         self._selection.currentIndexChanged.connect(self._on_selection_changed)
         row.addWidget(self._selection, 0)
@@ -108,8 +121,16 @@ class ExtractRuleRow(QWidget):
         self._arg.textEdited.connect(lambda _t: self.changed.emit())
         row.addWidget(self._arg, 1)
 
-        self._type = QComboBox(self)
-        for choice in type_spec.choices or []:
+        # ``offered_choices``, not ``choices``: nine of the fifteen
+        # ``extract -type`` members render a deck that runs, reports success
+        # and omits the very thing the type was chosen for, because the
+        # contract they need (inductor components, a substrate net file) is
+        # emitted by no template. The owner ruled on 2026-09-04 that a knob
+        # they do not understand is a knob they will never use, and the model
+        # refuses those nine, so a combo that still listed them would offer
+        # nine ways to get an error dialog.
+        self._type = FormComboBox(self)
+        for choice in type_spec.offered_choices:
             self._type.addItem(str(choice))
         self._type.currentIndexChanged.connect(lambda _i: self.changed.emit())
         row.addWidget(self._type, 0)
@@ -198,10 +219,10 @@ class ExtractRuleRow(QWidget):
             else "a recipe needs at least one extract rule"
         )
 
-    def selection_combo(self) -> QComboBox:
+    def selection_combo(self) -> FormComboBox:
         return self._selection
 
-    def type_combo(self) -> QComboBox:
+    def type_combo(self) -> FormComboBox:
         return self._type
 
     def arg_edit(self) -> QLineEdit:

@@ -37,7 +37,8 @@ Level 1 is the tool, read off the row's landing site, and a row with no
 landing site falls into the synthetic `Flow` bucket. That was right for the
 five rows Flow was built for — which stages, reduction on or off, the two
 policy flags, all decisions *about* the run rather than lines in a file — and
-wrong the moment a real setting had no site of its own.
+wrong the moment a real setting had no site of its own. (Flow is down to one
+row since 2026-09-04; see §2.)
 
 `extraction_corner` is the case that forced the column. What reaches Quantus
 is the profile-owned `technology_corner` literal, so the corner row lands
@@ -98,9 +99,24 @@ Two properties the code holds and the tests assert:
   toggle's "keep the focused row" behaviour depends on.
 
 Safe because **no option carries a different `section` in different target
-files** — verified across all 80 rows that have a landing site. The other 5 have
-none and are the `Flow` bucket: they are decisions about the run rather than
-lines in a file (corner, stages, reduction on/off, two policy flags).
+files** — verified across all 80 rows that have a landing site.
+
+### The `Flow` bucket, and why it is down to one row
+
+Flow collects the rows with no landing site: decisions *about* the run rather
+than lines in a file. It was built for five, and four of them have left.
+
+| row | where it went |
+|---|---|
+| `stages` | **deleted 2026-09-04.** Which stages run is a decision about *this attempt*, and it was already being made on the run bar, above the Run button. The runner intersected the two lists twice and in silence. |
+| `reduction_enabled` | **deleted 2026-09-04.** The same decision wearing a second face: an AND across two sections of this form, either half of which skipped the whole reduction without a word. Jivaro runs iff jivaro is ticked. |
+| `fail_on_unparsable_lvs_report` | **control retired 2026-09-04** (§5, and `UX_VALIDATION.md` §5.6): the row kept a `context_path` while nothing read the policy, so the form drew a live tick box that changed nothing. |
+| `extraction_corner` | moved out under `groups_with: technology_corner` (§1.1). It still has no landing site; it is drawn beside the temperature, where a person looks for it. |
+| `continue_on_lvs_fail` | **still here, transitionally.** It is a run-time decision too, so the run bar should own it outright — `run_tasks` and `RunWorker` take it as an argument since 2026-09-04, and the recipe is only the fallback when the caller passes `None`. The row goes when `cells_screen._dispatch` passes the bar's checkbox; `UX_VALIDATION.md` §5.7 carries the cut-over. |
+
+The general rule behind all four is `UX_VALIDATION.md` §5.7 — **one concept,
+one owner**. A run-time decision belongs to the run bar, a per-cell fact to
+Cells, extraction physics to the recipe, a PDK fact to the profile.
 
 ## 3. Density — what Common shows
 
@@ -158,10 +174,34 @@ Five columns: marker · label · control · annotation · flag.
 
 ## 5. Disabled, hidden, absent
 
+### The pointer row shows no value
+
+A row another screen owns is drawn as a **link and nothing else** — the
+sentence "set per cell, not per recipe — open the Cells column", clickable,
+with no value beside it. Until 2026-09-04 it drew `_display_default(spec)`
+first: `av_ext` for `out_file`, a `${WORK_ROOT2}` pattern for `dspf_out_path`.
+That is not a stale copy of the owning screen's value, it is the **catalog
+default** — a value that may be true of no cell and no project in the loaded
+workspace, shown on the screen a user reads while deciding what a run will
+produce. The cost of believing it is a run pointed at a view that does not
+exist, which is the 2026-08-24 Jivaro bug arriving through a different door.
+
+`reduction_views_to_reduce` went the same way and one step further: it was a
+*settable* second copy of the cell's `out_file`, and a typed value won for
+Jivaro alone while Quantus went on writing `out_file`. The Recipe field is
+gone, the row is `owner: fixed` so no control is drawn, and its `context_path`
+stays only so the template variable still resolves — `render._recipe_tree`
+fills it from the DUT.
+
+`tests/ui/test_reachability.py` defines "link" mechanically —
+`EditorKind.POINTER` with `displayed_value() == ""` — so the rule holds for
+any future row that grows a `screen:`, not just the two shipped ones.
+
 | case | treatment | why |
 |---|---|---|
 | `requires_emit` miss | **disabled**, visible | The option exists and the tool accepts it; this recipe just does not reach it. Hiding it would say "this tool has no such setting", which is false. Rendering it anyway writes a command file the tool rejects, hours into a run. |
 | template freezes the value | **disabled**, visible, with the reason | Same rule. `check_representable` refuses the render; that is a good last line of defence and a bad first one. |
+| member in `choices_not_offered` | **absent from the control**, present in `choices` | The one case where hiding is right, and only because the alternative is worse: the tool accepts the value, we cannot render a complete deck for it, and the model refuses it — so an offered entry would be a click that can only end in an error dialog. Search still finds the row, its `why` still names the member, and readback still shows it. See §8.1. |
 | `tier: full`, at default, in Common | **hidden** | Only because one always-visible toggle and search both reach it. Never hidden when non-default. |
 | tool with 0 Common rows | **one-line strip** | A tool must never disappear — see §3. |
 
@@ -253,6 +293,7 @@ this tool was unreachable — from the GUI, the YAML and the CLI alike.
 |---|---|---|
 | `describes_member` | this row describes one field of one member of the collection at `context_path`, not a scalar | 2 |
 | `choice_args` | which enum members take an operand, and what kind | 1 |
+| `choices_not_offered` + `not_offered_reason` | members the tool accepts and this form does not draw, and why — added 2026-09-04, see §8.1 | 1 |
 
 `describes_member` is why `extract_selection` and `extract_type` have a real
 `context_path` and a `recipe_field_path` of `None`. The value genuinely lives
@@ -260,6 +301,49 @@ at `recipe.extraction.extract`; what does not exist is a *single* value a
 control could bind to. Pointing them at `null` instead would have made them
 look like the structural rows that bind to nothing at all, which is a
 different and less true statement.
+
+### 8.1 `choices_not_offered` — added 2026-09-04
+
+`extract -type` has fifteen members and the combo now draws six. The other
+nine are listed on the row as `choices_not_offered` with a
+`not_offered_reason`, and `ExtractRule` refuses them.
+
+The reason they could not simply be deleted from `choices` is that the two
+edits make different claims. Removing a member says **the tool has no such
+value**; listing it here says **the tool has it and we decline to offer it**.
+`choices` is what readback matches a colleague's deck against, what the
+importer names in its report, and what the model quotes when it refuses — so a
+deleted member stops being nameable and the deck that carries it imports as
+"not one of the catalog's choices", which is this tool calling the vendor
+wrong.
+
+What decided it was not taste. Each of the nine renders a deck Quantus accepts
+and runs to a clean exit while silently omitting the thing the member was
+chosen for: the six `rlc*`/`rlck*` members need `-ind_component` /
+`-mutual_ind_component`, which no template emits, so the netlist comes back
+with no inductor in it; `substrate_only` and the three `*_to_substrate`
+members need `substrate_nets_file`, and the manual says that without it *no
+nets are extracted as connected to the substrate*. The owner ruled on
+2026-09-04 that a knob they do not understand is a knob they will never use —
+**not understood is not offered** — and the second half of that rule is that
+nothing the form *does* offer may quietly produce an incomplete deck.
+
+Mechanics:
+
+- `OptionSpec.offered_choices` is `choices` minus the exempted members, in the
+  vendor's own order. Every control reads that; `choices_for()` too.
+- The catalog self-check refuses a member with no reason, a reason with no
+  member, a member that is not in `choices`, a set that hides every member,
+  and a set that hides the row's own `default` — the last because a new recipe
+  would otherwise start on a value its own form will not draw.
+- The model keeps its own `NOT_OFFERED_EXTRACT_TYPES` table so it can validate
+  without reading YAML, and a test keeps the two equal — the same arrangement
+  `SELECTION_ARG_KIND` already has with `choice_args`.
+- A rule read off disk carrying one of the nine is still **shown** in the
+  combo. Not offering a value is not the same as pretending it is not there;
+  snapping to the first entry would rewrite the user's file on open.
+- An imported deck degrades to the catalog default with a report line naming
+  the statement, the member, the reason and what it became — never silently.
 
 `choice_args` is what makes three of `-selection`'s four members usable.
 Before it, the template emitted `-selection "[[extract_selection]]"` as a bare
@@ -313,7 +397,11 @@ one level up.
 
 A v1 recipe carrying the two scalars is upgraded to a one-rule list **on
 load**, in place, silently — the user ruled that on 2026-08-25 over an
-explicit step in the deploy. Silent means "does not stop to ask", not "leaves
+explicit step in the deploy. The 2026-09-04 retirements (`stages`,
+`reduction.enabled`, `reduction.views_to_reduce`, and `max_workers` on the
+ResourceProfile) follow the same precedent for the same reason: `Recipe` is
+`extra="forbid"`, so a key left on disk with no field is not a value that does
+nothing, it is a recipe that refuses to load. Silent means "does not stop to ask", not "leaves
 no trace": `load_recipe_with_raw` writes one line to the log naming the file,
 and the comment-carrying tree is updated too, or a later save would write the
 v1 keys straight back and the upgrade would un-happen on every load. A file

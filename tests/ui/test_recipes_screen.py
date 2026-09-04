@@ -53,6 +53,7 @@ from auto_ext.ui.screens.recipes_screen import (
     DENSITY_ALL,
     DENSITY_COMMON,
     FLOW_TOOL,
+    RECIPE_LIST_MIN_WIDTH,
     RECIPE_LIST_WIDTH,
     RecipesScreen,
     frozen_specs,
@@ -275,10 +276,20 @@ def test_output_db_splits_by_the_format_it_writes(qtbot) -> None:
 
 
 def test_rows_with_no_landing_site_collect_under_flow(qtbot) -> None:
+    """Flow is down to one row, and that is the point of the 2026-09-04 round.
+
+    It was built for five -- which stages, reduction on or off, and two policy
+    flags -- all "decisions about the run rather than lines in a file". Three
+    of them were decisions about *this run*, which is the run bar's question,
+    so ``stages`` and ``reduction_enabled`` were deleted outright and
+    ``fail_on_unparsable_lvs_report`` lost its control the same day.
+    ``continue_on_lvs_fail`` is the last one standing, and it is transitional:
+    the run bar's tick box is not wired yet (see UX_VALIDATION 5.7).
+    """
+
     flow = next(tool for tool in form_layout() if tool.tool == FLOW_TOOL)
     assert not any(spec.lands_in for spec in flow.specs)
-    # Decisions about the run rather than lines in a file.
-    assert {"stages", "reduction_enabled"} <= {spec.key for spec in flow.specs}
+    assert {spec.key for spec in flow.specs} == {"continue_on_lvs_fail"}
 
 
 def test_a_profile_backed_list_says_where_it_came_from(qtbot, tmp_path) -> None:
@@ -359,7 +370,9 @@ def test_groups_with_is_refused_when_it_cannot_resolve() -> None:
     # (b) naming a row that itself lands nowhere
     bad2 = {**payload}
     bad2["options"] = [
-        {**o, "groups_with": "stages"} if o["key"] == "extraction_corner" else o
+        {**o, "groups_with": "continue_on_lvs_fail"}
+        if o["key"] == "extraction_corner"
+        else o
         for o in payload["options"]
     ]
     with _pytest.raises(Exception) as caught2:
@@ -379,14 +392,20 @@ def test_the_control_type_follows_the_catalog(qtbot) -> None:
     assert isinstance(simulator, FreeChoiceOptionEditor)
     assert simulator.combo().isEditable() is True
     # A closed LIST -> one check box per member, not a comma-separated string.
-    stages = screen.editor("stages")
-    assert isinstance(stages, MultiChoiceOptionEditor)
-    assert list(stages.check_boxes()) == [
-        "si",
-        "strmout",
-        "calibre",
-        "quantus",
-        "jivaro",
+    # ``stages`` was the named case in the office report ("里面有很多参数你是选择
+    # 的是 blank 填写") and it is no longer a recipe row at all; ``output_xy`` is
+    # the surviving closed list on this form and carries the same contract.
+    columns = screen.editor("output_xy")
+    assert isinstance(columns, MultiChoiceOptionEditor)
+    assert list(columns.check_boxes()) == [
+        "CANONICAL_RES",
+        "PARASITIC_RES",
+        "CANONICAL_CAP",
+        "PARASITIC_CAP",
+        "DIODE",
+        "MOS",
+        "BIPOLAR",
+        "GENERIC",
     ]
 
 
@@ -703,6 +722,51 @@ def test_reverting_every_hunk_clears_the_escape_hatch(qtbot) -> None:
     assert screen.patch_strip.is_expanded() is False
 
 
+def test_the_two_reverts_on_the_screen_do_not_have_inverted_scopes(qtbot) -> None:
+    """One undoes the whole recipe, one undoes the manual edits only.
+
+    They sit five pixels apart, and the labels used to say the opposite of
+    what they do: the header's plain "Revert" unstages every form edit AND
+    the patches, while "Revert all" dropped the patches and nothing else. Of
+    the two, the one saying "all" was the narrower -- so a user choosing
+    between them by plain English chooses wrong every time.
+    """
+
+    screen = _screen(qtbot)
+    recipe = make_recipe()
+    recipe.patches = [make_patch(("0000000a",))]
+    screen.set_recipes([recipe])
+    screen.patch_strip.set_expanded(True)
+
+    whole = screen.revert_button()
+    hatch = screen.patch_strip.revert_all_button()
+
+    assert whole.text() == "Revert"
+    assert "all" not in whole.text().lower(), (
+        "the wider control does not claim 'all'; the narrower one must not either"
+    )
+    assert "revert" not in hatch.text().lower(), (
+        f"two controls share the word 'revert' with inverted scopes: "
+        f"{whole.text()!r} (whole recipe) and {hatch.text()!r} (patches only)"
+    )
+    assert "manual edit" in hatch.text().lower(), (
+        "the narrower control has to name what it is narrower about"
+    )
+
+    # And the narrower one still does exactly what its new label says: the
+    # form edit survives, the manual edit does not.
+    warm = screen.editor("temperature_c")
+    warm.line_edit().setText("125.0")
+    warm.line_edit().textEdited.emit("125.0")
+
+    hatch.click()
+
+    assert screen.current_recipe().patches == []
+    assert screen.current_recipe().extraction.temperature_c == 125.0, (
+        "the control that names manual edits reverted a form edit as well"
+    )
+
+
 def test_edit_rendered_names_the_recipe(qtbot) -> None:
     screen = _screen(qtbot)
     recipe = make_recipe()
@@ -767,6 +831,32 @@ def test_the_header_says_how_many_cells_use_the_recipe(qtbot) -> None:
     assert "used by 1 cell" in screen.header_meta_text()
 
 
+def test_the_header_shows_the_recipe_id_beside_the_editable_name(qtbot) -> None:
+    """The only identity on screen was a title the migrator wrote *and* encodes.
+
+    The name reads "rc_coupled, corner typical, 55C, extracted_view" -- four
+    settings spelled into a string the user is invited to edit per keystroke
+    -- while the thing that actually names this recipe, ``recipe_id``, was
+    nowhere on the form. It is the file stem (``rc-typical-55c``, a third
+    spelling), it is what every cell binding points at, and it is the string
+    every error message quotes; the header's own tooltip already promised it
+    "does not change" without ever showing it.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe("rc-typical-55c", "RC typical 55C")])
+
+    assert "rc-typical-55c" in screen.header_meta_text(), (
+        "the header shows the editable name and nothing that identifies the "
+        "recipe to the rest of the tool"
+    )
+    # And renaming does not move it: that is what makes it worth showing.
+    screen.name_edit().setText("Something else entirely")
+    screen.name_edit().textEdited.emit("Something else entirely")
+    assert "rc-typical-55c" in screen.header_meta_text()
+    assert screen.current_recipe().recipe_id == "rc-typical-55c"
+
+
 def test_the_status_line_reports_the_selection(qtbot) -> None:
     screen = _screen(qtbot)
     with qtbot.waitSignal(screen.status_changed, timeout=1000):
@@ -796,6 +886,47 @@ def test_the_recipe_list_context_menu_is_deferred_one_tick(qtbot, monkeypatch) -
 
     qtbot.wait(10)
     assert len(calls) == 1
+
+
+def test_right_clicking_a_recipe_selects_it_before_acting_on_it(
+    qtbot, monkeypatch
+) -> None:
+    """The menu acted on the row under the cursor and left the form showing A.
+
+    Right-click B while A is selected and choose Delete, and the recipe that
+    goes is B while the form -- the only thing on screen naming a recipe --
+    still reads A. The Cells table already does the opposite and moves the
+    selection first; this list did not, so two of the three lists in the
+    application disagreed about what a right-click means.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe("a", "A"), make_recipe("b", "B")])
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    screen.recipe_list.setCurrentItem(screen.recipe_list.topLevelItem(0))
+    assert screen.current_recipe_id() == "a"
+
+    menus: list[QMenu] = []
+    monkeypatch.setattr(QMenu, "exec_", lambda self, *a, **k: menus.append(self))
+
+    second = screen.recipe_list.topLevelItem(1)
+    screen.recipe_list.customContextMenuRequested.emit(
+        screen.recipe_list.visualItemRect(second).center()
+    )
+
+    assert screen.current_recipe_id() == "b", (
+        "the menu opened on B while the form still showed A"
+    )
+    assert screen.name_edit().text() == "B"
+
+    qtbot.wait(10)
+    assert len(menus) == 1
+    delete = [a for a in menus[0].actions() if a.text() == "Delete"][0]
+    with qtbot.waitSignal(screen.delete_requested, timeout=1000) as blocker:
+        delete.trigger()
+    assert blocker.args == ["b"]
 
 
 def test_the_context_menu_ignores_empty_space(qtbot, monkeypatch) -> None:
@@ -841,11 +972,35 @@ def _import_dialog(qtbot, screen, monkeypatch) -> RecipeImportDialog:
 def test_the_recipe_toolbar_offers_an_import_entry(qtbot) -> None:
     screen = _screen(qtbot)
     button = screen.import_button()
-    assert button.text() == "Import…"
+    assert button.text() == "Import files…"
     assert button.isEnabled() is True, "importing needs no selection"
 
     screen.set_recipes([])
     assert screen.import_button().isEnabled() is True
+
+
+def test_the_import_entry_names_the_files_it_accepts(qtbot) -> None:
+    """"Import..." with no object. Import *what*?
+
+    The dialog behind it answers the question beautifully -- it has a whole
+    "Not modelled -- left at the catalog default" section written for exactly
+    the fear a user has about handing over their own file -- and none of that
+    is discoverable from a button that names nothing. The kinds go on the
+    toolbar, not in a tooltip: a hint you have to hover to find is a hint
+    most people never read.
+    """
+
+    screen = _screen(qtbot)
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    on_screen = f"{screen.import_button().text()} {screen.import_hint().full_text()}"
+    for kind in (".cmd", ".qci", "si.env"):
+        assert kind in on_screen, f"nothing on the toolbar mentions {kind}"
+
+    # The hint is a label, so it gives way by eliding when the splitter is
+    # dragged in; the button keeps its own words at any width.
+    assert screen.import_button().sizeHint().width() <= RECIPE_LIST_MIN_WIDTH
 
 
 def test_the_import_entry_does_not_squeeze_the_artboard_row(qtbot) -> None:
@@ -1237,6 +1392,46 @@ def test_the_strip_offers_reset_only_when_there_is_something_to_reset(qtbot) -> 
     bar.reset_button().click()
     assert screen.current_recipe().extraction.temperature_c == 55.0
     assert bar.reset_button().isEnabled() is False
+
+
+def test_reset_names_the_row_it_is_about_to_reset(qtbot) -> None:
+    """The strip's Reset follows FOCUS, and focus is not a selection.
+
+    A Tab, or a stray click anywhere on the form, moves what the button will
+    act on -- and the button sits 42px from the row it would destroy, saying
+    only "Reset to default". So a user who changed the temperature, tabbed
+    on, then reached for Reset because the temperature looked wrong reset
+    something else entirely and had no way to see it happen.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    bar = screen.detail_bar()
+
+    warm = screen.editor("temperature_c")
+    warm.line_edit().setText("125.0")
+    warm.line_edit().textEdited.emit("125.0")
+    screen._on_focus_changed(None, warm)
+    assert "temperature_c" in bar.reset_button().text()
+
+    # Tab moves on. Nothing else about the screen changed.
+    other = screen.editor("min_res_ohm")
+    other.line_edit().setText("7")
+    other.line_edit().textEdited.emit("7")
+    screen._on_focus_changed(warm, other)
+    assert "min_res_ohm" in bar.reset_button().text(), (
+        "the button still reads the same generic words after focus moved, so "
+        "nothing on screen says which row it will act on"
+    )
+    assert "temperature_c" not in bar.reset_button().text()
+
+    bar.reset_button().click()
+
+    recipe = screen.current_recipe()
+    assert recipe.extraction.temperature_c == 125.0, (
+        "Reset took the row the user was looking at, not the row it named"
+    )
+    assert recipe.extraction.min_res_ohm != 7
 
 
 def test_focus_leaving_the_form_keeps_the_last_description(qtbot) -> None:

@@ -60,15 +60,40 @@ Assumptions
   Twenty-three Quantus rows write both command files; drawing them twice
   would ask the user which copy is the real one, and moving a row between
   modes would break the toggle's promise to keep the focused row.
-* ``extraction.corner`` has no landing site, so it lives under ``Flow`` with
-  the other four decisions that are about the run rather than about a line in
-  a file. The catalog owns the *literal* as ``technology_corner`` with
-  ``owner: profile`` -- a process fact -- and the seam between "the recipe
-  names a semantic corner" and "the profile maps it to ``TYPICAL``" is what
-  makes a recipe portable.
-* The six recipe-owned rows whose ``currently`` is ``absent`` have no
-  ``context_path`` and therefore no field to bind to. They are proposals, not
-  settings, and are skipped.
+* ``Flow`` is the bucket for a row with no landing site, and it is down to
+  **one** row. It was built for five -- which stages, reduction on or off,
+  and two policy flags -- but three of those were decisions about *this run*
+  rather than about this recipe, and the owner ruled on 2026-09-04 that the
+  run bar owns those: ``stages`` and ``reduction_enabled`` were deleted from
+  the catalog outright, and ``fail_on_unparsable_lvs_report`` lost its
+  ``context_path`` the same day for being a control nothing read.
+  ``policy.continue_on_lvs_fail`` is the one left, and it is transitional --
+  the run bar's tick box has to be wired into the dispatch before the row can
+  go (``docs/refactor/UX_VALIDATION.md`` section 5.7).
+  ``extraction.corner`` used to sit here too, for the same "no landing site"
+  reason, and it was the case that forced ``groups_with``: what reaches
+  Quantus is the profile-owned ``technology_corner`` literal, so the row
+  lands nowhere while the person looking for it looks under Quantus beside
+  the temperature. The seam between "the recipe names a semantic corner" and
+  "the profile maps it to ``TYPICAL``" is what makes a recipe portable.
+* **23** recipe-owned rows whose ``currently`` is ``absent`` have no
+  ``recipe_field_path`` and therefore no field to bind to, so
+  :func:`recipe_specs` skips them. They are not proposals: thirteen are real
+  Quantus ``extract`` / ``filter_*`` / ``global_nets`` options and three are
+  ``strmout`` argv, all written down in our own catalog, and each needs two
+  things it has not got -- a ``Recipe`` field and a hole in the template.
+  Most of the Quantus ones were ruled out by the owner on 2026-09-04 rather
+  than merely unbuilt -- *not understood is not offered* -- and one,
+  ``fail_on_unparsable_lvs_report``, was **retired from this form**: it had a
+  live tick box and nothing read it.
+
+  This docstring said "six" while twenty-one were being dropped, which is the
+  reason the count is now asserted rather than described: every one of them is
+  named with its own reason in ``CATALOG_UNREACHABLE``
+  (``tests/ui/test_reachability.py``), and adding a row to the catalog without
+  either a control or an entry there fails that audit. A comment is the only
+  thing between a deliberate omission and a forgotten one, and a stale count
+  is worse than none -- it reads as a number somebody checked.
 * A row whose ``currently`` is ``hardcoded_literal`` *is* shown, disabled and
   marked -- see :func:`~auto_ext.ui.widgets.option_editor.template_freezes`.
   Hiding it would say "this tool has no such setting", which is false and is
@@ -215,6 +240,17 @@ OBJ_OPTIONS_SUMMARY = "recipeOptionsSummary"
 OBJ_TOOL_HEADER = "recipeToolHeader"
 OBJ_DENSITY_BAR = "recipeDensityBar"
 
+#: The import entry, in two pieces. ``Import...`` on its own named no object:
+#: import *what*, and what becomes of the options in my file this form has no
+#: row for? The dialog behind it answers the second question at length -- it
+#: has a "Not modelled -- left at the catalog default" section written for
+#: exactly that fear -- and none of it was reachable from a button that named
+#: nothing. The kinds go beside the button rather than inside it because the
+#: list panel's floor is :data:`RECIPE_LIST_MIN_WIDTH`, and a label elides
+#: there where a button of the same words clips mid-word.
+IMPORT_LABEL = "Import files…"
+IMPORT_KINDS = ".cmd · .qci · si.env"
+
 #: Width of the search field. Wide enough for a model path fragment
 #: (``output.dspf.busbit``), narrow enough to leave the counts on screen.
 _SEARCH_WIDTH = 190
@@ -241,10 +277,18 @@ _GLYPH_EXPANDED = "▾"
 def recipe_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
     """Every catalog row that binds to a Recipe field, in field-path order.
 
-    Rows without a ``recipe_field_path`` are dropped: they are the ``absent``
-    proposals, which name no field to edit. The order is the field path rather
-    than the catalog's own order, because the catalog is sorted by emission
-    line -- correct for the renderer, arbitrary for a form.
+    Rows without a ``recipe_field_path`` are dropped, because there is no
+    field for a control to write to. That is correct and it is not free: the
+    23 rows it drops are real vendor options this catalog records, and
+    dropping them *silently* is what made "we decided not to" and "we forgot"
+    indistinguishable -- in the code and on the screen alike. Each one is now
+    named with its own reason in ``CATALOG_UNREACHABLE``
+    (``tests/ui/test_reachability.py``), and that audit fails the day this
+    function starts dropping one nobody has written a reason for.
+
+    The order is the field path rather than the catalog's own order, because
+    the catalog is sorted by emission line -- correct for the renderer,
+    arbitrary for a form.
     """
 
     cat = catalog if catalog is not None else builtin_catalog()
@@ -860,15 +904,29 @@ class RecipesScreen(QWidget):
         second = QHBoxLayout()
         second.setContentsMargins(0, 0, 0, 0)
         second.setSpacing(theme.SPACE_XXS)
-        self._import_button = QPushButton("Import…", toolbar)
+        self._import_button = QPushButton(IMPORT_LABEL, toolbar)
         self._import_button.setToolTip(
             "Turn EDA files you already have -- a Quantus command file, a "
             "Calibre deck setup, an si.env -- into a recipe"
         )
         self._import_button.clicked.connect(self._on_import_clicked)
         _let_shrink(self._import_button)
-        second.addWidget(self._import_button)
-        second.addStretch(1)
+        second.addWidget(self._import_button, 0)
+
+        # The kinds, on screen rather than in the tooltip. "Import..." named
+        # no object at all, and the one question a person has before handing
+        # this tool their own file is what it will accept and what it will do
+        # with the parts it has no row for -- which the dialog answers well
+        # and the button could not hint at. A label rather than a longer
+        # button because the panel's floor is 180px: this elides, where a
+        # button of the same words would clip mid-word.
+        self._import_hint = ElidedLabel(IMPORT_KINDS, parent=toolbar)
+        self._import_hint.setStyleSheet(
+            f"color: {theme.TEXT_DISABLED}; font-family: {theme.FONT_MONO};"
+            f" font-size: {theme.FONT_SIZE_META}px;"
+        )
+        self._import_hint.setToolTip(self._import_button.toolTip())
+        second.addWidget(self._import_hint, 1)
         rows.addLayout(second)
 
         column.addWidget(toolbar)
@@ -1875,6 +1933,11 @@ class RecipesScreen(QWidget):
     def import_button(self) -> QPushButton:
         return self._import_button
 
+    def import_hint(self) -> ElidedLabel:
+        """The grey line naming the file kinds Import accepts."""
+
+        return self._import_hint
+
     def import_dialog(self) -> RecipeImportDialog | None:
         """The dialog the Import button opened, or ``None`` before it has been.
 
@@ -1935,10 +1998,23 @@ class RecipesScreen(QWidget):
         return _DOT.join(parts)
 
     def header_meta_text(self) -> str:
+        """``recipe_id``, then usage, then the edit date. Id first, and always.
+
+        The title beside this is ``name``, which the user may edit per
+        keystroke and which the migrator writes as four settings spelled into
+        a sentence ("rc_coupled, corner typical, 55C, extracted_view"). So the
+        only identity the form showed was one that both changes and looks like
+        a setting. ``recipe_id`` is the file stem, the string every cell
+        binding points at and every error message quotes, and it does not
+        move when the title does -- which is exactly why it has to be visible
+        while the title is being edited. The header's own tooltip promised as
+        much long before anything showed it.
+        """
+
         if self._working is None:
             return ""
+        parts = [self._working.recipe_id]
         used = self._usage.get(self._working.recipe_id)
-        parts = []
         if used is not None:
             parts.append(f"used by {used} cell" + ("" if used == 1 else "s"))
         parts.append(f"last edited {self._working.updated_at.strftime('%m-%d')}")
@@ -2237,6 +2313,15 @@ class RecipesScreen(QWidget):
         item = self._list.itemAt(pos)
         if item is None:
             return
+        # Select first, then build the menu. Duplicate and Delete name the
+        # row under the CURSOR, and the form on the right is the only thing
+        # on screen naming a recipe -- so right-clicking B while A is
+        # selected offered to delete B under a header still reading A, and
+        # the user had no way to notice before the recipe was gone. The Cells
+        # table already moves the selection on right-click; two of the three
+        # lists in the application disagreeing about what a right-click means
+        # is worse than either convention.
+        self._list.setCurrentItem(item)
         recipe_id = str(item.data(0, Qt.UserRole))
         menu = QMenu(self._list)
         duplicate = menu.addAction("Duplicate")

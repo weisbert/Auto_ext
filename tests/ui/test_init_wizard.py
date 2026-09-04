@@ -95,6 +95,9 @@ def _drive_to_preview(
     page._quantus_edit.setText(str(raw_dir / "quantus_sample.cmd"))
     page._jivaro_edit.setText(str(raw_dir / "jivaro_sample.xml"))
     if cell_override is not None:
+        # The Advanced box is what turns the overrides on; typing into a
+        # collapsed group is not a request to use it.
+        page._advanced.setChecked(True)
         page._cell_edit.setText(cell_override)
     wizard.next()
 
@@ -196,6 +199,39 @@ def test_an_identity_override_reaches_the_preview(
     )
     assert wizard._preview is not None
     assert wizard._preview.merged_identity.cell == "OVERRIDE_CELL"
+
+
+def test_unticking_advanced_puts_the_overrides_back(
+    qtbot, raw_dir: Path, tmp_path: Path, elsewhere: Path
+) -> None:
+    """"在 Advanced 里填了 cell 名又把 Advanced 取消勾选，项目还是按我填的建的."
+
+    A checkable ``QGroupBox`` whose checked state nothing reads is a switch
+    painted on the wall: unticking greys the six boxes out and the wizard
+    goes on using every value in them.
+    """
+
+    wizard = _make_wizard(qtbot)
+    wizard.next()
+    wizard.next()
+    page = wizard._raw_files
+    page._calibre_edit.setText(str(raw_dir / "calibre_sample.qci"))
+    page._si_edit.setText(str(raw_dir / "si_sample.env"))
+    page._quantus_edit.setText(str(raw_dir / "quantus_sample.cmd"))
+
+    page._advanced.setChecked(True)
+    page._cell_edit.setText("OVERRIDE_CELL")
+    assert wizard.build_inputs().cell_override == "OVERRIDE_CELL"
+
+    page._advanced.setChecked(False)
+    assert wizard.build_inputs().cell_override is None
+
+    wizard.next()
+    assert wizard._preview is not None
+    assert wizard._preview.merged_identity.cell == "INV1"
+    # and re-ticking it brings back what was typed rather than losing it
+    page._advanced.setChecked(True)
+    assert wizard.build_inputs().cell_override == "OVERRIDE_CELL"
 
 
 # ---- the preview ------------------------------------------------------------
