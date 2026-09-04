@@ -136,7 +136,6 @@ output:
     - BIPOLAR
     - GENERIC
 reduction:
-  enabled: true
   frequency_limit_ghz: 14.0
   error_max_pct: 2.0
   # NEEDS CONFIRMATION: What other criteria does the Jivaro UI offer?
