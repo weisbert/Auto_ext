@@ -274,11 +274,18 @@ def test_a_stage_the_tool_failed_records_the_verdict_the_log_supports(
     record = read_record(_run_dirs(root)[0])
     stage = record.stages[0]
     assert stage.status == StageStatus.FAILED
+    assert stage.exit_code == 4, "the exit code the mock returned"
+
     verdict = stage.details["failure"]
     assert verdict["failure_class"] == "tool_crash"
-    assert "4" in verdict["reason"], "the exit code the mock returned"
+    assert verdict["confidence"] == "certain"
+    # The declared netlist beats the bare exit code: "si exited 4" is the
+    # symptom every failure shares, "si wrote no netlist" is the finding.
+    assert "never appeared" in verdict["reason"]
+    assert "src.net" in verdict["reason"]
     # This one *does* have a log, so pointing at it is the right next step.
     assert stage.log_path is not None
+    assert "no stage log" not in verdict["next_action"].lower()
 
 
 def test_a_verdict_is_recorded_only_for_the_stage_that_failed(
@@ -302,6 +309,39 @@ def test_a_verdict_is_recorded_only_for_the_stage_that_failed(
     assert record.stages, "the dry run should still record its stages"
     for stage in record.stages:
         assert "failure" not in stage.details, stage.key
+
+
+def test_an_output_a_stage_declared_and_never_wrote_reaches_the_record(
+    project_tools_config: Path,
+    workarea: Path,
+    tmp_path: Path,
+    mocks_on_path: Path,
+) -> None:
+    """The fact the card draws its "output missing" chip from, end to end.
+
+    ``Tool.with_artifacts`` deliberately does not flip ``success`` when a
+    declared output is absent -- the tool really did exit 0 -- so the stage is
+    recorded as passed and the absent file is filed beside it. Both halves
+    have to survive into ``run.json`` or the GUI has nothing to warn with.
+    """
+
+    project, tasks = _load(project_tools_config)
+    root = tmp_path / "project_root"
+    run_tasks(
+        project,
+        tasks,
+        stages=["si"],
+        auto_ext_root=root,
+        workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
+    )
+
+    stage = read_record(_run_dirs(root)[0]).stages[0]
+    assert stage.status == StageStatus.PASSED
+    assert stage.artifacts == [], "the netlist was declared, not written"
+    missing = stage.details["missing_artifacts"]
+    assert missing and all(isinstance(p, str) for p in missing)
 
 
 # ---- M-42: cancelling a batch ----------------------------------------------
