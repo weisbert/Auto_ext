@@ -4207,12 +4207,19 @@ options:
     type: path
     choices_confidence: certain
     default: ${WORK_ROOT2}
-    currently: jinja_var
+    currently: config_field
     observed: true
     source_ref: auto_ext/core/config.py:209
     notes: >-
       In the flat context but referenced by no template; it exists as the root
       dspf_out_path is expressed against. Pattern on WorkspaceConfig.
+      CORRECTED 2026-09-04 from `jinja_var` to `config_field`. It was the only
+      row in the file claiming to reach a template as [[var]] while naming no
+      landing site, and no .j2 has ever mentioned it -- the same state as
+      layer_map and qrc_deck_dir, both of which already record it as
+      config_field. Bound into the flat context, consumed only by Python.
+      That combination was invisible to audit_template_vars, which walked
+      lands_in and therefore had nothing to walk; the audit now reports it.
     why: Root of the derived output paths. Not a per-recipe setting.
 
   - key: employee_id

@@ -658,6 +658,47 @@ def test_catalog_and_templates_agree(catalog: Catalog) -> None:
     assert audit.ok, "\n" + audit.describe()
 
 
+def test_a_row_that_says_it_reaches_a_template_has_to_name_which_one(
+    catalog: Catalog,
+) -> None:
+    """The hole the two-way audit could not see.
+
+    Both existing directions walk ``opt.targets``, which is derived from
+    ``lands_in``. A row with NO landing site therefore has an empty loop in
+    the forwards direction and contributes nothing to the backwards one, so a
+    ``currently: jinja_var`` row whose variable appears in no template at all
+    -- the strongest claim the column can make -- was the one shape that
+    slipped through both. ``intermediate_dir`` sat in exactly that state:
+    catalog says "reaches a template as [[intermediate_dir]]", no template has
+    ever referenced it.
+    """
+
+    audit = audit_template_vars(catalog)
+    assert audit.no_landing_site == [], "\n" + audit.describe()
+
+
+def test_the_landing_site_audit_catches_a_row_it_should(catalog: Catalog) -> None:
+    """The audit above is only worth its line if it can fail.
+
+    A synthetic row, because the shipped catalog no longer has one.
+    """
+
+    row = OptionSpec.model_validate(
+        _minimal_option(
+            key="ghost",
+            template_var="ghost",
+            currently="jinja_var",
+            observed=False,
+            source_ref=None,
+        )
+    )
+    broken = catalog.model_copy(update={"options": [*catalog.options, row]})
+    audit = audit_template_vars(broken)
+    assert audit.no_landing_site == [("ghost", "ghost")]
+    assert not audit.ok
+    assert "ghost" in audit.describe()
+
+
 # ---- the gap audit: a row nobody can set ------------------------------------
 #
 # ``owner`` says who holds the value; ``currently`` says how it reaches the
