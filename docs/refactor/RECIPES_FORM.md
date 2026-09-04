@@ -162,6 +162,7 @@ Five columns: marker · label · control · annotation · flag.
 |---|---|---|
 | `requires_emit` miss | **disabled**, visible | The option exists and the tool accepts it; this recipe just does not reach it. Hiding it would say "this tool has no such setting", which is false. Rendering it anyway writes a command file the tool rejects, hours into a run. |
 | template freezes the value | **disabled**, visible, with the reason | Same rule. `check_representable` refuses the render; that is a good last line of defence and a bad first one. |
+| member in `choices_not_offered` | **absent from the control**, present in `choices` | The one case where hiding is right, and only because the alternative is worse: the tool accepts the value, we cannot render a complete deck for it, and the model refuses it — so an offered entry would be a click that can only end in an error dialog. Search still finds the row, its `why` still names the member, and readback still shows it. See §8.1. |
 | `tier: full`, at default, in Common | **hidden** | Only because one always-visible toggle and search both reach it. Never hidden when non-default. |
 | tool with 0 Common rows | **one-line strip** | A tool must never disappear — see §3. |
 
@@ -253,6 +254,7 @@ this tool was unreachable — from the GUI, the YAML and the CLI alike.
 |---|---|---|
 | `describes_member` | this row describes one field of one member of the collection at `context_path`, not a scalar | 2 |
 | `choice_args` | which enum members take an operand, and what kind | 1 |
+| `choices_not_offered` + `not_offered_reason` | members the tool accepts and this form does not draw, and why — added 2026-09-04, see §8.1 | 1 |
 
 `describes_member` is why `extract_selection` and `extract_type` have a real
 `context_path` and a `recipe_field_path` of `None`. The value genuinely lives
@@ -260,6 +262,49 @@ at `recipe.extraction.extract`; what does not exist is a *single* value a
 control could bind to. Pointing them at `null` instead would have made them
 look like the structural rows that bind to nothing at all, which is a
 different and less true statement.
+
+### 8.1 `choices_not_offered` — added 2026-09-04
+
+`extract -type` has fifteen members and the combo now draws six. The other
+nine are listed on the row as `choices_not_offered` with a
+`not_offered_reason`, and `ExtractRule` refuses them.
+
+The reason they could not simply be deleted from `choices` is that the two
+edits make different claims. Removing a member says **the tool has no such
+value**; listing it here says **the tool has it and we decline to offer it**.
+`choices` is what readback matches a colleague's deck against, what the
+importer names in its report, and what the model quotes when it refuses — so a
+deleted member stops being nameable and the deck that carries it imports as
+"not one of the catalog's choices", which is this tool calling the vendor
+wrong.
+
+What decided it was not taste. Each of the nine renders a deck Quantus accepts
+and runs to a clean exit while silently omitting the thing the member was
+chosen for: the six `rlc*`/`rlck*` members need `-ind_component` /
+`-mutual_ind_component`, which no template emits, so the netlist comes back
+with no inductor in it; `substrate_only` and the three `*_to_substrate`
+members need `substrate_nets_file`, and the manual says that without it *no
+nets are extracted as connected to the substrate*. The owner ruled on
+2026-09-04 that a knob they do not understand is a knob they will never use —
+**not understood is not offered** — and the second half of that rule is that
+nothing the form *does* offer may quietly produce an incomplete deck.
+
+Mechanics:
+
+- `OptionSpec.offered_choices` is `choices` minus the exempted members, in the
+  vendor's own order. Every control reads that; `choices_for()` too.
+- The catalog self-check refuses a member with no reason, a reason with no
+  member, a member that is not in `choices`, a set that hides every member,
+  and a set that hides the row's own `default` — the last because a new recipe
+  would otherwise start on a value its own form will not draw.
+- The model keeps its own `NOT_OFFERED_EXTRACT_TYPES` table so it can validate
+  without reading YAML, and a test keeps the two equal — the same arrangement
+  `SELECTION_ARG_KIND` already has with `choice_args`.
+- A rule read off disk carrying one of the nine is still **shown** in the
+  combo. Not offering a value is not the same as pretending it is not there;
+  snapping to the first entry would rewrite the user's file on open.
+- An imported deck degrades to the catalog default with a report line naming
+  the statement, the member, the reason and what it became — never silently.
 
 `choice_args` is what makes three of `-selection`'s four members usable.
 Before it, the template emitted `-selection "[[extract_selection]]"` as a bare

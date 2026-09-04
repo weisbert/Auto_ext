@@ -230,3 +230,58 @@ agent，给它一个具体任务，例如：
 合并到 `review/rulers-2026-09-04`；波 2（43）撞另一个会话正在改的 `main_window.py` /
 `cells_screen.py` / `run_bar.py`，等它提交；波 3（14）要 owner 拍板（电感器件名、衬底网表、
 电源地寄生算不算、拒绝还是警告）或红区探针。用户报的四条原始 bug 里，三条在波 2。
+
+**波 3 的拍板 2026-09-04 回来了，而且不是逐条回来的。** owner 的原话是「你列给我让我
+决定的这些旋钮，说实话我一个都不懂，不懂的东西我大概率永远不会用」——这条比任何一条
+单独的答案都上位：**不理解 = 不提供**。它把尺子 D 的参照物从厂商手册换成了 owner 在
+Quantus GUI 里真正会动的那些，八条波 3 的账因此不是「实现」而是「记录一个决定」结掉的。
+展开在 5.6。
+
+### 5.6 尺子 D 换了参照物：「不理解 = 不提供」（2026-09-04 裁定）
+
+> 波 3 的 14 条里有 6 条是「等 owner 拍板」。把这 6 条列成一张选择题交上去，回来的
+> 不是答案，是一条更上位的规则：
+>
+> **「你列给我让我决定的这些旋钮 —— 说实话我一个都不懂，不懂的东西我大概率永远不会用。」**
+
+这句话推翻了本项目一直默认的那把尺子。**领域对齐（尺子 D）原来的参照物是厂商手册**：
+手册里有的选项，catalog 里就该有一行，表单上就该有一个控件，缺了就是缺口。裁定之后
+参照物变成了**owner 在 Quantus GUI 里真正会去动的那些**。规则一条：
+
+> **不理解 = 不提供。** owner 用不到的厂商选项不画进表单，走工具默认值，
+> **catalog 行上写清楚是哪个默认值、为什么不画** —— 豁免是一条被记录的决定，
+> 而「控件不存在」不是。
+> 反过来同样成立：**表单提供的东西，绝不允许悄悄产出一份不完整或非法的 deck。**
+
+两条推论，本轮各落地一次：
+
+- `extract -type` 十五个成员里**只画六个**（`none` / `r_only` / `c_only_decoupled` /
+  `c_only_coupled` / `rc_decoupled` / `rc_coupled`）。另外九个模板补不齐它们的契约 ——
+  六个 `rlc*`/`rlck*` 缺 `-ind_component`、`substrate_only` 和三个 `*_to_substrate`
+  缺 `substrate_nets_file` —— 选中就是**跑得通、报成功、网表里没有电感 / 没有衬底网络**。
+  新增 catalog 列 `choices_not_offered` + `not_offered_reason` 把「工具没有这个值」和
+  「工具有，我们不提供」分成两件事：`choices` 保持完整，否则 readback 和导入就再也
+  叫不出同事那份 deck 里写的是什么。model 拒绝这九个并在报错里点名缺的是哪个契约，
+  导入则降级成 catalog 默认值**并留下一行报告**说明降的是哪一条、为什么、降成了什么。
+- **假动作要么实现、要么撤掉。** `fail_on_unparsable_lvs_report` 是唯一一个
+  `currently: absent` 却还带着 `context_path`、因而被画成活控件的行 —— 勾与不勾毫无区别，
+  因为判决发生在 `CalibreTool.parse_result`，那里根本拿不到 recipe。实现它要把 policy
+  穿过整个 Tool 协议或挪到 runner 里判，都不小；所以撤掉 `context_path`，控件消失，
+  行和字段留下，把「实现它要付什么代价」写在原地。
+
+两条配套的规矩，都落在 `tests/ui/test_reachability.py` 的 `CATALOG_UNREACHABLE` 上：
+
+- **豁免理由必须自报是哪一种决定**：`owner ruled 2026-09-04` / `BLOCKED ON A PROBE` /
+  `NO LANDING SITE` / `RETIRED`。改之前十五条理由是「catalog 还不知道」「手册那一轮
+  还没回来」这种**等待**穿着决定的衣服——而 C5 早已把手册答案写到那些行上了。等待和
+  遗漏一年之后长得一模一样，所以理由必须说清自己在等谁。
+- **被裁掉的行必须交代工具默认是什么**（field solver 默认关、via cap 默认 true、
+  fringing cap 自 11.1 起默认 true、`min_res_centering` 默认 false、subnode 默认写出、
+  没有 `global_nets` 则 `-selection all` 真的包含 VDD/VSS）。手册没写默认值的行，
+  理由里必须**明说手册没写**，不许编——这和 `range_verified` 那一列是同一条规矩。
+
+还有一条不是「不提供」而是「提供但说清楚」：`metal_fill -type virtual` 在 Calibre LVS
+输入下是空转（手册原话如此），但它在 owner 跑了多年的每一份老 deck 里都有。删掉只省
+一行、代价是把那些 deck 全 diff 一遍，所以**留着**，事实写在 catalog 行和模板的一行
+Jinja 注释里，免得下一个人当成整洁化再删一次。至于「这颗 PDK 的 dummy fill 到底该怎么
+建模」——那是另一个问题，`question:` 保持打开。
