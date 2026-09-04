@@ -173,7 +173,11 @@ DUT_FALLBACK_FIELDS: frozenset[str] = frozenset(
     }
 )
 
-#: Recipe fields with no catalog row, and why. Everything else must have one.
+#: Recipe fields with no catalog row *that binds to them*, and why. Everything
+#: else must have one. Two shapes qualify: a field the catalog has never
+#: described at all, and a field whose row deliberately points at nothing --
+#: the second was added on 2026-09-04 and is the honest way to retire a
+#: control without deleting a field recipes on disk still carry.
 CATALOG_EXEMPT_FIELDS: frozenset[str] = frozenset(
     {
         # Envelope: identity, lineage and bookkeeping, not extraction settings.
@@ -187,6 +191,11 @@ CATALOG_EXEMPT_FIELDS: frozenset[str] = frozenset(
         "updated_at",
         # The escape hatch. By definition it holds what the catalog cannot.
         "patches",
+        # Has a catalog row; the row binds to nothing on purpose. Nothing
+        # reads this policy -- the LVS verdict is made where no recipe is in
+        # scope -- so on 2026-09-04 the row's context_path was dropped and the
+        # form stopped drawing a live control for it. See RunPolicy.
+        "policy.fail_on_unparsable_lvs_report",
     }
 )
 
@@ -830,8 +839,15 @@ class RunPolicy(Base):
     """How the run behaves when something goes wrong."""
 
     continue_on_lvs_fail: bool = False
-    #: Today an unparsable LVS report raises and the run fails, with no way to
-    #: say otherwise. Same behaviour by default, now stated.
+    #: NOT HONOURED YET, and the field says so rather than the form pretending
+    #: otherwise. An unparsable LVS report fails the run whatever this says:
+    #: the verdict is made in ``CalibreTool.parse_result``, whose only input is
+    #: a ``ToolResult``, so no recipe policy is in scope where the decision
+    #: happens. The catalog row's ``context_path`` was dropped on 2026-09-04
+    #: so the Recipes form stops drawing a tick box that changes nothing --
+    #: see ``options.yaml``'s ``fail_on_unparsable_lvs_report`` for what
+    #: implementing it would cost. The field itself stays because recipes on
+    #: disk carry it, and because ``True`` is exactly today's behaviour.
     fail_on_unparsable_lvs_report: bool = True
 
 

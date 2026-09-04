@@ -98,6 +98,14 @@ RECIPE_UNREACHABLE: dict[str, str] = {
         "the escape hatch's storage. Its control is the manual-edit strip, "
         "which edits hunks rather than this field"
     ),
+    "policy.fail_on_unparsable_lvs_report": (
+        "DELIBERATELY UNBOUND since 2026-09-04. It had a control, and the "
+        "control was a fake action: nothing reads this policy, because the "
+        "LVS verdict is made in CalibreTool.parse_result where no recipe is "
+        "in scope. A tick box that changes nothing is worse than a missing "
+        "one -- the user believes the run behaved as they set it. The field "
+        "stays for recipes on disk; True is exactly today's behaviour"
+    ),
 }
 
 #: Recipe-owned CATALOG rows with no control, and why. This is the outer half
@@ -113,105 +121,177 @@ RECIPE_UNREACHABLE: dict[str, str] = {
 #: What it may never do is disappear silently, which is what all twenty-one
 #: were doing: ``recipe_specs`` drops anything without a ``recipe_field_path``
 #: and said so nowhere on screen.
+#: Three kinds of reason live here, and telling them apart is the point:
+#:
+#: * **owner ruled 2026-09-04** -- the owner was shown the knob and said, of
+#:   the whole list, *"honestly I do not understand any of them, and if I do
+#:   not understand them I will most likely never use them."* Not understood
+#:   is not offered. These reasons name the tool default that applies instead,
+#:   quoted from the row's own notes; where the manual does not document a
+#:   default, the reason says so rather than inventing one.
+#: * **blocked on a probe** -- nobody has read the vendor manual for it yet,
+#:   so there is no default to cite and no ruling to rest on. The Calibre
+#:   connect-by-name rows are this: that manual has never been probed at all.
+#: * **no landing site exists** -- the strmout rows, whose stage takes argv
+#:   rather than a rendered file.
+#:
+#: A reason of the first kind is a decision and closes the row. One of the
+#: other two is a decision to wait, and names what it is waiting for.
 CATALOG_UNREACHABLE: dict[str, str] = {
-    # -- Calibre LVS supply naming. One office question, three rows.
+    # -- Calibre LVS supply naming. Blocked on a probe, NOT on the ruling:
+    # the Calibre manual has never been read for these, so there is no tool
+    # default to state and nothing was put in front of the owner to rule on.
     "lvs_extra_power_names": (
-        "no Recipe field and no template hole. Blocked on the office question "
-        "behind lvs_connect_by_name_nets: until we know which of the three "
-        "connect-by-name settings the site actually runs, a control here "
-        "would invite a supply list that changes nothing"
+        "BLOCKED ON A PROBE, not ruled: no Recipe field and no template hole, "
+        "and the office question behind lvs_connect_by_name_nets is unanswered. "
+        "Until we know which of the three connect-by-name settings the site "
+        "actually runs, a control here would invite a supply list that changes "
+        "nothing"
     ),
     "lvs_extra_ground_names": (
-        "the ground half of lvs_extra_power_names, and blocked on the same "
-        "question. Shipping one of the pair without the other would read as "
-        "'grounds are handled elsewhere', which is false"
+        "BLOCKED ON A PROBE: the ground half of lvs_extra_power_names, waiting "
+        "on the same question. Shipping one of the pair without the other "
+        "would read as 'grounds are handled elsewhere', which is false"
     ),
     "lvs_connect_by_name_nets": (
-        "the office question itself -- which connect-by-name mode the flow "
-        "wants -- is unanswered, and this row is the one that would have to "
-        "encode the answer. A guess here changes what LVS considers shorted"
+        "BLOCKED ON A PROBE: the Calibre manual has never been read at all, "
+        "and this row is the one that would have to encode which of the three "
+        "connect-by-name modes the flow wants. A guess here changes what LVS "
+        "considers shorted, which is not a thing to guess"
     ),
-    # -- Quantus ``extract``. Five rows that would each need a rule field.
+    # -- Quantus ``extract``. Ruled out on 2026-09-04, one row at a time.
     "use_field_solver": (
-        "the accuracy lever, and the catalog's own question asks what an "
-        "omitted line gives us today. Modelling it before that is answered "
-        "would let a user pick a level believing the current runs are at a "
-        "different one"
+        "owner ruled 2026-09-04: not used in this shop; tool default applies "
+        "(field solver disabled). They do not set it in the Quantus GUI, so "
+        "the form does not offer it. The row keeps what that costs: our "
+        "capacitances come from matching the layout against the technology "
+        "file rather than from solving the geometry"
+    ),
+    "field_solver_type": (
+        "owner ruled 2026-09-04: not used in this shop; the manual documents "
+        "no default for it, so none is claimed here. Meaningless while "
+        "use_field_solver is unwritten -- the pair is offered together or "
+        "not at all, and today it is not at all"
     ),
     "extract_via_cap": (
-        "the manual round has not returned the default, and the catalog's "
-        "question asks whether it interacts with -use_field_solver. A "
-        "check box whose unticked state is not the tool's default is a "
-        "control that silently changes the extraction"
+        "owner ruled 2026-09-04: not used in this shop; tool default applies "
+        "(via and contact capacitance extracted, true). Writing the line "
+        "could only ever turn it off, which removes capacitance from an RF "
+        "result -- so the control would have exactly one destructive use"
     ),
     "extract_gate_diffusion_fringing_cap": (
-        "same round, same reason, plus the open question of whether the PDK "
-        "device model already carries this term -- ticking it could count "
-        "fringing capacitance twice"
+        "owner ruled 2026-09-04: not used in this shop; tool default applies "
+        "(fringing cap on, true since the 11.1 release). The manual says in "
+        "as many words that using this option is not recommended, so the "
+        "only reachable effect of a control is one the vendor advises against"
     ),
     "inductance_nets_file": (
-        "gates the rlc and rlck extract types, and we do not yet know the "
-        "file format or whether it is mandatory. Offering the path before "
-        "the types are usable would be a control that leads nowhere"
+        "owner ruled 2026-09-04: not used in this shop; tool default applies "
+        "(every net in the selection gets inductance). It gates only the "
+        "rlc/rlck extract types, and those are no longer offered either -- "
+        "see extract_type's choices_not_offered -- so there is nothing left "
+        "for the file to gate"
     ),
     "substrate_nets_file": (
-        "as inductance_nets_file, for the substrate_only and "
-        "decoupled_to_substrate types. Both belong with the extract-rule "
-        "sub-form when they land, not as a scalar beside it"
+        "owner ruled 2026-09-04: not used in this shop; the tool default is "
+        "the dangerous one -- the manual says that without this file NO nets "
+        "are extracted as connected to the substrate. That is precisely why "
+        "substrate_only and the *_to_substrate types went off the form with "
+        "it, rather than the file being offered on its own"
     ),
     # -- Quantus ``extract -selection`` and ``global_nets``.
     "selection_layers": (
-        "layer-based net selection is a second selection mode the extract "
-        "rule sub-form does not model. It needs a rule field, not a row"
+        "owner ruled 2026-09-04: not used in this shop. Layer-based net "
+        "selection is a second selection mode beside the extract-rule "
+        "sub-form's own -selection. The manual documents no default for it; "
+        "what is written today is nothing, so the rule's -selection alone "
+        "decides which nets a statement covers"
     ),
     "selection_dividing_layers_type": (
-        "meaningless without selection_layers -- the catalog's own note says "
-        "one without the other says nothing -- so the pair lands together"
+        "owner ruled 2026-09-04, with selection_layers: the catalog's own "
+        "note says one without the other means nothing, so the pair is drawn "
+        "together or not at all. No default is documented for it and nothing "
+        "is written for either half"
     ),
     "global_nets_nets": (
-        "decides what '-selection all' actually covers. The catalog's "
-        "question asks how the four global_nets options interact and how "
-        "they relate to the LVS power/ground names; four controls wired on a "
-        "guess about that is four ways to change the netlist by accident"
+        "owner ruled 2026-09-04: supply-net handling is not something this "
+        "shop configures here. What the tool default means matters and is "
+        "recorded: with no global_nets command, no net is declared global, so "
+        "`extract -selection all` really does cover every net including VDD "
+        "and VSS -- the opposite of what 'all except the supplies' would give"
     ),
-    "global_nets_file": "the file form of global_nets_nets; same question, same wait",
+    "global_nets_file": (
+        "owner ruled 2026-09-04, with global_nets_nets whose file form this "
+        "is: nothing is written, so the tool default holds and there is no "
+        "global-net list from either route. The manual's format for the file "
+        "was never captured, which is a second reason not to offer a path box"
+    ),
     "global_nets_import_from_lvs": (
-        "the third of the same four, and the one that decides whether the "
-        "recipe's list is used at all"
+        "owner ruled 2026-09-04, with the rest of global_nets. Its default is "
+        "not documented and neither is its precedence against an explicit "
+        "list, so there is no tool default to cite -- only the fact that we "
+        "write nothing"
     ),
-    "global_nets_force": "the fourth of the same four",
+    "global_nets_force": (
+        "owner ruled 2026-09-04: the fourth global_nets option, off the form "
+        "with the other three. Its default and its precedence rule against "
+        "them are not captured anywhere, so a control would be a switch whose "
+        "effect nobody in this repository can state"
+    ),
     # -- Quantus ``filter_*``.
     "exclude_floating_decoupling_factor": (
-        "only meaningful alongside exclude_floating_nets_limit, and its "
-        "advisory 0-1 range is unverified. A number that redistributes "
-        "capacitance is the wrong place to ship a guessed bound"
+        "owner ruled 2026-09-04: not used in this shop. The manual recommends "
+        "1 alongside -exclude_floating_nets, which both decks do set, but "
+        "does not say that 1 is also the unwritten default -- so the reason "
+        "this row cites no default is that there is none to cite. Its lower "
+        "bound is exclusive, which the [lo, hi] range column cannot express"
     ),
     "merge_parallel_via": (
-        "the catalog asks for its documented default and which flow it "
-        "applies to. It changes the extracted resistor count, so a wrong "
-        "default here is a wrong netlist that still runs"
+        "owner ruled 2026-09-04: not used in this shop, and it is unreachable "
+        "besides -- the manual makes it mutually exclusive with "
+        "-merge_parallel_res, which both command files emit unconditionally, "
+        "so a control here would ship a deck Quantus refuses unless the other "
+        "line became conditional first. Its own default is undocumented"
     ),
     "min_res_centering": (
-        "the catalog does not yet know whether it is a boolean or an enum, "
-        "which is the one thing a control has to know first"
+        "owner ruled 2026-09-04: not used in this shop; tool default applies "
+        "(false -- when the min_res floor shorts sub-nodes together the "
+        "survivor is picked arbitrarily rather than by proximity to the "
+        "group's centre). The cleanest promotion candidate of this set the "
+        "day it is wanted: a boolean, no licence cost, no companion option"
     ),
     "disable_subnodes": (
-        "decides whether split-net subnodes reach the DSPF, and so what can "
-        "be back-annotated at all. Wired to nothing today; it belongs beside "
-        "sub_node_char when it lands"
+        "owner ruled 2026-09-04: not used in this shop; tool default applies "
+        "(subnodes are written). Turning it on removes what sub_node_char "
+        "delimits, and with it what can be back-annotated from the DSPF"
     ),
     # -- strmout. No template at all: the stage is argv, not a rendered file.
     "strmout_hier_depth": (
-        "strmout takes argv rather than a rendered file, so there is no "
-        "template hole to open. The catalog records that we are relying on "
-        "its defaults without anybody having chosen them, and the office "
-        "question about the manual flow is unanswered"
+        "NO LANDING SITE: strmout takes argv rather than a rendered file, so "
+        "there is no template hole to open. Probed on 2026-09-04 against "
+        "extUser.pdf and every term returned zero hits -- the right answer "
+        "from the wrong book, since strmout is a Virtuoso utility and not a "
+        "Quantus command. The question stands; the manual to ask does not"
     ),
     "strmout_convert_dot": (
-        "as strmout_hier_depth: argv, and the same unanswered question"
+        "NO LANDING SITE, as strmout_hier_depth: argv, and the same "
+        "wrong-book result from the 2026-09-04 probe"
     ),
     "strmout_case": (
-        "as strmout_hier_depth: argv, and the same unanswered question"
+        "NO LANDING SITE, as strmout_hier_depth: argv. Third of the three, "
+        "and the one that would silently change every cell name in the GDS"
+    ),
+    # -- A control retired rather than blocked. The only row here that USED to
+    # be drawn: it kept a context_path while being `currently: absent`, so the
+    # form gave it a live tick box that no template, runner or check reads.
+    "fail_on_unparsable_lvs_report": (
+        "RETIRED 2026-09-04, not waiting on anything: this was the one absent "
+        "row the form still drew live, and setting it changed nothing. The "
+        "LVS verdict is made in CalibreTool.parse_result, whose only input is "
+        "a ToolResult, so honouring a per-recipe policy means threading it "
+        "through the whole Tool protocol or deciding it in the runner -- "
+        "neither small. Its context_path was dropped so the fake control "
+        "disappears; the row and the RunPolicy field stay, saying so"
     ),
 }
 
@@ -299,6 +379,53 @@ def test_the_catalog_exemptions_are_not_one_sentence_copied_twenty_one_times() -
     assert len(set(reasons)) >= len(reasons) - 2, (
         "these exemptions repeat one another; the set is a rubber stamp"
     )
+
+
+def test_every_exemption_says_which_kind_of_decision_it_is() -> None:
+    """"Nobody has done it" and "somebody decided not to" look the same.
+
+    That is the whole reason this set exists, and before 2026-09-04 fifteen of
+    its reasons were the first kind wearing the second's clothes -- "the
+    catalog does not yet know", "the manual round has not returned", "blocked
+    on the office question". Every one of those is a wait, and a wait with no
+    named blocker is indistinguishable from an omission a year later.
+
+    So each reason has to declare itself: a ruling (with its date), a probe it
+    waits on, a stage with no landing site, or a control deliberately retired.
+    """
+
+    markers = ("owner ruled 2026-09-04", "BLOCKED ON A PROBE", "NO LANDING SITE", "RETIRED")
+    undeclared = sorted(
+        key
+        for key, why in CATALOG_UNREACHABLE.items()
+        if not any(marker in why for marker in markers)
+    )
+    assert undeclared == [], (
+        f"these exemptions do not say what kind of decision they are: "
+        f"{undeclared}. One of {markers} -- an unlabelled reason reads as a "
+        "wait for something nobody has named."
+    )
+
+
+def test_a_ruled_out_row_says_what_the_tool_does_instead() -> None:
+    """A knob we do not offer still has an effect: the tool's own default.
+
+    "We do not expose it" answers nothing on its own -- the extraction still
+    happens, under some setting, and the user is entitled to know which. Where
+    the manual documents a default the reason quotes it; where it does not,
+    the reason has to say *that*, because a silently missing default is how a
+    guess gets shipped as a fact (``options.yaml``'s ``range_verified``
+    column exists for the same reason).
+    """
+
+    for key, why in CATALOG_UNREACHABLE.items():
+        if "owner ruled 2026-09-04" not in why:
+            continue
+        states_default = "tool default applies" in why or "default" in why
+        assert states_default, (
+            f"{key}: ruled out with no word on what the tool does instead. "
+            "Cite the manual's default, or say that the manual documents none."
+        )
 
 
 def test_the_screen_docstring_does_not_undercount_the_rows_it_drops() -> None:

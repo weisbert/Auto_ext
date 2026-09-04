@@ -66,12 +66,16 @@ Assumptions
   ``owner: profile`` -- a process fact -- and the seam between "the recipe
   names a semantic corner" and "the profile maps it to ``TYPICAL``" is what
   makes a recipe portable.
-* **21** recipe-owned rows whose ``currently`` is ``absent`` have no
+* **23** recipe-owned rows whose ``currently`` is ``absent`` have no
   ``recipe_field_path`` and therefore no field to bind to, so
-  :func:`recipe_specs` skips them. They are not proposals: eleven are real
+  :func:`recipe_specs` skips them. They are not proposals: thirteen are real
   Quantus ``extract`` / ``filter_*`` / ``global_nets`` options and three are
   ``strmout`` argv, all written down in our own catalog, and each needs two
   things it has not got -- a ``Recipe`` field and a hole in the template.
+  Most of the Quantus ones were ruled out by the owner on 2026-09-04 rather
+  than merely unbuilt -- *not understood is not offered* -- and one,
+  ``fail_on_unparsable_lvs_report``, was **retired from this form**: it had a
+  live tick box and nothing read it.
 
   This docstring said "six" while twenty-one were being dropped, which is the
   reason the count is now asserted rather than described: every one of them is
@@ -265,7 +269,7 @@ def recipe_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
 
     Rows without a ``recipe_field_path`` are dropped, because there is no
     field for a control to write to. That is correct and it is not free: the
-    21 rows it drops are real vendor options this catalog records, and
+    23 rows it drops are real vendor options this catalog records, and
     dropping them *silently* is what made "we decided not to" and "we forgot"
     indistinguishable -- in the code and on the screen alike. Each one is now
     named with its own reason in ``CATALOG_UNREACHABLE``
