@@ -440,6 +440,21 @@ def test_shell_scripts_parse(script: str) -> None:
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
 
 
+def test_doctor_reports_whether_this_box_can_open_a_file_at_all() -> None:
+    """The office server has no xdg-open and no gio, and every "Open the log /
+    the report" button in the GUI then does nothing at all -- no window, no
+    error. The doctor is where a box's properties are read off before the
+    click, and it probed $DISPLAY but never the opener."""
+
+    from auto_ext.core.health import FILE_OPENERS
+
+    text = DOCTOR_SH.read_text(encoding="utf-8")
+    for name in FILE_OPENERS:
+        assert name in text, f"doctor.sh does not probe {name}"
+    # And it says so in the per-interpreter block, next to DISPLAY.
+    assert "open     " in text
+
+
 def test_deploy_and_doctor_declare_bash_not_sh() -> None:
     """Both use bash-isms (arrays, `[[ ]]`, `shopt`). The red-zone login shell is
     tcsh, so they are started with `bash x.sh`; a wrong shebang would hand them

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
@@ -19,8 +21,10 @@ from auto_ext.core.run_store import (
     BATCHES_DIRNAME,
     RunStoreError,
     append_event,
+    delete_run,
     find_previous_run,
     list_runs,
+    list_runs_detailed,
     prune_runs,
     read_annotations,
     read_batch,
@@ -616,3 +620,97 @@ def test_a_finished_run_directory_is_self_describing(
     assert (d / back.results.lvs.archived_path).is_file()
     assert back.duration_s == 120.0
     assert read_events(d)[-1]["event"] == "run_end"
+
+
+# ============================================================================
+# review 2026-09-04: what the history drops, and what it must refuse
+# ============================================================================
+
+
+def test_the_listing_reports_the_directories_it_could_not_read(
+    runs_root, make_run_record, frozen_clock
+) -> None:
+    """M-27: five silent skip paths, and their warnings go to a logger with no
+    handler, so ten runs vanished from the GUI with nothing said."""
+
+    _write_run(runs_root, make_run_record, frozen_clock, cell="amp2")
+    no_record = allocate_run_dir(runs_root, "mixer-ext")
+    truncated = allocate_run_dir(runs_root, "vco-ext")
+    run_paths(truncated).record.write_text('{"schema_version": 2', encoding="utf-8")
+
+    listing = list_runs_detailed(runs_root)
+
+    assert [e.cell for e in listing.entries] == ["amp2"]
+    assert listing.error is None
+    assert {path for path, _why in listing.unreadable} == {no_record, truncated}
+    assert all(why for _path, why in listing.unreadable)
+    # And the plain entry point still returns exactly the entries.
+    assert [e.run_id for e in list_runs(runs_root)] == [
+        e.run_id for e in listing.entries
+    ]
+
+
+def test_an_unreadable_runs_directory_is_reported_not_raised(
+    runs_root, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-37: iterdir() raises EACCES / ESTALE and took the GUI down with it."""
+
+    def denied(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "iterdir", denied)
+
+    listing = list_runs_detailed(runs_root)
+    assert listing.entries == []
+    assert listing.error is not None
+    assert "Permission denied" in listing.error
+    assert list_runs(runs_root) == []
+
+
+def test_annotations_refuse_to_resurrect_a_deleted_run(
+    runs_root, make_run_record, frozen_clock
+) -> None:
+    """M-41: the atomic write creates parents, so annotating a run that had
+    been deleted rebuilt its directory with nothing but annotations.json --
+    which the listing then skips, so the run left the list for good."""
+
+    d, _ = _write_run(runs_root, make_run_record, frozen_clock, cell="amp2")
+    shutil.rmtree(d)
+
+    with pytest.raises(RunStoreError) as exc_info:
+        write_annotations(d, RunAnnotations(display_name="golden run"))
+
+    assert str(d) in str(exc_info.value)
+    assert not d.exists(), "no ghost directory"
+
+
+def test_delete_run_removes_a_skeleton_and_refuses_anything_else(
+    runs_root, make_run_record, frozen_clock
+) -> None:
+    """M-43: a run that died mid-flight is pinned to the list for ever --
+    prune_runs refuses a pending run on purpose and the GUI had no delete."""
+
+    skeleton = allocate_run_dir(runs_root, "amp2-ext")
+    write_record(
+        skeleton,
+        make_run_record(run_dir=skeleton, overall=TaskStatus.PENDING, stages=[]),
+    )
+    frozen_clock.tick(1)
+    finished, _ = _write_run(runs_root, make_run_record, frozen_clock, cell="mixer")
+
+    assert prune_runs(runs_root, keep=1) == [], "prune still keeps them both"
+
+    delete_run(skeleton)
+    assert not skeleton.exists()
+    assert [e.cell for e in list_runs(runs_root)] == ["mixer"]
+
+    # A directory that is not a run is never removed, whatever the caller says.
+    stray = runs_root / "scratch notes"
+    stray.mkdir()
+    with pytest.raises(RunStoreError):
+        delete_run(stray)
+    assert stray.is_dir()
+    # Nor is a run that really ran.
+    with pytest.raises(RunStoreError):
+        delete_run(finished)
+    assert finished.is_dir()

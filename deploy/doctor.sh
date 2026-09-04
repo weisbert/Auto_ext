@@ -11,6 +11,11 @@
 #   tier 2  really drive the flow            + si / strmout / calibre / qrc on PATH
 #   tier 3  GUI                              + an importable PyQt5 and a $DISPLAY
 #
+# One box-wide comfort is reported alongside tier 3: a desktop file opener
+# (xdg-open or gio). Without one, every "Open the log / the report" button in
+# the GUI can do nothing at all -- no window, no error -- so it is worth knowing
+# before the click, not after. It gates nothing.
+#
 # Tiers are cumulative. A missing tier-3 dependency is a DEGRADE, not a failure:
 # tiers 1-2 still run, and a plain ssh session is SUPPOSED to have no $DISPLAY.
 # Tier 2 usually needs your site's Cadence modules loaded first -- an interpreter
@@ -112,6 +117,15 @@ if (( ${#CANDIDATES[@]} == 0 )); then
   exit 1
 fi
 
+# --- desktop file opener (box-wide, not per interpreter) ---------------------
+# Kept in step with auto_ext/ui/os_open.py's launcher list and with
+# auto_ext.core.health.FILE_OPENERS; tests/ui/test_os_open.py asserts all three
+# name the same binaries.
+OPENER=""
+for _o in xdg-open gio; do
+  if command -v "$_o" >/dev/null 2>&1; then OPENER="$(command -v "$_o")"; break; fi
+done
+
 # --- probe each --------------------------------------------------------------
 BEST=""; BEST_TIER=-1; BEST_VENV="NO"
 
@@ -207,6 +221,13 @@ for py in "${CANDIDATES[@]}"; do
     printf '     %s DISPLAY  %s\n' "$(mark OK)" "$disp"
   else
     printf '     %s DISPLAY  unset (headless -- no GUI; normal in a plain ssh session)\n' "$(mark MISSING)"
+  fi
+  if [[ -n "$OPENER" ]]; then
+    printf '     %s open     %s\n' "$(mark OK)" "$OPENER"
+  else
+    printf '     %s open     no xdg-open and no gio -- the GUI cannot hand a log or a\n' "$(mark MISSING)"
+    printf '              report to a viewer; it reads them in-app instead. Install\n'
+    printf '              xdg-utils (or the GLib tools) to get those buttons back.\n'
   fi
 
   if [[ "$(getval PY_VENV "$out")" == "YES" ]]; then

@@ -1239,7 +1239,7 @@ def test_result_card_open_log_button_tracks_the_selection(
     # The skipped stage produced no log -> the button goes back to disabled.
     card._stage_tree.setCurrentItem(card._stage_tree.topLevelItem(2))
     assert not card._open_log_btn.isEnabled()
-    assert "produced a log" in card._open_log_btn.toolTip()
+    assert "no log" in card._open_log_btn.toolTip()
 
 
 def test_result_card_double_click_opens_logs_and_artifacts(
@@ -1596,3 +1596,347 @@ def test_result_card_show_lvs_detail_does_not_raise_off_screen(
     qtbot.addWidget(card)
     card.set_run(record, run_dir=run_dir)
     card.show_lvs_detail()
+
+
+# ============================================================================
+# review 2026-09-04: the card's own defects (M-26, M-28, M-45, M-52, M-63)
+# ============================================================================
+
+
+def test_show_discrepancies_changes_something_when_the_card_does_not_scroll(
+    qtbot, populated_run
+) -> None:
+    """M-26: the button promises a destination; a no-op scroll delivers none.
+
+    ``ensureWidgetVisible`` moves nothing when the LVS band is already the
+    first widget of an unscrolled viewport, which is the normal case.
+    """
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    card.resize(900, 1400)  # so tall that the details never need to scroll
+    card.show()
+    qtbot.waitExposed(card)
+    assert card._scroll.verticalScrollBar().maximum() == 0, "no scrolling to do"
+
+    before = card._lvs_band.styleSheet()
+    button = [b for b in _failure_buttons(card) if b.text().startswith("Show ")][0]
+    qtbot.mouseClick(button, Qt.LeftButton)
+    assert card.lvs_detail_highlighted() is True
+    assert card._lvs_band.styleSheet() != before
+
+
+def test_the_lvs_highlight_fades_by_itself(qtbot, populated_run) -> None:
+    """A highlight that stayed would read as a state, not as an answer."""
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    plain = card._lvs_band.styleSheet()
+    card.show_lvs_detail()
+    assert card.lvs_detail_highlighted() is True
+    qtbot.waitUntil(lambda: not card.lvs_detail_highlighted(), timeout=5000)
+    assert card._lvs_band.styleSheet() == plain
+
+
+def test_a_run_without_lvs_does_not_inherit_the_previous_discrepancy_count(
+    qtbot, populated_run, make_run_record
+) -> None:
+    """M-28: ``_delta`` survived ``set_run``, so the next card offered to show
+    17 discrepancies for a run that never reached LVS."""
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    assert card.discrepancy_delta is not None
+
+    crashed = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[_stage("si", status=StageStatus.FAILED)],
+    )
+    card.set_run(crashed)
+    assert card.discrepancy_delta is None
+    assert card._lvs_banner.text() == "not run"
+    labels = [b.text() for b in _failure_buttons(card)]
+    assert not any(any(ch.isdigit() for ch in label) for label in labels), labels
+
+
+def test_only_one_visible_button_opens_calibre_interactive(
+    qtbot, populated_run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-45: the fixed action and the LVS failure row offered the same thing
+    under two different labels."""
+
+    from PyQt5.QtWidgets import QPushButton
+
+    record, run_dir = populated_run
+    monkeypatch.setattr(rc, "plan_calibre_handoff", lambda rec, *a, **k: _plan(ok=True))
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    card.show()
+    qtbot.waitExposed(card)
+
+    offers = [
+        b
+        for b in card.findChildren(QPushButton)
+        if "Calibre Interactive" in b.text() and b.isVisible() and b.isEnabled()
+    ]
+    assert [b.text() for b in offers] == ["Open in Calibre Interactive"]
+
+
+def test_the_fixed_handoff_button_is_there_when_no_failure_row_offers_it(
+    qtbot, make_run_record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The card-level action steps aside for the duplicate, never for good."""
+
+    monkeypatch.setattr(rc, "plan_calibre_handoff", lambda rec, *a, **k: _plan(ok=True))
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(make_run_record(stages=[_stage("calibre")]))
+    card.show()
+    qtbot.waitExposed(card)
+    assert card._handoff_btn.isVisible()
+    assert card._handoff_btn.isEnabled()
+
+
+def test_clicking_the_runset_path_opens_it(
+    qtbot, populated_run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-52: the runset line is drawn as a link, with the hand cursor, and
+    nothing was connected to its ``clicked``."""
+
+    from PyQt5.QtCore import QPoint
+
+    record, run_dir = populated_run
+    runset = run_dir / "rendered" / "lvs.qci"
+    monkeypatch.setattr(
+        rc,
+        "plan_calibre_handoff",
+        lambda rec, *a, **k: HandoffPlan(
+            argv=("/opt/calibre", "-gui", "-lvs", "-runset", str(runset)),
+            cwd=run_dir,
+            env={},
+            runset=runset,
+            stage_key="calibre",
+            executable="calibre",
+        ),
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    card.resize(900, 700)
+    card.show()
+    qtbot.waitExposed(card)
+    assert card._runset_line.is_live()
+    assert card._runset_line.cursor().shape() == Qt.PointingHandCursor
+
+    with qtbot.waitSignal(card.artifact_requested, timeout=1000) as blocker:
+        qtbot.mouseClick(
+            card._runset_line, Qt.LeftButton, pos=QPoint(4, card._runset_line.height() // 2)
+        )
+    assert blocker.args == [runset]
+
+
+def test_two_calibre_logs_are_never_offered_under_the_same_label(
+    qtbot, make_run_record, run_dir: Path
+) -> None:
+    """M-63: a retried calibre stage gave two controls the same words and two
+    different files."""
+
+    (run_dir / "logs" / "calibre.log").write_text("first try\n", encoding="utf-8")
+    (run_dir / "logs" / "calibre.retry.log").write_text("second\n", encoding="utf-8")
+    record = make_run_record(
+        run_dir=run_dir,
+        overall=TaskStatus.FAILED,
+        stages=[
+            StageRecord(
+                key="calibre",
+                stage="calibre",
+                status=StageStatus.FAILED,
+                log_path="logs/calibre.log",
+                exit_code=1,
+            ),
+            StageRecord(
+                key="calibre.retry",
+                stage="calibre",
+                status=StageStatus.FAILED,
+                log_path="logs/calibre.retry.log",
+                exit_code=1,
+            ),
+        ],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    controls = [
+        b for b in _failure_buttons(card) if b.text().startswith("Open ")
+    ] + [card._calibre_log_btn]
+    opened: dict[str, set[str]] = {}
+    for button in controls:
+        with qtbot.waitSignal(card.log_requested, timeout=1000) as blocker:
+            button.click()
+        opened.setdefault(button.text(), set()).add(Path(blocker.args[0]).name)
+
+    # One label may name one file; the same words for two files is the defect.
+    assert all(len(names) == 1 for names in opened.values()), opened
+    # And the label is the file name, so the two rows can be told apart.
+    assert opened == {
+        "Open calibre.log": {"calibre.log"},
+        "Open calibre.retry.log": {"calibre.retry.log"},
+    }
+
+
+# ============================================================================
+# review 2026-09-04: a log that was recorded and is gone (M-34, M-35, M-48)
+# ============================================================================
+
+
+@pytest.fixture
+def deleted_log(populated_run):
+    """``populated_run`` with the calibre log removed from the run directory."""
+
+    record, run_dir = populated_run
+    (run_dir / "logs" / "calibre.log").unlink()
+    return record, run_dir
+
+
+def test_a_recorded_log_that_is_gone_is_not_reported_as_never_written(
+    qtbot, deleted_log
+) -> None:
+    """M-34: three messages read "no log" off ``is_file()`` alone, and the
+    runner writes a log for every real subprocess -- including exit 127."""
+
+    record, run_dir = deleted_log
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    calibre = card._stage_tree.topLevelItem(1)
+    card._stage_tree.setCurrentItem(calibre)
+    assert not card._open_log_btn.isEnabled()
+    assert "logs/calibre.log" in card._open_log_btn.toolTip()
+
+    # The failure row's own button says the same thing.
+    row_button = [
+        b for b in _failure_buttons(card) if b.text() == "Open calibre.log"
+    ]
+    if row_button:
+        assert "logs/calibre.log" in row_button[0].toolTip()
+
+
+def test_a_stage_that_never_wrote_a_log_says_so_instead(qtbot, populated_run) -> None:
+    """The other half of M-34: "recorded and gone" and "never written" are
+    different problems with different fixes."""
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    skipped = card._stage_tree.topLevelItem(2)  # quantus, skipped, no log_path
+    card._stage_tree.setCurrentItem(skipped)
+    assert not card._open_log_btn.isEnabled()
+    tip = card._open_log_btn.toolTip()
+    assert "no log" in tip
+    assert "logs/" not in tip
+
+
+def test_a_report_path_that_is_a_directory_is_not_called_overwritten(
+    qtbot, make_run_record, run_dir: Path
+) -> None:
+    """M-34 again: the artifacts grid invented a cause for any non-file path."""
+
+    stale = run_dir / "results" / "lvs.report"
+    stale.mkdir(parents=True)
+    record = make_run_record(
+        run_dir=run_dir,
+        results=RunResults(
+            lvs=LvsResult(passed=True, banner="CORRECT", source_path=str(stale))
+        ),
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    labels = [
+        label
+        for label in card._artifacts_group.findChildren(PathLabel)
+        if label.full_text() == str(stale)
+    ]
+    assert labels, "the report row names the recorded path"
+    assert "overwrote" not in labels[0].toolTip()
+    assert "directory" in labels[0].toolTip()
+
+
+def test_double_clicking_a_stage_whose_log_is_gone_says_something(
+    qtbot, deleted_log
+) -> None:
+    """M-35: the hint under the tree advertises the gesture; the gesture
+    returned in silence whenever the file was not there."""
+
+    record, run_dir = deleted_log
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    calibre = card._stage_tree.topLevelItem(1)
+    with qtbot.waitSignal(card.status_message, timeout=1000) as blocker:
+        card._on_stage_double_click(calibre, 0)
+    assert "logs/calibre.log" in blocker.args[0]
+
+
+def test_double_clicking_a_stage_that_wrote_no_log_says_so(
+    qtbot, populated_run
+) -> None:
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    skipped = card._stage_tree.topLevelItem(2)
+    with qtbot.waitSignal(card.status_message, timeout=1000) as blocker:
+        card._on_stage_double_click(skipped, 0)
+    assert "no log" in blocker.args[0]
+
+
+def test_a_cancelled_stage_does_not_report_the_signal_that_killed_it(
+    qtbot, make_run_record
+) -> None:
+    """M-48: exit -15 describes the kill, not the problem."""
+
+    record = make_run_record(
+        overall=TaskStatus.CANCELLED,
+        stages=[
+            _stage("calibre", status=StageStatus.CANCELLED, exit_code=-15),
+        ],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+
+    texts = _failure_texts(card)
+    assert not any("-15" in t for t in texts), texts
+    assert any("terminated" in t for t in texts), texts
+
+    chips = card._stage_strip.findChildren(Chip)
+    calibre = [c for c in chips if c.text().startswith("calibre ")][0]
+    assert "-15" not in calibre.toolTip()
+
+
+def test_a_failed_stage_still_reports_its_exit_code(qtbot, make_run_record) -> None:
+    """The number is only meaningless for a stage the user killed."""
+
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[_stage("si", status=StageStatus.FAILED, exit_code=127)],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    assert any("127" in t for t in _failure_texts(card))

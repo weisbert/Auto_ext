@@ -26,6 +26,12 @@ signal**, so a screen used on its own is still fully functional and a host
 that wants to own the launch simply connects and takes over. The same
 mechanism gates the Setup drawer's "pin this value" row.
 
+Opening a log or an artifact is *not* one of those requests. The screen owns
+it end to end -- see :meth:`RunsScreen._open_once` -- because that is where
+the answers to "the file is gone", "the launcher refused" and "this host
+cannot open files at all" live, and because a screen that opened a file and
+then also announced it as a request launched two editors.
+
 Layout contract
 ---------------
 The window floor is 940x560 px, and this screen must fit inside it with room
@@ -55,6 +61,7 @@ Assumptions
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -88,15 +95,16 @@ from auto_ext.core.errors import AutoExtError
 from auto_ext.core.handoff import launch_calibre_interactive
 from auto_ext.core.run_store import (
     RunIndexEntry,
+    delete_run,
     find_previous_run,
-    list_runs,
+    list_runs_detailed,
     read_annotations,
     read_record,
     write_annotations,
 )
 from auto_ext.model.run import RunRecord
 from auto_ext.ui import theme
-from auto_ext.ui.os_open import open_in_os
+from auto_ext.ui.os_open import can_open, open_in_os
 from auto_ext.ui.widgets.failure_chip import (
     CHIP_TONE_FAILED,
     CHIP_TONE_MUTED,
@@ -105,6 +113,7 @@ from auto_ext.ui.widgets.failure_chip import (
     Chip,
     PathLabel,
 )
+from auto_ext.ui.widgets.log_view import LogView
 from auto_ext.ui.widgets.result_card import (
     ResultCard,
     format_duration,
@@ -119,6 +128,15 @@ RUN_ROW_HEIGHT = 40
 
 #: The "no cell filter" entry of the cell combo.
 ALL_CELLS = "all cells"
+
+#: Largest file the built-in viewer will load when the OS cannot open it.
+#: A stage log is kilobytes and an LVS report is a few hundred; an extracted
+#: DSPF is routinely hundreds of megabytes and would take the session with it.
+IN_APP_VIEW_MAX_BYTES = 8 * 1024 * 1024
+
+#: Bytes sniffed to decide whether a file is text. A viewer full of NULs helps
+#: nobody, and the OS handler is the right tool for a binary anyway.
+_SNIFF_BYTES = 4096
 
 # Item roles on a history row.
 _ROLE_RUN_ID = Qt.UserRole
@@ -235,8 +253,12 @@ class RunsScreen(QWidget):
     #: (or ``None`` when the selection is cleared).
     run_selected = pyqtSignal(object)
     #: Emitted with the absolute :class:`Path` of a stage log the user opened.
+    #: **Not emitted while the screen owns opening** -- see :meth:`_open_once`.
+    #: Kept because a host may be connected to it and because a future host
+    #: that wants to own the launch needs somewhere to connect.
     log_requested = pyqtSignal(object)
     #: Emitted with the absolute :class:`Path` of an artifact the user opened.
+    #: Same contract as :attr:`log_requested`.
     artifact_requested = pyqtSignal(object)
     #: Emitted with the :class:`~auto_ext.model.run.RunRecord` to re-open in
     #: Calibre Interactive. When nothing is connected the screen launches it.
@@ -263,6 +285,12 @@ class RunsScreen(QWidget):
         self._visible: list[RunIndexEntry] = []
         self._selected_run_id: str | None = None
         self._loading = False
+        #: Directories the last listing could not read, and why. Never hidden:
+        #: a run that silently leaves the history is a run the user believes
+        #: was never made.
+        self._unreadable: list[tuple[Path, str]] = []
+        #: Set when ``runs/`` itself could not be enumerated at all.
+        self._listing_error: str | None = None
 
         self._build_ui()
         self.refresh()
@@ -314,19 +342,46 @@ class RunsScreen(QWidget):
 
         Keeps the current selection when that run is still present; otherwise
         selects the newest run so the screen is never opened on a blank card.
+
+        Ends with an acknowledgement on :attr:`status_message` carrying the
+        wall-clock time. Without it a *Refresh* against an unchanged directory
+        -- the common case -- left every pixel exactly as it was, including
+        the status line, and the button was indistinguishable from a dead one.
         """
 
         root = self._runs_root
-        self.set_entries(list_runs(root) if root is not None else [])
+        listing = list_runs_detailed(root) if root is not None else None
+        if listing is None:
+            self.set_entries([])
+        else:
+            self.set_entries(
+                listing.entries,
+                unreadable=listing.unreadable,
+                error=listing.error,
+            )
+        stamp = datetime.now().strftime("%H:%M:%S")
+        where = str(root) if root is not None else "no project"
+        self.status_message.emit(f"re-read {where} at {stamp} - {self.status_text()}")
 
-    def set_entries(self, entries: Sequence[RunIndexEntry]) -> None:
+    def set_entries(
+        self,
+        entries: Sequence[RunIndexEntry],
+        *,
+        unreadable: Sequence[tuple[Path, str]] = (),
+        error: str | None = None,
+    ) -> None:
         """Display ``entries`` without touching disk.
 
         The injection point for a host that has already listed the history,
-        and for tests.
+        and for tests. ``unreadable`` and ``error`` carry what
+        :func:`~auto_ext.core.run_store.list_runs_detailed` could not read, so
+        the screen can say so instead of presenting the survivors as the whole
+        history.
         """
 
         self._entries = list(entries)
+        self._unreadable = list(unreadable)
+        self._listing_error = error
         self._sync_cell_filter()
         self._repopulate()
 
@@ -341,12 +396,39 @@ class RunsScreen(QWidget):
         return False
 
     def status_text(self) -> str:
-        """The status-bar line for this screen (canvas 1c)."""
+        """The status-bar line for this screen (canvas 1c).
 
+        "Nothing is ever overwritten" is a promise, so the count of
+        directories that could not be read is part of the same sentence: the
+        survivors on their own are not the whole history, and the warnings the
+        store logs reach nobody in a GUI.
+        """
+
+        if self._listing_error is not None:
+            return f"the run history could not be listed - {self._listing_error}"
         total = len(self._entries)
+        skipped = self._unreadable_text()
         if total == 0:
-            return "no runs recorded yet"
-        return f"{total} run{'s' if total != 1 else ''} kept - nothing is ever overwritten"
+            return skipped or "no runs recorded yet"
+        line = f"{total} run{'s' if total != 1 else ''} kept - nothing is ever overwritten"
+        return f"{line} - {skipped}" if skipped else line
+
+    def _unreadable_text(self) -> str:
+        """``"2 directories in runs/ could not be read"``, or ``""``."""
+
+        count = len(self._unreadable)
+        if not count:
+            return ""
+        return (
+            f"{count} director{'y' if count == 1 else 'ies'} in "
+            f"{self._runs_root} could not be read"
+        )
+
+    @property
+    def unreadable(self) -> list[tuple[Path, str]]:
+        """``(directory, why)`` for everything the last listing skipped."""
+
+        return list(self._unreadable)
 
     def set_cell_filter(self, cell: str) -> None:
         """Restrict the list to one cell, or to :data:`ALL_CELLS`."""
@@ -474,6 +556,7 @@ class RunsScreen(QWidget):
         self._card.copy_requested.connect(
             lambda text: self.status_message.emit(f"copied: {text}")
         )
+        self._card.status_message.connect(self.status_message.emit)
 
         card_holder = QWidget(self._stack)
         holder_layout = QVBoxLayout(card_holder)
@@ -491,8 +574,63 @@ class RunsScreen(QWidget):
 
         self._stack.addWidget(card_holder)
         self._stack.addWidget(self._empty)
+        self._stack.addWidget(self._build_log_pane())
+        # Whatever takes the user off the viewer -- the Back button, picking
+        # another run, a filter that empties the list -- stops the tail. A
+        # QFileSystemWatcher left on a file nobody is looking at is a watcher
+        # on a file that may be deleted next.
+        self._stack.currentChanged.connect(self._on_stack_changed)
         layout.addWidget(self._stack, stretch=1)
         return panel
+
+    def _on_stack_changed(self, _index: int) -> None:
+        if self._stack.currentWidget() is not self._log_pane():
+            self._log_view.set_active_log(None)
+
+    def _build_log_pane(self) -> QWidget:
+        """The in-app fallback for a file this host cannot hand to a viewer.
+
+        The archived log is *there*, in the run directory, and the user is
+        being told to read it. On a box with no ``xdg-open`` there was no way
+        to -- the one :class:`LogView` in the application is mounted in the
+        Cells run bar and fed only by the live run. This is the same widget,
+        pointed at an archived file.
+        """
+
+        pane = QWidget(self._stack)
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QFrame(pane)
+        header.setFrameShape(QFrame.NoFrame)
+        header.setStyleSheet(
+            f"QFrame {{ background: {theme.SURFACE_TOOLBAR}; border: none; "
+            f"border-bottom: 1px solid {theme.LINE_STRUCTURAL}; }}"
+        )
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(
+            theme.SPACE_MD, theme.SPACE_XS, theme.SPACE_MD, theme.SPACE_XS
+        )
+        header_layout.setSpacing(theme.SPACE_MD)
+
+        self._log_title = PathLabel(header, mode=Qt.ElideLeft)
+        self._log_note = QLabel("", header)
+        self._log_note.setWordWrap(True)
+        self._log_note.setStyleSheet(
+            f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_META}px;"
+        )
+        back = QPushButton("Back to the result", header)
+        back.setToolTip("Close the viewer and go back to this run's card.")
+        back.clicked.connect(lambda _c=False: self.close_in_app_view())
+        header_layout.addWidget(self._log_title, stretch=1)
+        header_layout.addWidget(self._log_note, stretch=1)
+        header_layout.addWidget(back)
+        layout.addWidget(header)
+
+        self._log_view = LogView(pane)
+        layout.addWidget(self._log_view, stretch=1)
+        return pane
 
     def _build_detail_header(self, parent: QWidget) -> QWidget:
         band = QFrame(parent)
@@ -575,8 +713,24 @@ class RunsScreen(QWidget):
                 "No project loaded. Run history is kept in the project's runs/ "
                 "directory."
             )
+        if self._listing_error is not None:
+            return (
+                f"The run history could not be listed.\n\n{self._listing_error}\n\n"
+                "Check that the directory still exists and that you can read it, "
+                "then press Refresh."
+            )
         if self._entries:
             return "No run matches the current filter."
+        skipped = self._unreadable_text()
+        if skipped:
+            # Never "no runs recorded yet" over a directory full of runs: the
+            # first launch against a real runs/ directory skipped ten of them.
+            names = "\n".join(f"{path.name}: {why}" for path, why in self._unreadable[:5])
+            more = len(self._unreadable) - 5
+            return (
+                f"No run could be read. {skipped[0].upper()}{skipped[1:]}:\n\n{names}"
+                + (f"\n+{more} more" if more > 0 else "")
+            )
         return (
             f"No runs recorded yet. Each run is archived under {self._runs_root} "
             "with its logs, rendered inputs and results."
@@ -701,7 +855,19 @@ class RunsScreen(QWidget):
                 "cancelled": CHIP_TONE_WARNING,
             }.get(str(record.overall), CHIP_TONE_MUTED)
             self._tally_chip.set_chip_text(tally_text(record.stages), tone)
-        self._rerun_btn.setEnabled(True)
+
+        # A run whose directory has gone still has a row -- the screen re-lists
+        # only on Refresh -- and Re-run stayed lit over it, which is the one
+        # button that cannot possibly work: the recipe and the DUT are read
+        # back from the record that is no longer there. The context menu
+        # already got this right for "Open run directory".
+        gone = record is None and not entry.run_dir.is_dir()
+        self._rerun_btn.setEnabled(not gone)
+        self._rerun_btn.setToolTip(
+            f"Gone: {entry.run_dir}\nPress Refresh to re-read the history."
+            if gone
+            else "Queue this cell again with the same recipe."
+        )
 
     # ---- context menu ---------------------------------------------------
 
@@ -712,6 +878,11 @@ class RunsScreen(QWidget):
         synchronous ``exec_()`` is dismissed by the following release and the
         user has to right-click twice. The popup is deferred one event-loop
         tick, which is the rule everywhere in this codebase.
+
+        The row under the cursor becomes the selected row before the menu is
+        built: Rename / Delete / Re-run acted on it while the card on the
+        right went on showing another run, so the user was reading one run and
+        acting on a different one. :class:`CellsScreen` already selects first.
         """
 
         item = self._list.itemAt(pos)
@@ -721,6 +892,8 @@ class RunsScreen(QWidget):
         entry = self._entry_by_id(run_id)
         if entry is None:
             return
+        if item is not self._list.currentItem():
+            self._list.setCurrentItem(item)
 
         menu = QMenu(self._list)
 
@@ -759,6 +932,21 @@ class RunsScreen(QWidget):
             lambda _c=False, e=entry: self.rerun_requested.emit(e)
         )
         menu.addAction(act_rerun)
+
+        # The only run this screen may delete: a skeleton the runner wrote at
+        # task start and nothing ever finished. prune-runs refuses a pending
+        # run on purpose (it may be running right now), so without this one
+        # action an abandoned run is in the history for ever.
+        act_delete = QAction("Delete this unfinished run...", menu)
+        removable = entry.overall == "pending" and entry.ended_at is None
+        act_delete.setEnabled(removable)
+        act_delete.setToolTip(
+            "Remove the directory of a run that never got started."
+            if removable
+            else "Only an unfinished run can be removed; run history is kept."
+        )
+        act_delete.triggered.connect(lambda _c=False, e=entry: self._delete(e))
+        menu.addAction(act_delete)
 
         global_pos = self._list.viewport().mapToGlobal(pos)
         QTimer.singleShot(0, lambda: menu.exec_(global_pos))
@@ -807,6 +995,34 @@ class RunsScreen(QWidget):
     def _toggle_star(self, entry: RunIndexEntry) -> None:
         self._write_annotations(entry, starred=not entry.starred)
 
+    def _delete(self, entry: RunIndexEntry) -> None:
+        """Remove an unfinished run's directory, after asking.
+
+        The store decides what may go (:func:`~auto_ext.core.run_store.delete_run`
+        refuses anything that is not a ``pending`` record with no stage); this
+        only asks, because the one case the store cannot judge is a run that
+        is still going right now.
+        """
+
+        answer = QMessageBox.question(
+            self,
+            "Delete this unfinished run?",
+            f"{entry.run_id} never recorded a stage.\n\n{entry.run_dir}\n\n"
+            "If this cell is running right now, let it finish instead - "
+            "deleting the directory takes its logs with it.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            delete_run(entry.run_dir)
+        except AutoExtError as exc:
+            QMessageBox.warning(self, "Could not delete", str(exc))
+            return
+        self.status_message.emit(f"deleted {entry.run_id}")
+        self.refresh()
+
     # ---- card actions ----------------------------------------------------
 
     def _delegated(self, signal: Any) -> bool:
@@ -815,16 +1031,32 @@ class RunsScreen(QWidget):
         return self.receivers(signal) > 0
 
     def _on_log_requested(self, path: object) -> None:
-        log_path = Path(str(path)) if path else None
-        if log_path is not None:
-            self._open_path(log_path)
-        self.log_requested.emit(log_path)
+        self._open_once(path)
 
     def _on_artifact_requested(self, path: object) -> None:
+        self._open_once(path)
+
+    def _open_once(self, path: object) -> None:
+        """Act on one "open this" request from the card -- exactly once.
+
+        The screen opens it and deliberately does **not** re-emit. It used to
+        do both, and :class:`~auto_ext.ui.main_window.MainWindow` connects
+        ``log_requested`` and ``artifact_requested`` to an opener of its own,
+        so every click on a log launched two editors -- the second of them
+        through a call site with no ``try``, which takes an unhandled
+        exception in a slot to ``qFatal``.
+
+        Opening stays here rather than moving to the host because this is
+        where the failure cases are answered: a path that has gone, a launcher
+        that refuses, and a server with no file opener at all, which is
+        offered the built-in viewer instead (:meth:`show_in_app`). A host that
+        wants to know what the user opened has :attr:`status_message`.
+        """
+
         target = Path(str(path)) if path else None
-        if target is not None:
-            self._open_path(target)
-        self.artifact_requested.emit(target)
+        if target is None:
+            return
+        self._open_path(target)
 
     def _on_card_rerun(self, _record: object) -> None:
         self._emit_rerun()
@@ -865,9 +1097,39 @@ class RunsScreen(QWidget):
         QMessageBox.information(self, "Calibre Interactive", "\n".join(lines))
 
     def _open_path(self, path: object) -> None:
-        """Open ``path`` with the OS handler, reporting failures in a dialog."""
+        """Open ``path``, in the OS or in the app, and never in silence.
+
+        Three answers, in this order:
+
+        * this host has no file opener at all (no ``xdg-open``, no ``gio`` --
+          the deployment target) -- do not launch anything, show the file in
+          the built-in viewer, and say why;
+        * the launcher failed, or the file has gone -- same fallback for a text
+          file, a dialog naming the path otherwise;
+        * it opened -- say so on the status line.
+
+        The fallback is the point: the user is being told to read an archived
+        log, the log is right there in the run directory, and before this the
+        click did nothing observable whatsoever.
+        """
 
         target = Path(str(path))
+        if not can_open():
+            reason = (
+                "This host has no xdg-open and no gio, so nothing can be handed "
+                "to a viewer. Showing it here instead."
+            )
+            if self.show_in_app(target, reason=reason):
+                return
+            QMessageBox.warning(
+                self,
+                "This host cannot open files",
+                f"Neither xdg-open nor gio is installed, so this cannot be "
+                f"handed to a viewer:\n{target}\n\nInstall xdg-utils, or copy "
+                "the path and open it in a shell.",
+            )
+            return
+
         try:
             open_in_os(target)
         except FileNotFoundError:
@@ -875,9 +1137,62 @@ class RunsScreen(QWidget):
                 self, "File not found", f"The path no longer exists:\n{target}"
             )
         except OSError as exc:
+            if self.show_in_app(target, reason=f"Could not be opened: {exc}"):
+                return
             QMessageBox.warning(
                 self, "Could not open", f"Failed to open:\n{target}\n\n{exc}"
             )
+        else:
+            # The screen no longer re-emits what it opened (M-20), so this is
+            # how the host still learns of it.
+            self.status_message.emit(f"opened: {target}")
+
+    # ---- the built-in viewer ----------------------------------------------
+
+    def show_in_app(self, path: Path, *, reason: str = "") -> bool:
+        """Show a text file in the built-in viewer. ``False`` when it cannot.
+
+        Refuses a directory, a file too large to hold in a text widget (an
+        extracted DSPF is routinely hundreds of megabytes) and anything with a
+        NUL in its first :data:`_SNIFF_BYTES` bytes -- a pane full of NULs
+        helps nobody, and a binary wants a real viewer anyway.
+        """
+
+        try:
+            if not path.is_file():
+                return False
+            if path.stat().st_size > IN_APP_VIEW_MAX_BYTES:
+                return False
+            with path.open("rb") as handle:
+                head = handle.read(_SNIFF_BYTES)
+        except OSError:
+            return False
+        if b"\0" in head:
+            return False
+
+        self._log_title.set_placeholder(str(path))
+        self._log_note.setText(reason)
+        self._log_view.set_active_log(path)
+        self._stack.setCurrentWidget(self._log_pane())
+        self.status_message.emit(f"showing {path} in the built-in viewer")
+        return True
+
+    def close_in_app_view(self) -> None:
+        """Leave the built-in viewer and go back to the run's card."""
+
+        self._stack.setCurrentWidget(
+            self._stack.widget(0) if self._visible else self._empty
+        )
+
+    def in_app_view_path(self) -> Path | None:
+        """The file the built-in viewer is showing, or ``None``."""
+
+        if self._stack.currentWidget() is not self._log_pane():
+            return None
+        return self._log_view.path
+
+    def _log_pane(self) -> QWidget:
+        return self._stack.widget(2)
 
     # ---- layout -----------------------------------------------------------
 
