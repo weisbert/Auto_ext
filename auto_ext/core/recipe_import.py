@@ -70,7 +70,9 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
+from dataclasses import field as dc_field
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -91,6 +93,7 @@ from auto_ext.core.errors import AutoExtError
 from auto_ext.core.patch import capture_patch, mask_values, render_masked, sha256_text
 from auto_ext.core.patch_models import TemplatePatch
 from auto_ext.core.readback import (
+    SPECIAL_READBACK,
     ReadBackError,
     ReadSite,
     SiteKey,
@@ -404,6 +407,23 @@ class RecipeImportResult:
     derived_profile: bool
     catalog_version: str
     warn_ratio: float = DEFAULT_WARN_RATIO
+    #: The caller's :class:`~auto_ext.model.recipe.ResourceProfile` with every
+    #: resource-owned value these files state written into it -- eight turbo
+    #: cores, a licence wait, a jivaro cpu count. Separate from :attr:`recipe`
+    #: because it is deliberately not part of one: those are facts about a
+    #: machine, not about an extraction, and they must not travel with a
+    #: shared recipe (DECISIONS #21).
+    #:
+    #: **A report, not a render input.** Every one of these rows is a
+    #: ``hardcoded_literal`` in the shipped templates, so
+    #: :func:`auto_ext.core.render.check_representable` refuses a profile that
+    #: disagrees with the literal -- the same refusal that keeps a dead field
+    #: off the form. The rendered file gets the user's number from the patch
+    #: instead, which is why these rows still report that they did not land,
+    #: and why :meth:`rerender` does not default to this profile. What this
+    #: field changes is narrower and was worse: the value used to be read,
+    #: printed once in the report, and then have nowhere at all to go.
+    resources: ResourceProfile = dc_field(default_factory=ResourceProfile)
 
     @property
     def targets(self) -> tuple[RenderTarget, ...]:
@@ -455,6 +475,9 @@ class RecipeImportResult:
         cat = catalog if catalog is not None else builtin_catalog()
         use_dut = dut if dut is not None else self.dut
         use_profile = profile if profile is not None else self.profile
+        # NOT :attr:`resources`: see its own docstring. A profile carrying a
+        # value the template hardcodes is refused by
+        # :func:`auto_ext.core.render.check_representable`, and rightly.
         res = resources if resources is not None else ResourceProfile()
         context = build_context(
             dut=use_dut,
@@ -524,6 +547,30 @@ def score_targets(text: str, *, catalog: Catalog | None = None) -> list[TargetSc
     return sorted(scores, key=lambda score: (-score.hits, score.target.value))
 
 
+#: A Quantus option written where a statement name belongs.
+_COLUMN_ZERO_OPTION = re.compile(r"^-[A-Za-z_][A-Za-z0-9_]*", re.MULTILINE)
+
+#: Below this many, a stray line is a stray line and not a layout.
+_COLUMN_ZERO_MIN = 3
+
+
+def _column_zero_options(text: str) -> list[str]:
+    """Options written at column 0, which is where a section header goes.
+
+    A pre-2026 export -- and anything a script wrote by stripping
+    continuations -- puts every ``-option value`` flush left.
+    :func:`auto_ext.core.readback.parse_quantus` decides section boundaries by
+    indentation, so each of those becomes a section carrying no option and its
+    value is discarded; the file then matches two landing sites and is refused
+    as "not a file this tool generates". True, and useless: the user's next
+    question is which of the two hundred lines was wrong, and the answer is
+    all of them, for one reason.
+    """
+
+    found = _COLUMN_ZERO_OPTION.findall(text)
+    return found if len(found) >= _COLUMN_ZERO_MIN else []
+
+
 def _quantus_kind(text: str) -> RenderTarget | None:
     """``output_db -type`` decides, because it is what the stage actually emits.
 
@@ -560,6 +607,19 @@ def detect_target(
     scores = score_targets(text, catalog=cat)
     best = scores[0]
     if best.hits < MIN_SITE_HITS or best.coverage < MIN_SITE_COVERAGE:
+        flat = _column_zero_options(text)
+        if flat:
+            raise RecipeImportError(
+                f"{label} is a Quantus command file whose option lines are all "
+                f"at column 0 ({len(flat)} of them: {', '.join(flat[:4])}...). "
+                "Indentation is what separates a statement from its options "
+                "here, so at column 0 every option becomes a section of its "
+                f"own and its value is dropped -- only {best.hits} landing "
+                f"site(s) survived, and {MIN_SITE_HITS} are needed. Indent the "
+                "option lines under their statement (this tool writes them "
+                "indented, each continued with a trailing backslash) and "
+                "import again."
+            )
         detail = ", ".join(f"{s.target.value}={s.hits}/{s.sites}" for s in scores)
         raise RecipeImportError(
             f"{label} does not look like any file this tool generates "
@@ -1572,6 +1632,15 @@ def _invert_env(expression: str, ref: re.Match[str], value: str) -> dict[str, st
     ``/pdk/hn001/setup/assura_tech.lib`` gives ``SETUP_ROOT=/pdk/hn001/setup``.
     A value that does not fit the expression yields nothing, which leaves the
     var unbound and therefore reported -- reporting beats inventing.
+
+    A recovered value that is *itself* an env reference is refused for the
+    same reason. Matching the expression against a file that spells the same
+    expression out gives ``SETUP_ROOT = "$env(SETUP_ROOT)"``: not an answer,
+    the question again. :func:`auto_ext.core.env.substitute_env` does not
+    re-scan its own replacement, so the reference survived into the rendered
+    baseline and the render refused it -- one file's honest ``$env(...)``
+    turning into "this cannot be rendered", several layers away from the
+    binding that caused it.
     """
 
     pattern = (
@@ -1582,7 +1651,10 @@ def _invert_env(expression: str, ref: re.Match[str], value: str) -> dict[str, st
     match = re.fullmatch(pattern, value)
     if match is None:
         return {}
-    return {_env_name(ref): match.group(_ENV_GROUP)}
+    bound = match.group(_ENV_GROUP)
+    if discover_required_vars([bound]):
+        return {}
+    return {_env_name(ref): bound}
 
 
 def _env_from_profile(
@@ -1917,6 +1989,75 @@ def _landing_site(
     return solved if solved is not None else readback.sites.get(key)
 
 
+def _derive_resources(
+    base: ResourceProfile, readback: TemplateReadBack, *, catalog: Catalog
+) -> tuple[ResourceProfile, dict[str, str]]:
+    """The caller's resource profile with what these files state written in.
+
+    ``*cmnNumTurbo: 8`` is read by the literal reader like everything else and
+    was then refused by :func:`_assignable` (a Recipe has no field for it) and
+    by the result object (which had no slot for it either), so the eight the
+    user's runset asks for was printed once and forgotten. It belongs to the
+    machine, not the recipe, which is why it goes to a separate object rather
+    than into :class:`~auto_ext.model.recipe.Recipe`.
+
+    Returns the profile and ``{catalog key: field name}`` for what moved, so
+    the report can say where each value went.
+    """
+
+    values: dict[str, Any] = {}
+    landed: dict[str, str] = {}
+    for key, value in readback.values.items():
+        option = catalog.option(key)
+        path = option.context_path
+        if option.owner is not Owner.RESOURCES or path is None:
+            continue
+        if not path.startswith("resources."):
+            continue
+        field_name = path[len("resources.") :]
+        if field_name not in type(base).model_fields:
+            # ``employee_id`` carries the resources owner only because the
+            # owner enum has no ``site`` member; it lives in site.yaml.
+            continue
+        values[field_name] = value
+        landed[key] = field_name
+    if not values:
+        return base, {}
+    return base.model_copy(update=values), landed
+
+
+def _with_resources(
+    mapped: Sequence[MappedValue], landed: Mapping[str, str]
+) -> list[MappedValue]:
+    """Say, on the row itself, that a resource-owned value was kept.
+
+    ``applied_to`` stays ``None`` on purpose: every one of these rows is a
+    hardcoded literal in the template today, so the rendered file still comes
+    from the patch and claiming the field drives it would be the "you can
+    change it but it does nothing" lie this importer's landing rule exists to
+    prevent.
+    """
+
+    return [
+        replace(
+            row,
+            note="; ".join(
+                part
+                for part in (
+                    row.note,
+                    f"the value is kept on RecipeImportResult.resources"
+                    f".{landed[row.key]}, which is per machine and does not "
+                    "travel with the recipe",
+                )
+                if part
+            ),
+        )
+        if row.key in landed and not row.applied_to
+        else row
+        for row in mapped
+    ]
+
+
 def _with_degraded(
     mapped: Sequence[MappedValue], degraded: Mapping[str, str]
 ) -> list[MappedValue]:
@@ -2043,8 +2184,15 @@ def import_recipe(
     texts: dict[RenderTarget, str] = {}
     labels: dict[RenderTarget, str] = {}
     imported: list[ImportedFile] = []
+    supplied_env = dict(resolved_env or {})
     for source in _load(files):
-        text = source.text.replace("\r\n", "\n")
+        # A deck that says ``$env(SETUP_ROOT)/assura_tech.lib`` and one that
+        # says the path it expands to are the same deck, and the caller is the
+        # only one who knows which is which. Expanding here rather than
+        # further in is what lets the rest of the import treat both alike --
+        # the solver reads a path, the profile holds a path, and the baseline
+        # renders the same bytes the user's file carries.
+        text = substitute_env(source.text.replace("\r\n", "\n"), supplied_env)
         target = source.target or detect_target(text, label=source.label, catalog=cat)
         if target in texts:
             raise RecipeImportError(
@@ -2063,6 +2211,22 @@ def import_recipe(
             )
         )
     order = [spec.id for spec in cat.targets if spec.id in texts]
+
+    unbound = sorted(discover_required_vars(texts.values()))
+    if unbound:
+        # Refused here, by name, rather than four steps later in the
+        # renderer's words. Everything downstream -- the profile expression
+        # the value is read into, the baseline it renders, the hunk that
+        # would carry the reference back into the output -- fails on this one
+        # missing fact, and only the user has it.
+        raise RecipeImportError(
+            f"{', '.join(labels[target] for target in order)} spell(s) out "
+            f"environment variable(s) {', '.join(unbound)}, and this tool "
+            "writes decks with every path already resolved, so it cannot "
+            "render the baseline your file is compared against without their "
+            "values. Supply them (--env NAME=VALUE, or resolved_env=) and "
+            "import again."
+        )
 
     # 2. the literals, 3. the variables --------------------------------------
     readback = read_back_from_templates(texts, catalog=cat)
@@ -2109,6 +2273,16 @@ def import_recipe(
         value = readback.values[key]
         site = readback.sites[key]
         shared = composites.get((site.target, site.section, site.option))
+        if key in SPECIAL_READBACK:
+            # The refusal below exists because the generic rule hands every
+            # row on a shared line the WHOLE line. A row with a special
+            # handler is the exception readback.py documents: it takes only
+            # its own share. ``run_qrc_query`` reads whether the third
+            # post-trigger is there at all, which is a fact about that line
+            # and about nothing else -- refusing it threw away a correct
+            # answer and left the recipe claiming a query run the file does
+            # not ask for, with the box in the form powerless to change it.
+            shared = None
         applied: str | None = None
         if shared is not None:
             note = (
@@ -2294,6 +2468,11 @@ def import_recipe(
     emit = _emit_for(order)
     if emit is not None:
         tree.setdefault("output", {})["emit"] = emit
+    # Kept apart from ``res``, which is what the baseline renders with: see
+    # RecipeImportResult.resources.
+    stated_resources, resource_landings = _derive_resources(res, readback, catalog=cat)
+    if resource_landings:
+        mapped = _with_resources(mapped, resource_landings)
     base_recipe, degraded = _validate_degrading(tree, defaults)
     if degraded:
         mapped = _with_degraded(mapped, degraded)
@@ -2491,6 +2670,7 @@ def import_recipe(
         derived_profile=derived,
         catalog_version=cat.catalog_version,
         warn_ratio=warn_ratio,
+        resources=stated_resources,
     )
 
     # 6. round trip -------------------------------------------------------------
