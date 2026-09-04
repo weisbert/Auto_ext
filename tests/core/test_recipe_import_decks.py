@@ -269,3 +269,30 @@ def test_the_env_solver_does_not_answer_a_reference_with_itself(
     )
     for solution in solutions:
         assert "$" not in solution.value, f"{solution.name} was bound to {solution.value!r}"
+
+
+def test_importing_a_jivaro_xml_no_longer_pins_the_view_it_names(
+    golden_dir: Path,
+) -> None:
+    """C6: every jivaro import wrote ``reduction.views_to_reduce``.
+
+    ``<viewsToReduce value="av_ext"/>`` is in the file, so the reader read it
+    and the importer assigned it -- and an assigned value won for Jivaro alone
+    while Quantus went on writing the cell's ``out_file``. Import a deck from
+    a project whose view is called something else and every later run reduces
+    the old name. The row is ``owner: fixed`` since 2026-09-04, so
+    ``_assignable`` refuses it and the value is derived from the cell instead.
+    """
+
+    text = (golden_dir / "jivaro.xml").read_text(encoding="utf-8")
+    result = ri.import_recipe(
+        [ri.ImportSource(label="jivaro.xml", text=text, target=RenderTarget.JIVARO_XML)],
+        recipe_id="jivaro",
+    )
+
+    assert not hasattr(result.recipe.reduction, "views_to_reduce")
+    assigned = [row for row in result.mapped if row.applied_to]
+    assert "reduction.views_to_reduce" not in {row.applied_to for row in assigned}
+    # The file still round-trips: the value comes from the DUT at render time,
+    # so nothing about the generated XML changed.
+    assert result.clean_roundtrip, [t.diff for t in result.roundtrip.values()]

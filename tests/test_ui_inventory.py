@@ -507,9 +507,16 @@ def test_a_value_that_is_not_the_catalog_default_is_marked_overridden(
     text = dump(inventory, window, "recipes", opts)
     screen = window.shell.page("recipes")
 
+    from auto_ext.ui.widgets.option_editor import PointerOptionEditor
+
     overridden = []
     for key in screen.option_keys():
         editor = screen.editor(key)
+        if isinstance(editor, PointerOptionEditor):
+            # A pointer row holds no value at all since 2026-09-04, so it can
+            # be neither at nor away from a default. The dump marks it
+            # READ-ONLY and names the screen that does own the value.
+            continue
         if not inventory._same_as_default(editor.value(), editor.spec.default):
             overridden.append(key)
     assert overridden, "the fixture recipe must differ from the catalog somewhere"

@@ -125,7 +125,6 @@ __all__ = [
     "OBJ_OPTION_LABEL",
     "OBJ_OPTION_UNIT",
     "OBJ_POINTER_LINK",
-    "OBJ_POINTER_VALUE",
     "OBJ_QUESTION_MARKER",
     "QUESTION_GLYPH",
     "BoolOptionEditor",
@@ -199,7 +198,8 @@ OBJ_OPTION_LABEL = "optionLabel"
 OBJ_OPTION_HINT = "optionHint"
 OBJ_OPTION_UNIT = "optionUnit"
 OBJ_QUESTION_MARKER = "optionQuestionMarker"
-OBJ_POINTER_VALUE = "optionPointerValue"
+# OBJ_POINTER_VALUE went with the value label on 2026-09-04: a pointer row
+# draws a link and nothing else. See PointerOptionEditor.
 OBJ_POINTER_LINK = "optionPointerLink"
 OBJ_WAS_VALUE = theme.OBJ_WAS_VALUE
 OBJ_WHY_DISABLED = theme.OBJ_WHY_DISABLED
@@ -1716,22 +1716,35 @@ class NumberOptionEditor(OptionEditor):
 
 
 class PointerOptionEditor(OptionEditor):
-    """A read-only row naming a setting another screen owns.
+    """A link to the screen that owns a setting. **No value.**
 
-    Draws the catalog default and a link saying where the real control is,
-    e.g. ``av_extracted   set per cell, not per recipe -- open the Cells
-    column``. Artboard ``A`` draws exactly this.
+    Draws one thing: a clickable sentence saying where the real control is,
+    e.g. ``set per cell, not per recipe -- open the Cells column``. Artboard
+    ``A`` drew a value beside it and this widget did too until 2026-09-04.
+
+    **Why the value went.** ONE CONCEPT, ONE OWNER: a screen that does not own
+    a value may carry a link to it and may not display it. The owner's ruling
+    that day named this row -- *"the output av_extracted view name appears on
+    both screens; the cell should own it"* -- and what the row actually drew
+    was worse than a stale copy. It was ``_display_default(spec)``, the
+    **catalog default**: ``av_ext`` for ``out_file`` and a workspace pattern
+    for ``dspf_out_path``, values that may be true of no cell and no project
+    in front of the user, on the screen they are most likely reading when they
+    decide what a run will produce. Only the owning screen can answer "what is
+    it set to", and the cost of a wrong answer here is a run pointed at a view
+    that does not exist -- the 2026-08-24 bug, arriving by a different door.
 
     It binds to nothing. ``elsewhere`` rows carry no ``recipe_field_path``
-    (they are not Recipe fields), so there is no value to read or write here
-    and :meth:`value` answers with the catalog default, unchanging. It never
+    (they are not Recipe fields), so :meth:`value` answers ``None`` and
+    :meth:`displayed_value` the empty string, whatever is pushed in. It never
     emits ``value_changed`` -- a form that reported an edit for a row it does
     not own would put a star in the title bar that no Save could clear.
 
-    The whole reason it exists is discoverability. The office report was "I
-    cannot find where to rename the Quantus output view": the setting was
-    per-cell and correctly lived on the Cells page, and a person editing a
-    recipe had no way to learn that. Ownership was never the bug.
+    The whole reason it exists is discoverability, and that half is untouched.
+    The office report was "I cannot find where to rename the Quantus output
+    view": the setting was per-cell and correctly lived on the Cells page, and
+    a person editing a recipe had no way to learn that. Ownership was never
+    the bug; showing a number nobody owned was.
     """
 
     #: ``(screen, option key)`` -- the screen to open and the row to select.
@@ -1739,12 +1752,6 @@ class PointerOptionEditor(OptionEditor):
 
     def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
-        self._value = spec.default
-
-        self._shown = ElidedLabel(_display_default(spec), parent=self)
-        self._shown.setObjectName(OBJ_POINTER_VALUE)
-        self._shown.setEnabled(False)
-        self._add_control(self._shown, stretch=0)
 
         self._link = ElidedLabel(_pointer_text(spec), parent=self)
         self._link.setObjectName(OBJ_POINTER_LINK)
@@ -1766,30 +1773,37 @@ class PointerOptionEditor(OptionEditor):
         return EditorKind.POINTER
 
     def value(self) -> Any:
-        return self._value
+        """Always ``None``. This row is not an answer to "what is it set to".
+
+        The form calls ``value()`` across every row it holds, and a pointer
+        row answering with anything at all is a claim about a screen it cannot
+        see. The screen that owns the setting is the only place with the
+        answer, and the link is how the user gets there.
+        """
+
+        return None
 
     def _apply_value(self, value: Any) -> None:
-        # Kept so the base class contract holds; the row is never written to
-        # by the form, and a host pushing a value in only changes what the
-        # row *reports* the other screen holds.
-        self._value = value
-        self._shown.set_full_text("" if value is None else str(value))
+        """Accept and discard. ``set_value`` runs over the whole form on load.
+
+        Kept so the base class contract holds. Dropping the value on the floor
+        is the behaviour: there is nowhere on this row for it to appear.
+        """
+
+    def displayed_value(self) -> str:
+        """The empty string, by construction -- there is no value label.
+
+        Spelled out as a method rather than left implicit so the ruler in
+        ``tests/ui/test_reachability.py`` can ask every row on a screen what it
+        displays and get a straight answer from this one.
+        """
+
+        return ""
 
     def link_label(self) -> ElidedLabel:
-        """The clickable half, for tests and for the focus-detail pane."""
+        """The clickable half, and the only half. For tests and focus detail."""
 
         return self._link
-
-
-def _display_default(spec: OptionSpec) -> str:
-    value = spec.default
-    if value is None:
-        return "—"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (list, tuple)):
-        return ", ".join(str(v) for v in value) or "—"
-    return str(value)
 
 
 def _pointer_text(spec: OptionSpec) -> str:

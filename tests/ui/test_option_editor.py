@@ -1409,3 +1409,51 @@ def test_a_profile_sourced_enum_keeps_its_drop_down(qtbot) -> None:
     one = builtin_catalog().option("lvs_deck_variant")
     assert one.choices_from is not None
     assert editor_kind(one) is EditorKind.COMBO
+
+
+# ---- the pointer row shows no value (ONE CONCEPT, ONE OWNER, 2026-09-04) ----
+
+
+def test_a_pointer_row_is_a_link_and_carries_no_value(qtbot) -> None:
+    """A screen that does not own a value must not display one.
+
+    ``out_file`` is the case the owner ruled on: *"the output av_extracted
+    view name appears on both screens -- the cell should own it."* The row
+    drew the **catalog default** (``av_ext``) beside its link, which is worse
+    than a stale copy: it is a value that may be true of no cell in the
+    project, on the screen a user is most likely to be reading when they
+    decide what the run will produce. ``dspf_out_path`` did the same thing
+    with a path the Project page owns.
+
+    The link stays -- discoverability was never the bug, and "where do I
+    rename the extracted view" is exactly why the row exists.
+    """
+
+    from auto_ext.ui.widgets.option_editor import PointerOptionEditor
+
+    catalog = builtin_catalog()
+    for key in ("out_file", "dspf_out_path"):
+        editor = _make(qtbot, catalog.option(key))
+        assert isinstance(editor, PointerOptionEditor), key
+        assert editor.value() is None, (
+            f"{key}: the row reports a value for a setting it does not own"
+        )
+        assert editor.displayed_value() == "", (
+            f"{key}: the row still draws a value another screen owns"
+        )
+        # And the half that is legitimate is still there and still says where.
+        assert editor.link_label().full_text()
+
+
+def test_a_pointer_row_pushed_a_value_still_shows_none(qtbot) -> None:
+    """The form pushes values into every row it holds; this one must not take.
+
+    ``set_value`` is called across the whole form on every recipe load, so
+    "shows nothing" has to survive that rather than only being true of a
+    freshly built widget.
+    """
+
+    editor = _make(qtbot, builtin_catalog().option("out_file"))
+    editor.set_value("av_something_else")
+    assert editor.displayed_value() == ""
+    assert editor.value() is None
