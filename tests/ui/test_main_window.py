@@ -546,14 +546,17 @@ def test_edit_rendered_does_not_ask_when_there_is_only_one_file(
     monkeypatch.setattr(
         rendered_editor.RenderedFileEditor, "exec_", lambda self: self.reject() or 0
     )
-    from auto_ext.model.common import Stage
+    from auto_ext.core import render
+    from auto_ext.ui import patch_capture
 
     window = loaded_window
-    recipe = window.controller.recipe("rc-coupled-typical")
-    # model_copy skips validation, so the enum has to be the real one: a raw
-    # "jivaro" string reaches the renderer and blows up on ``stage.value``.
-    window.controller.stage_recipe(
-        recipe.model_copy(update={"stages": [Stage.JIVARO]})
+    # A recipe no longer says which stages run -- the run bar does (decision
+    # 008) -- so every recipe plans all four files. Narrow the plan where the
+    # plan is made, not on the recipe.
+    monkeypatch.setattr(
+        patch_capture,
+        "editable_targets",
+        lambda recipe, **kw: render.plan_targets(recipe, stages=["jivaro"]),
     )
 
     window.recipes_screen.edit_rendered_requested.emit("rc-coupled-typical")
