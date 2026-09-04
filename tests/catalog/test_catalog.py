@@ -231,11 +231,20 @@ def test_unknown_columns_are_rejected_not_swallowed() -> None:
 # ---- the promises the data itself makes -------------------------------------
 
 
-def test_no_range_in_the_shipped_catalog_claims_to_be_verified(catalog: Catalog) -> None:
-    # Every range in this file was invented as a guard rail. Flipping one to
-    # verified is a deliberate act that needs a datasheet behind it.
-    assert [o.key for o in catalog.options if o.range_verified] == []
-    assert catalog.unverified_ranges(), "ranges exist, they are simply all unverified"
+#: The only ranges transcribed out of a vendor manual rather than invented.
+#: A range on this list is enforced by the form's validator, so adding a key
+#: here means "I read the bound in the manual", not "it looks about right".
+VERIFIED_RANGES = {"coupling_cap_threshold_absolute"}
+
+
+def test_only_the_ranges_read_out_of_a_manual_claim_to_be_verified(
+    catalog: Catalog,
+) -> None:
+    # Every other range in this file was invented as a guard rail, and the
+    # form paints those without enforcing them. Flipping one to verified is a
+    # deliberate act that needs a datasheet behind it and a line here.
+    assert {o.key for o in catalog.options if o.range_verified} == VERIFIED_RANGES
+    assert catalog.unverified_ranges(), "the invented ranges are still all unverified"
 
 
 def test_guessed_value_sets_never_become_dropdowns(catalog: Catalog) -> None:
@@ -412,11 +421,25 @@ def test_the_jivaro_view_bug_is_fixed_by_derivation_not_by_a_second_literal(
     assert catalog.option("out_file").default == "av_ext"
 
 
-def test_the_impossible_coupling_threshold_is_flagged(catalog: Catalog) -> None:
+def test_the_coupling_threshold_is_femtofarads_with_the_vendors_own_range(
+    catalog: Catalog,
+) -> None:
+    """The row this test used to pin the wrong answer for.
+
+    It asserted ``unit: F`` and demanded an open question, on the reasoning
+    that 0.01 F is 10 mF and therefore impossible. The impossible half was the
+    unit: the manual gives the range as 0 to 100 femtofarads and works its
+    example at 3 fF, so 0.01 fF -- also the value in the vendor's own sample
+    deck -- was right all along. A test that locks in a wrong answer is worse
+    than no test, which is why this one is replaced rather than deleted.
+    """
+
     opt = catalog.option("coupling_cap_threshold_absolute")
     assert opt.default == 0.01
-    assert opt.unit == "F"
-    assert opt.question, "0.01 F is 10 mF; this cannot ship as an unquestioned fact"
+    assert opt.unit == "fF"
+    assert opt.range == (0.0, 100.0)
+    assert opt.range_verified, "this bound is transcribed, not invented"
+    assert not opt.question, "the unit question is answered"
 
 
 # ---- rendering rules ---------------------------------------------------------

@@ -504,10 +504,15 @@ class ExtractionSettings(Base):
     #: The live specimen of the four-layer knob problem: manifest 5000,
     #: project.yaml 100, tasks.yaml 200, and ``--knob`` for a fourth answer.
     exclude_floating_nets_limit: int = Field(default=5000, ge=100, le=100_000)
-    #: Unit and magnitude disagree with physics: 0.01 F is a 10 mF threshold.
-    #: Carried over unchanged so behaviour does not silently shift, but it is
-    #: NOT a verified fact -- the manifest it came from was written by hand.
-    coupling_cap_threshold_absolute: AsWritten = 0.01
+    #: In FEMTOfarads, and the documented range is 0 to 100. The catalog used
+    #: to record this as farads with a note that 0.01 F is a 10 mF threshold
+    #: and therefore impossible; the unit was the wrong half. 0.01 fF is the
+    #: vendor's own worked example, so the value inherited from the
+    #: hand-written manifest was right all along -- the label was not.
+    coupling_cap_threshold_absolute: AsWritten = Field(default=0.01, ge=0.0, le=100.0)
+    #: No documented bound: the vendor's syntax table gives ``<value>`` with no
+    #: range, so this one is deliberately left unconstrained rather than given
+    #: an invented twin of its neighbour's.
     coupling_cap_threshold_relative: AsWritten = 0.001
     min_res_ohm: AsWritten = 0.001
     merge_parallel_res: bool = True
@@ -515,6 +520,9 @@ class ExtractionSettings(Base):
 
     metal_fill: MetalFill = MetalFill.VIRTUAL
     array_vias_spacing: str = "auto"
+    #: ``infinite`` (the LVS-input default) or a number of
+    #: :attr:`max_fracture_length_unit`, never below 5. See
+    #: :meth:`_fracture_length_is_infinite_or_at_least_five`.
     max_fracture_length: str = "infinite"
     #: Meaningless apart from :attr:`max_fracture_length`, and missing from the
     #: section 1.2 sketch.
@@ -525,6 +533,44 @@ class ExtractionSettings(Base):
     #: Kept as the default so adding this field moves no existing output;
     #: an RF block that blocks its inductor almost certainly wants ``gray``.
     parasitic_blocking_device_cells_type: ParasiticBlocking | None = None
+
+    @field_validator("max_fracture_length")
+    @classmethod
+    def _fracture_length_is_infinite_or_at_least_five(cls, value: str) -> str:
+        """Below 5, Quantus refuses the entire command file.
+
+        The floor is the vendor's, it applies to both units, and it is a hard
+        error rather than a warning -- so a value under it does not degrade an
+        extraction, it kills the run. The number that invites it is exactly
+        the one an RF engineer reaches for on a tight transmission line, and
+        nothing between the text box and the deck looked at it:
+        ``check_representable`` compares against the catalog to find settings
+        the template FREEZES, which is a different question from whether a
+        value is legal.
+
+        Stays ``str`` because ``infinite`` is a legal value and the field has
+        to be able to hold it.
+        """
+
+        text = value.strip()
+        if text.lower() == "infinite":
+            return text
+        try:
+            number = float(text)
+        except ValueError:
+            raise ValueError(
+                f"extraction.max_fracture_length is {value!r}; it takes either "
+                f"'infinite' or a number of "
+                f"extraction.max_fracture_length_unit"
+            ) from None
+        if number < 5:
+            raise ValueError(
+                f"extraction.max_fracture_length is {text}, and Quantus errors "
+                f"on the whole command file below 5. For a long RF "
+                f"transmission line the manual recommends 100; below 50 it "
+                f"warns that accuracy suffers."
+            )
+        return text
 
 
 class CommonOutputSettings(Base):

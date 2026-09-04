@@ -2052,16 +2052,21 @@ options:
     context_path: recipe.extraction.array_vias_spacing
     owner: recipe
     type: str
-    choices_confidence: guess
+    choices_confidence: certain
     default: auto
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:14
-    question: Can these take a number as well as "auto"?
     notes: >-
       Written BARE here while -max_via_array_size three lines down is written
       QUOTED, with the same kind of value. Not normalised: the quoting is
       transcribed per site because the patch baseline depends on it.
+      Syntax is an alternation, `[ <value> | "auto" ]`, LVS input only -- so a
+      bare number IS legal and the control stays free text rather than a
+      two-entry list. `auto` means "use the array_vias_spacing values from the
+      PDK layer_setup file"; a number given here overrides them at run time.
+      Vias and contacts closer together than this distance are merged into one
+      array, which is what keeps the resistance network small.
     lands_in:
       - {target: quantus.ext.cmd, section: extraction_setup, option: -array_vias_spacing, line: 14, quoting: bare}
       - {target: quantus.dspf.cmd, section: extraction_setup, option: -array_vias_spacing, line: 14, quoting: bare}
@@ -2077,7 +2082,20 @@ options:
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:15
-    question: What do you set this to for long RF transmission lines?
+    notes: >-
+      Two legal shapes, not a value set: the literal `infinite`, or a number
+      of max_fracture_length_unit. THE NUMBER CANNOT BE BELOW 5 -- the manual
+      says a smaller value (5 microns or 5 squares, whichever unit is
+      selected) makes Quantus issue an error and refuse the whole command
+      file. Enforced on the model field, because the only thing between the
+      text box and the deck used to be check_representable, which asks
+      whether the template freezes a value and not whether the value is legal.
+      `infinite` is the vendor default for LVS input; it is 25 microns for
+      cell-level extraction at <=20nm and 100 microns above that, which is
+      where the 100 in this row's guidance comes from.
+      RF guidance, verbatim in intent: for long transmission lines set 100u
+      rather than the default infinite, and do not go below 50u because
+      accuracy suffers. Not applied to slanted metal layers.
     lands_in:
       - {target: quantus.ext.cmd, section: extraction_setup, option: -max_fracture_length, line: 15, quoting: bare}
       - {target: quantus.dspf.cmd, section: extraction_setup, option: -max_fracture_length, line: 15, quoting: bare}
@@ -2120,7 +2138,7 @@ options:
     context_path: recipe.extraction.max_via_array_size
     owner: recipe
     type: str
-    choices_confidence: guess
+    choices_confidence: certain
     default: auto
     currently: jinja_var
     observed: true
@@ -2128,7 +2146,15 @@ options:
     lands_in:
       - {target: quantus.ext.cmd, section: extraction_setup, option: -max_via_array_size, line: 17}
       - {target: quantus.dspf.cmd, section: extraction_setup, option: -max_via_array_size, line: 17}
-    notes: Quoted, unlike -array_vias_spacing and -max_fracture_length. Transcribed, not normalised.
+    notes: >-
+      Quoted, unlike -array_vias_spacing and -max_fracture_length.
+      Transcribed, not normalised.
+      Same alternation shape as array_vias_spacing, `[ <size> | "auto" ]`,
+      LVS only, so a bare number is legal and the control stays free text.
+      For inductance extraction the manual makes this a first-order lever:
+      inductance is extracted on metals but not on vias, and via resistance is
+      not merged into metal resistance, so the array size is what bounds the
+      resistor count.
     why: Upper bound on via-array merging. Large power vias make this a runtime lever.
 
   - key: qrc_preserve_cell_list_name
@@ -2352,19 +2378,30 @@ options:
     owner: recipe
     type: float
     choices_confidence: certain
-    unit: F
+    unit: fF
+    range: [0.0, 100.0]
+    range_verified: true
     default: 0.01
     currently: manifest_knob
     observed: true
     source_ref: examples/legacy/templates/quantus/ext.cmd.j2.manifest.yaml:10
-    question: What value and unit do you normally use here?
     notes: >-
-      DEFAULT AND UNIT DISAGREE WITH PHYSICS: 0.01 F is a 10 mF coupling
-      capacitance threshold. Either the unit is not farads or the default is
-      simply wrong. The value is carried over unchanged on purpose (changing
-      it blind would silently change every extraction) but it must not be read
-      as a verified fact -- the manifest was written by hand, and a
-      hand-written manifest is not evidence.
+      RESOLVED 2026-09-04. The unit was the wrong half, not the default: the
+      manual states "the allowable range of values is 0 to 100 femtofarads"
+      and works its example at "3 femtofarads", so 0.01 is 0.01 fF and both
+      our value and the vendor's own sample deck (which writes 0.01 here) are
+      sane. The row used to carry `unit: F` plus a note asserting the default
+      was physically impossible, and a test pinned that belief in place -- so
+      the one knob that decides how many coupling caps survive read as
+      untrustworthy for no reason.
+      Absolute means absolute: a -4 fF coupling cap counts as 4 fF and is
+      kept against a 3 fF threshold.
+      THE ONLY VERIFIED RANGE IN THIS FILE. Every other `range:` here was
+      invented as a guard rail; this one is transcribed from the manual, which
+      is why `range_verified` is true and the form may enforce it.
+      How it combines with coupling_cap_threshold_relative is a third option,
+      `filter_coupling_cap -cap_filtering_mode` (default absolute_and_relative,
+      i.e. AND), which we neither emit nor model.
     lands_in:
       - {target: quantus.ext.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_absolute, line: 26, quoting: bare}
       - {target: quantus.dspf.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_absolute, line: 26, quoting: bare}
@@ -2381,6 +2418,11 @@ options:
     currently: manifest_knob
     observed: true
     source_ref: examples/legacy/templates/quantus/ext.cmd.j2.manifest.yaml:14
+    notes: >-
+      Deliberately WITHOUT a range, unlike its absolute neighbour: the vendor
+      syntax table gives a bare <value> with no bounds, so inventing a twin of
+      the 0-100 fF range would put a made-up guard rail next to a transcribed
+      one and make the two indistinguishable.
     lands_in:
       - {target: quantus.ext.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_relative, line: 27, quoting: bare}
       - {target: quantus.dspf.cmd, section: filter_coupling_cap, option: -coupling_cap_threshold_relative, line: 27, quoting: bare}
