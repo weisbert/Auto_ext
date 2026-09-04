@@ -105,7 +105,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from auto_ext.catalog import Currently, OptionSpec, OptionType
+from auto_ext.catalog import Confidence, Currently, OptionSpec, OptionType
 from auto_ext.catalog.spec import Screen, Tier
 from auto_ext.ui import theme
 
@@ -132,6 +132,7 @@ __all__ = [
     "ChoiceOptionEditor",
     "EditorKind",
     "ElidedLabel",
+    "FormComboBox",
     "FreeChoiceOptionEditor",
     "ListOptionEditor",
     "MultiChoiceOptionEditor",
@@ -271,6 +272,19 @@ _ELIDE_SLACK = 2
 #: a name missing from it renders as ``Lvs`` rather than not at all.
 _ACRONYM_GROUPS = frozenset({"lvs", "dspf", "si", "qrc", "xy"})
 
+#: What the grey hint says about a drop-down's value set, per
+#: :class:`~auto_ext.catalog.spec.Confidence`. Three sentences rather than one
+#: sentence and two silences: marking only the guessed lists meant that the
+#: twenty rows carrying no phrase could be read either as "verified" or as
+#: "nobody has labelled this one", and the form gave no way to tell which.
+#: ``guess`` keeps the promise that the field still takes anything typed into
+#: it, because that is the half of it a user acts on.
+_LIST_CONFIDENCE: Mapping[Confidence, str] = {
+    Confidence.CERTAIN: "confirmed list",
+    Confidence.LIKELY: "list not confirmed",
+    Confidence.GUESS: "guessed list - other values accepted",
+}
+
 #: Decimals a float field accepts. ``coupling_cap_threshold_absolute`` is 0.01
 #: with a unit the catalog itself flags as physically impossible as written,
 #: so the field must not round away a value the user typed deliberately.
@@ -320,6 +334,16 @@ def editor_kind(spec: OptionSpec) -> EditorKind:
     if spec.type is OptionType.BOOL:
         return EditorKind.CHECKBOX
     if spec.type is OptionType.ENUM:
+        if not _has_a_choice_to_make(spec):
+            # A drop-down that opens onto a single line is a text box wearing
+            # a costume: it promises a menu, delivers one entry, and hides
+            # the catalog's own open question about what else the tool takes.
+            # The project already ruled on the identical shape for lists --
+            # "with no members to draw, a text box is the honest control"
+            # (docs/refactor/UX_VALIDATION.md) -- and an enum is that claim
+            # with an arrow drawn on it. The one spelling we do know survives
+            # as the field's value, so this is honest rather than empty.
+            return EditorKind.TEXT
         return EditorKind.COMBO_FREE if spec.free_input else EditorKind.COMBO
     if spec.type in (OptionType.INT, OptionType.FLOAT):
         return EditorKind.NUMBER
@@ -332,6 +356,25 @@ def editor_kind(spec: OptionSpec) -> EditorKind:
         # combo gives an enum, for the same reason.
         return EditorKind.CHECKS if spec.choices else EditorKind.LIST
     return EditorKind.TEXT
+
+
+def _has_a_choice_to_make(spec: OptionSpec) -> bool:
+    """True when an ``enum``'s drop-down would hold two entries or more.
+
+    Counted the way the control counts them, not the way the catalog does:
+
+    * a ``nullable`` row gains the explicit ``(from the profile)`` entry, and
+      "resolve it for me" against one named value is a real decision;
+    * a ``choices_from`` row's list arrives with the loaded ``PdkProfile``, so
+      the catalog's frozen copy is one PDK's answer and says nothing about
+      how long the real list is. The demo profile has one corner and the
+      shipped PDK has nine -- counting the frozen list would turn the corner
+      picker into a text box on exactly the machines that need it.
+    """
+
+    if spec.choices_from is not None or spec.nullable:
+        return True
+    return len(spec.choices or []) >= 2
 
 
 def template_freezes(spec: OptionSpec) -> bool:
@@ -376,6 +419,22 @@ def option_label(spec: OptionSpec) -> str:
     return leaf.replace("_", " ")
 
 
+def _popup_title(spec: OptionSpec) -> str:
+    """What a multi-value popup calls itself: the row's label, plus the key.
+
+    The label is what the user just clicked beside, so it is what ties the
+    overlay back to the row it came from. The catalog key is added only when
+    it differs -- ``output_form`` draws as "emit", and the key is the string
+    every error message and every search quotes, so a popup that showed only
+    "emit" would be unfindable from either.
+    """
+
+    label = option_label(spec)
+    if label.replace(" ", "_") == spec.key:
+        return label
+    return f"{label} {_EM_DASH} {spec.key}"
+
+
 def group_label(name: str) -> str:
     """``extraction`` -> ``Extraction``; ``lvs`` -> ``LVS``.
 
@@ -391,16 +450,20 @@ def group_label(name: str) -> str:
 def _format_value(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, (list, tuple)):
+        # A list default with no members reads "default (none)" rather than
+        # "default " -- three ``lvs_extra_*_names`` rows default to ``[]``
+        # and rendered the second, which claims a default and then says
+        # nothing about it.
+        return ", ".join(_format_value(item) for item in value) or "(none)"
     if value == "":
         # Two catalog rows default to the empty string. Rendering that as
         # nothing produced the hint "default " with a trailing space and no
         # information -- a blank box beside a blank hint, which is the worst
         # thing a form can show.
         return "(empty)"
-    if isinstance(value, bool):
-        return "on" if value else "off"
-    if isinstance(value, (list, tuple)):
-        return ", ".join(_format_value(item) for item in value)
     return str(value)
 
 
@@ -437,7 +500,31 @@ def _range_text(spec: OptionSpec) -> str:
 
 
 def hint_text(spec: OptionSpec) -> str:
-    """The short grey line beside a field: default, range, guessed members.
+    """The short grey line beside a field, in one vocabulary.
+
+    Four clauses, each answering a question a first-time user asked out loud
+    on the walkthrough, and each phrased so that its *absence* also means
+    something:
+
+    ``default X``
+        what is in the box now, and -- unless an empty-clause follows -- what
+        the generated file will carry.
+    ``empty = X`` / ``unset -- X``
+        what happens when the box is cleared. Only a nullable row has one, so
+        a row without it always sends what it shows. That is the distinction
+        the old wording lost: ``default auto`` could equally mean "``auto`` is
+        the literal we send" and "nobody has chosen yet", which are different
+        command files.
+    ``advisory range A - B (unverified)``
+        the RANGE is the guess, never the value. ``range_verified`` is false
+        on every shipped row, and "(unverified)" on its own was read as a
+        doubt about the number the user had typed -- the opposite of what the
+        field does, which is to accept it as written.
+    ``confirmed list`` / ``list not confirmed`` / ``guessed list ...``
+        how far the drop-down can be trusted. Every row with a value set says
+        one of the three, because when only the guessed ones were marked the
+        silence on the other twenty could equally have meant "verified" or
+        "nobody labelled this one".
 
     Kept to one elided line. Everything longer lives in
     :func:`option_tooltip`, which the user reaches by hovering -- a static
@@ -446,25 +533,26 @@ def hint_text(spec: OptionSpec) -> str:
     """
 
     parts: list[str] = []
-    if spec.default is not None or spec.type is OptionType.BOOL:
+    if spec.default is not None:
         parts.append(f"default {_format_value(spec.default)}")
-        if spec.nullable and spec.placeholder:
-            # A row that has BOTH a default and a meaning for empty has to say
-            # the second one out loud: temperature_c shows 55.0, and nothing
-            # told the user that clearing the box hands the decision to the
-            # corner. The fallback existed in the model and was unreachable in
-            # the only place it could have been used.
-            parts.append(f"empty = {spec.placeholder}")
-    elif spec.placeholder:
-        parts.append(f"unset {_EM_DASH} {spec.placeholder}")
+    if spec.nullable and spec.placeholder:
+        # A row that has BOTH a default and a meaning for empty has to say
+        # the second one out loud: temperature_c shows 55.0, and nothing told
+        # the user that clearing the box hands the decision to the corner.
+        # The fallback existed in the model and was unreachable in the only
+        # place it could have been used.
+        parts.append(
+            f"empty = {spec.placeholder}"
+            if spec.default is not None
+            else f"unset {_EM_DASH} {spec.placeholder}"
+        )
     if spec.range is not None:
-        suffix = "" if spec.range_verified else " (unverified)"
-        parts.append(_range_text(spec) + suffix)
-    if spec.free_input and spec.choices:
-        # The members are in the drop-down now, so the hint no longer repeats
-        # them; what it has to say is that the list is not authoritative and
-        # the field will take anything the tool accepts.
-        parts.append("guessed list - other values accepted")
+        if spec.range_verified:
+            parts.append(f"range {_range_text(spec)}")
+        else:
+            parts.append(f"advisory range {_range_text(spec)} (unverified)")
+    if spec.choices:
+        parts.append(_LIST_CONFIDENCE[spec.choices_confidence])
     if template_freezes(spec):
         # First, not last: this line elides, and the one part of it the user
         # has to read is the part that says the field does nothing.
@@ -779,6 +867,40 @@ def _set_text_from_start(edit: QLineEdit, text: str) -> None:
 # ---- editors ---------------------------------------------------------------
 
 
+class FormComboBox(QComboBox):
+    """A combo box that only answers the wheel once the user is inside it.
+
+    Qt gives every combo ``Qt.WheelFocus`` and steps its current index on a
+    wheel notch, so scrolling a long form edits whichever combo the cursor
+    passes over -- no click, no keystroke, and nothing on screen naming the
+    rows that moved. On the eighty-seven row Recipes form that reached the
+    ``extract -type`` row, where RC-coupled against C-only is the difference
+    between a real extraction and a cheap one.
+
+    Two halves, and both are needed. ``StrongFocus`` stops the wheel from
+    handing the combo focus in the first place, which is what made the very
+    first notch an edit. :meth:`wheelEvent` then IGNORES the event rather
+    than swallowing it: Qt propagates a wheel to the parent only while the
+    receiver leaves it un-accepted, so the scroll area underneath still
+    scrolls. Eating it would trade a silent edit for a form that stops dead
+    wherever a combo happens to be.
+
+    The text editors on this form never had the problem -- a ``QLineEdit``
+    does not act on a wheel -- which is why the fix is a combo of its own
+    rather than something on :class:`OptionEditor`.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if not self.hasFocus():
+            event.ignore()
+            return
+        super().wheelEvent(event)
+
+
 class OptionEditor(QWidget):
     """Base class: a spec, a control, a typed value and one signal.
 
@@ -1090,7 +1212,7 @@ class ChoiceOptionEditor(OptionEditor):
     def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
         self._unset_label = self.UNSET_LABEL if spec.nullable else None
-        self._combo = QComboBox(self)
+        self._combo = FormComboBox(self)
         self._combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLength)
         self._combo.setMinimumContentsLength(6)
         self._combo.setFont(_mono_font(self._combo))
@@ -1334,7 +1456,22 @@ class MultiChoiceOptionEditor(OptionEditor):
         layout = QVBoxLayout(self._row)
         layout.setContentsMargins(theme.SPACE_XS, theme.SPACE_XS, theme.SPACE_XS, theme.SPACE_XS)
         layout.setSpacing(theme.SPACE_XXS)
-        # ``all`` / ``none`` first, because with eight members the common
+
+        # The popup names its own list. Three of these panels exist on the
+        # Recipes form -- stages, output_xy, output_form -- and the overlay
+        # covers the row label that would tell them apart, so an ``all``
+        # click is a five-stage flow change or an eight-column output change
+        # depending on which one happens to be open. Nothing inside the menu
+        # said which.
+        self._header = QLabel(_popup_title(spec), self._row)
+        self._header.setStyleSheet(
+            f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_META}px;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        self._header.setToolTip(option_tooltip(spec))
+        layout.addWidget(self._header)
+
+        # ``all`` / ``none`` next, because with eight members the common
         # edit is "everything except one" and doing that by hand is eight
         # clicks to get back to where you started. Artboard ``I1``.
         shortcuts = QWidget(self._row)
@@ -1395,6 +1532,11 @@ class MultiChoiceOptionEditor(OptionEditor):
         """The closed control -- the thing that reads ``8 of 8``."""
 
         return self._summary
+
+    def popup_header(self) -> QLabel:
+        """The line inside the popup naming which list it edits."""
+
+        return self._header
 
     def all_button(self) -> QPushButton:
         return self._all

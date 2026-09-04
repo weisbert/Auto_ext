@@ -14,7 +14,8 @@ import pytest
 pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
-from PyQt5.QtGui import QDoubleValidator, QIntValidator  # noqa: E402
+from PyQt5.QtCore import QPoint, QPointF, Qt  # noqa: E402
+from PyQt5.QtGui import QDoubleValidator, QIntValidator, QWheelEvent  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
     QApplication,
     QCheckBox,
@@ -160,19 +161,22 @@ def test_a_guessed_enum_is_an_editable_dropdown(qtbot) -> None:
 
 
 def test_a_guessed_enum_accepts_a_spelling_no_one_predicted(qtbot) -> None:
+    # Two members, because one is a drop-down with nothing to choose between
+    # and resolves to a text box instead -- see
+    # ``test_a_lone_enum_member_becomes_a_text_box_that_starts_at_that_member``.
     editor = _make(
         qtbot,
         spec(
             type=OptionType.ENUM,
-            choices=["auCdl"],
+            choices=["auCdl", "auLvs"],
             choices_confidence=Confidence.GUESS,
             default="auCdl",
         ),
     )
-    editor.combo().setCurrentText("auLvs")
-    assert editor.value() == "auLvs"
+    editor.combo().setCurrentText("spectre")
+    assert editor.value() == "spectre"
     # Typed, not adopted: this recipe's value is not a new catalog member.
-    assert editor.choices() == ["auCdl"]
+    assert editor.choices() == ["auCdl", "auLvs"]
 
 
 def test_numbers_get_a_type_validator(qtbot) -> None:
@@ -833,7 +837,11 @@ def test_the_catalog_has_guessed_enums_and_every_one_is_an_editable_dropdown() -
     guessed = [
         opt
         for opt in catalog.by_owner(Owner.RECIPE)
-        if opt.type is OptionType.ENUM and opt.choices_confidence is Confidence.GUESS
+        if opt.type is OptionType.ENUM
+        and opt.choices_confidence is Confidence.GUESS
+        # A guessed list of one is not a list. It resolves to a text box
+        # holding that one spelling; the rule below covers those.
+        and len(opt.choices or []) >= 2
     ]
     assert guessed, "the fixture this rule exists for has disappeared"
     assert all(editor_kind(opt) is EditorKind.COMBO_FREE for opt in guessed)
@@ -924,17 +932,34 @@ def test_an_empty_string_default_is_spelled_out_not_left_blank(qtbot) -> None:
     assert "default (empty)" in hint_text(one)
 
 
-def test_no_enum_anywhere_in_the_catalog_is_a_bare_text_box() -> None:
+def test_no_enum_anywhere_in_the_catalog_is_a_bare_text_box(qtbot) -> None:
     """The office report this rule was rewritten for.
 
     "很多参数你选择的是 blank 填写" -- a value with a finite set of legal
     spellings was being asked for as free text, so a user who does not already
     know the spelling has no way to find it out from the form.
+
+    **Bare** is the operative word, and it is what the rule turns on rather
+    than the control class. A one-member list resolves to a text box now
+    (W-36), and that does not reopen this defect: the box carries the one
+    spelling the catalog knows, so the spelling is still on screen. What is
+    forbidden is an enum whose control shows the user nothing.
     """
 
     catalog = builtin_catalog()
     enums = [opt for opt in catalog.options if opt.type is OptionType.ENUM]
-    assert [o.key for o in enums if editor_kind(o) is EditorKind.TEXT] == []
+    blank = []
+    for one in enums:
+        if editor_kind(one) is not EditorKind.TEXT:
+            continue
+        editor = build_option_editor(one)
+        qtbot.addWidget(editor)
+        edit = editor.line_edit()
+        if not edit.text() and not edit.placeholderText():
+            blank.append(one.key)
+    assert blank == [], (
+        f"these enums ask for a spelling and offer none: {blank}"
+    )
 
 
 # ---- artboard I1: the popup's two shortcuts ------------------------------------
@@ -966,6 +991,40 @@ def test_all_and_none_tick_every_member_in_one_action(qtbot) -> None:
     assert len(seen) == 2
 
 
+def test_the_popup_names_the_list_its_all_and_none_belong_to(qtbot) -> None:
+    """Three ``all`` / ``none`` pairs on one screen and no way to tell them apart.
+
+    The buttons live inside a ``QMenu`` overlay; the row label that would
+    identify them stays outside it, on the form the overlay is covering. So
+    the popup for ``stages``, the popup for ``output_xy`` and the popup for
+    ``output_form`` are three identical panels of check boxes, and clicking
+    ``all`` in one of them is a five-stage flow change or an eight-column
+    output change depending on which one is open.
+    """
+
+    catalog = builtin_catalog()
+    headers = {}
+    for key in ("stages", "output_xy", "output_form"):
+        editor = build_option_editor(catalog.option(key))
+        qtbot.addWidget(editor)
+        editor.summary_button().menu().popup(editor.mapToGlobal(editor.rect().topLeft()))
+        try:
+            header = editor.popup_header()
+            assert header.isVisible(), f"{key}: the popup opened with no header"
+            headers[key] = header.text()
+        finally:
+            editor.summary_button().menu().close()
+
+    assert headers["stages"] == "stages"
+    # The row label and the catalog key differ here, and error messages quote
+    # the key -- so this one has to carry both.
+    assert "emit" in headers["output_form"]
+    assert "output_form" in headers["output_form"]
+    assert len(set(headers.values())) == 3, (
+        f"two popups are still indistinguishable: {headers}"
+    )
+
+
 def test_an_open_member_list_can_still_take_a_value_nobody_predicted(qtbot) -> None:
     """The other half of I1: type a value the list does not have."""
 
@@ -987,3 +1046,361 @@ def test_an_open_member_list_can_still_take_a_value_nobody_predicted(qtbot) -> N
     editor.other_edit().setText("a_value_nobody_predicted")
     editor.other_edit().textEdited.emit("a_value_nobody_predicted")
     assert "a_value_nobody_predicted" in editor.value()
+
+
+# ---- W-10: a wheel over the form must not edit anything -------------------
+
+
+def _wheel(widget) -> QWheelEvent:
+    """One notch down, delivered where the cursor is."""
+
+    centre = QPointF(widget.rect().center())
+    return QWheelEvent(
+        centre,
+        QPointF(widget.mapToGlobal(widget.rect().center())),
+        QPoint(0, -120),
+        QPoint(0, -120),
+        Qt.NoButton,
+        Qt.NoModifier,
+        Qt.NoScrollPhase,
+        False,
+    )
+
+
+def _combo_spec() -> OptionSpec:
+    return spec(
+        type=OptionType.ENUM,
+        choices=["rc_coupled", "c_only_coupled", "r_only"],
+        choices_confidence=Confidence.CERTAIN,
+        default="rc_coupled",
+    )
+
+
+def test_a_wheel_over_an_unfocused_combo_does_not_change_the_recipe(qtbot) -> None:
+    """Scrolling the 87-row form must not silently pick another value.
+
+    A ``QComboBox`` defaults to ``Qt.WheelFocus``: it takes focus FROM the
+    wheel and then steps its own current index, whether or not it is the
+    thing the user was working in. One flick down the form therefore rewrote
+    whichever rows the cursor crossed -- the extract-rule type among them --
+    with no click, no keystroke and nothing on screen naming what moved.
+    """
+
+    editor = _make(qtbot, _combo_spec())
+    seen: list[object] = []
+    editor.value_changed.connect(lambda _k, v: seen.append(v))
+
+    combo = editor.combo()
+    assert not combo.hasFocus()
+    QApplication.sendEvent(combo, _wheel(combo))
+
+    assert editor.value() == "rc_coupled", "a wheel notch edited an unfocused combo"
+    assert seen == [], "an unfocused combo reported an edit nobody made"
+
+
+def test_a_wheel_still_works_once_the_user_is_in_the_combo(qtbot) -> None:
+    """The guard is about focus, not about taking the wheel away.
+
+    Somebody who has clicked into a combo means to change it, and refusing
+    them the wheel there would be a second defect rather than a fix.
+    """
+
+    editor = _make(qtbot, _combo_spec())
+    editor.show()
+    qtbot.waitExposed(editor)
+
+    combo = editor.combo()
+    # ``setFocus`` alone is not enough: ``hasFocus`` is also false while some
+    # other window is active, which in a full-suite run is whichever widget
+    # the previous test left on screen. Claiming the active window here is
+    # what makes the assertion about the guard rather than about the window
+    # manager's mood.
+    QApplication.setActiveWindow(editor)
+    combo.setFocus()
+    qtbot.waitUntil(combo.hasFocus, timeout=2000)
+
+    QApplication.sendEvent(combo, _wheel(combo))
+    assert editor.value() == "c_only_coupled"
+
+
+def test_an_unfocused_combo_passes_the_wheel_on_rather_than_eating_it(qtbot) -> None:
+    """Ignoring is not swallowing: the form still scrolls under the cursor.
+
+    Consuming the event instead would trade a silent edit for a form that
+    stops scrolling wherever a combo happens to be, which is the same class
+    of surprise pointed the other way. Qt propagates a wheel event to the
+    parent only while the receiver leaves it un-accepted.
+    """
+
+    editor = _make(qtbot, _combo_spec())
+    combo = editor.combo()
+
+    assert combo.focusPolicy() == Qt.StrongFocus, (
+        "a WheelFocus combo takes focus from the wheel itself, which is how "
+        "the notch that should have scrolled the form became an edit"
+    )
+
+    event = _wheel(combo)
+    event.accept()
+    combo.wheelEvent(event)
+    assert event.isAccepted() is False, (
+        "the unfocused combo accepted the wheel, so the scroll area under it "
+        "never sees the notch"
+    )
+
+
+def test_an_extract_rule_combo_is_guarded_the_same_way(qtbot) -> None:
+    """The sub-form's two combos sit in the same scrolled column.
+
+    ``extract -type`` is the single most consequential value on the screen --
+    RC-coupled against C-only is the difference between a real extraction and
+    a cheap one -- and it was the row a wheel was most likely to cross.
+    """
+
+    from auto_ext.ui.widgets.extract_rules import ExtractRuleRow
+
+    catalog = builtin_catalog()
+    row = ExtractRuleRow(
+        selection_spec=catalog.option("extract_selection"),
+        type_spec=catalog.option("extract_type"),
+    )
+    qtbot.addWidget(row)
+
+    changes: list[object] = []
+    row.changed.connect(lambda: changes.append(row.value()))
+
+    for combo in (row.selection_combo(), row.type_combo()):
+        assert combo.focusPolicy() == Qt.StrongFocus, combo
+        before = combo.currentText()
+        assert not combo.hasFocus()
+        QApplication.sendEvent(combo, _wheel(combo))
+        assert combo.currentText() == before, "a wheel notch edited an extract rule"
+
+    assert changes == [], "the sub-form reported a rule change nobody made"
+
+
+# ---- W-9, W-34, W-35: one vocabulary in the grey hint ---------------------
+
+
+def _hint_parts(one: OptionSpec) -> list[str]:
+    """The hint as the user reads it: one clause per separator."""
+
+    text = hint_text(one)
+    return [part.strip() for part in text.split("·") if part.strip()]
+
+
+def test_no_hint_claims_a_default_the_row_does_not_have() -> None:
+    """"default" with nothing after it is a contract with no terms.
+
+    Seven nullable ``bool`` rows rendered exactly that -- ``default  · empty
+    = (tool default)`` -- because the hint took the bool branch whether or
+    not there WAS a default. A reader has to decide whether the blank means
+    "off", "nothing is sent" or "we did not write it down", and those are
+    three different command files.
+    """
+
+    for one in builtin_catalog().options:
+        for part in _hint_parts(one):
+            if part.startswith("default"):
+                assert part != "default" and part != "default ", (
+                    f"{one.key}: the hint says 'default' and then stops"
+                )
+                assert part[len("default") :].strip(), (
+                    f"{one.key}: 'default' with no value after it -- {part!r}"
+                )
+
+
+def test_every_nullable_row_says_what_leaving_it_empty_does() -> None:
+    """``default X`` and ``unset -- X`` are two contracts, and the row must pick.
+
+    On a box showing ``auto`` under the hint ``default auto``, a user cannot
+    tell whether ``auto`` is a literal being sent to Quantus or "I have not
+    chosen yet", and those render different command files. The rule that
+    settles it is structural rather than per-row: a row whose hint carries no
+    empty-clause always sends what is in the box, and a nullable row is
+    therefore obliged to carry one.
+    """
+
+    silent = []
+    for one in builtin_catalog().options:
+        if not one.nullable:
+            continue
+        hint = hint_text(one)
+        if "empty = " not in hint and "unset " not in hint:
+            silent.append(one.key)
+    assert silent == [], (
+        "these nullable rows never say what an empty box does, so the user "
+        f"cannot tell a literal from an unmade choice: {silent}"
+    )
+
+
+def test_a_nullable_row_with_a_default_says_both_halves() -> None:
+    """``temperature_c`` is the shape every nullable row has to have.
+
+    It shows 55.0 and clearing it hands the decision to the corner. Saying
+    only one of those two things is what made the fallback -- which existed
+    in the model the whole time -- unreachable in the one place it could be
+    used.
+    """
+
+    both = [
+        one
+        for one in builtin_catalog().options
+        if one.nullable and one.default is not None
+    ]
+    assert both, "the fixture this rule exists for has disappeared"
+    for one in both:
+        hint = hint_text(one)
+        assert f"default {one.default}" in hint, one.key
+        assert f"empty = {one.placeholder}" in hint, one.key
+
+
+def test_an_unverified_range_says_the_RANGE_is_what_nobody_checked() -> None:
+    """"-55 - 175 (unverified)" -- unverified by whom, the range or the value?
+
+    ``range_verified`` is a statement about the bounds: they were invented on
+    a machine with no Cadence on it. Reading it as a statement about the
+    VALUE says the opposite of what the field does, which is to accept the
+    number as typed.
+    """
+
+    one = spec(type=OptionType.INT, default=5000, range=(100, 100_000))
+    hint = hint_text(one)
+    assert "advisory range" in hint, (
+        f"the hint qualifies something, but never says it is the range: {hint!r}"
+    )
+    assert "(unverified)" in hint
+
+    checked = spec(
+        type=OptionType.INT, default=50, range=(0, 100), range_verified=True
+    )
+    assert "advisory" not in hint_text(checked)
+    assert "range 0 " in hint_text(checked)
+
+
+def test_every_offered_list_says_how_far_it_can_be_trusted() -> None:
+    """The absence of "guessed list" carried no information at all.
+
+    Nine drop-downs said their list was a guess and the other twenty said
+    nothing, which reads either as "verified" or as "nobody labelled this
+    one" -- and there was no way to tell which from the form. Confidence is
+    a column in the catalog; it has to reach the hint, not only the tooltip.
+    """
+
+    unmarked = []
+    for one in builtin_catalog().options:
+        if not one.choices:
+            continue
+        hint = hint_text(one)
+        if "list" not in hint:
+            unmarked.append((one.key, one.choices_confidence.value))
+    assert unmarked == [], (
+        "these rows offer a value set and never say how far it can be "
+        f"trusted: {unmarked}"
+    )
+
+
+def test_a_confirmed_list_is_marked_positively_not_only_in_the_tooltip() -> None:
+    certain = spec(
+        type=OptionType.ENUM,
+        choices=["wodio", "widio"],
+        choices_confidence=Confidence.CERTAIN,
+        default="wodio",
+    )
+    guessed = spec(
+        type=OptionType.ENUM,
+        choices=["standard"],
+        choices_confidence=Confidence.GUESS,
+        default="standard",
+    )
+    likely = spec(
+        type=OptionType.ENUM,
+        choices=["a", "b"],
+        choices_confidence=Confidence.LIKELY,
+        default="a",
+    )
+
+    assert "confirmed list" in hint_text(certain)
+    assert "guessed list" in hint_text(guessed)
+    assert "not confirmed" in hint_text(likely)
+    # Three different claims, three different sentences: a reader must never
+    # have to work out which one they are looking at from what is missing.
+    assert len({hint_text(certain), hint_text(guessed), hint_text(likely)}) == 3
+
+
+# ---- W-36: a one-item drop-down is a text box wearing a costume ----------
+
+
+def test_no_editor_is_a_drop_down_with_nothing_to_choose_between(qtbot) -> None:
+    """``reduction_criterion`` offers exactly one member, and it is a guess.
+
+    The project already ruled on this shape for lists -- "with no members to
+    draw, a text box is the honest control" (``UX_VALIDATION.md``) -- and an
+    enum with one member is the same claim with an extra arrow drawn on it:
+    it looks like a menu, opens onto a single line, and hides the fact that
+    the catalog carries an open question about what else the tool takes.
+    """
+
+    grid = OptionGrid()
+    qtbot.addWidget(grid)
+    costumes = []
+    for one in builtin_catalog().options:
+        if one.type is not OptionType.ENUM:
+            continue
+        editor = build_option_editor(one)
+        combo = getattr(editor, "combo", None)
+        if combo is not None and combo().count() < 2:
+            costumes.append((one.key, list(one.choices or [])))
+        editor.deleteLater()
+    assert costumes == [], (
+        f"these drop-downs have nothing to choose between: {costumes}"
+    )
+
+
+def test_a_lone_enum_member_becomes_a_text_box_that_starts_at_that_member(
+    qtbot,
+) -> None:
+    """Honest, not empty: the one spelling we do know is still the value.
+
+    Turning it into a blank box would trade a misleading menu for the exact
+    defect the editable combo was introduced to fix -- a field with no idea
+    what a legal value even looks like.
+    """
+
+    one = builtin_catalog().option("reduction_criterion")
+    assert one.choices == ["standard"], "the fixture this rule exists for moved"
+    assert editor_kind(one) is EditorKind.TEXT
+
+    editor = _make(qtbot, one)
+    assert isinstance(editor, TextOptionEditor)
+    assert editor.value() == "standard"
+
+
+def test_a_nullable_enum_keeps_its_drop_down_because_unset_is_a_choice(
+    qtbot,
+) -> None:
+    """"(from the profile)" is a second entry a user genuinely picks between."""
+
+    one = spec(
+        type=OptionType.ENUM,
+        choices=["LT"],
+        choices_confidence=Confidence.CERTAIN,
+        nullable=True,
+        placeholder="(not emitted)",
+    )
+    assert editor_kind(one) is EditorKind.COMBO
+    editor = _make(qtbot, one)
+    assert editor.combo().count() == 2
+
+
+def test_a_profile_sourced_enum_keeps_its_drop_down(qtbot) -> None:
+    """Its real list arrives with the PdkProfile, not from the catalog.
+
+    The demo profile has one corner and the shipped PDK has nine, so a rule
+    that counted the catalog's frozen list would turn the corner picker into
+    a text box on exactly the machines where it matters most.
+    """
+
+    one = builtin_catalog().option("lvs_deck_variant")
+    assert one.choices_from is not None
+    assert editor_kind(one) is EditorKind.COMBO

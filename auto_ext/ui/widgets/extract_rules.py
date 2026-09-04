@@ -35,7 +35,6 @@ from typing import Any
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -46,6 +45,7 @@ from PyQt5.QtWidgets import (
 
 from auto_ext.catalog import OptionSpec
 from auto_ext.ui import theme
+from auto_ext.ui.widgets.option_editor import FormComboBox
 
 __all__ = [
     "OBJ_RULE_INDEX",
@@ -98,7 +98,10 @@ class ExtractRuleRow(QWidget):
         self._index.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         row.addWidget(self._index, 0)
 
-        self._selection = QComboBox(self)
+        # :class:`FormComboBox`, not a bare one: these two sit in the same
+        # scrolled column as the rest of the form, and a wheel notch over an
+        # unfocused combo used to rewrite the rule under the cursor.
+        self._selection = FormComboBox(self)
         for choice in selection_spec.choices or []:
             self._selection.addItem(str(choice))
         self._selection.currentIndexChanged.connect(self._on_selection_changed)
@@ -108,7 +111,7 @@ class ExtractRuleRow(QWidget):
         self._arg.textEdited.connect(lambda _t: self.changed.emit())
         row.addWidget(self._arg, 1)
 
-        self._type = QComboBox(self)
+        self._type = FormComboBox(self)
         for choice in type_spec.choices or []:
             self._type.addItem(str(choice))
         self._type.currentIndexChanged.connect(lambda _i: self.changed.emit())
@@ -198,10 +201,10 @@ class ExtractRuleRow(QWidget):
             else "a recipe needs at least one extract rule"
         )
 
-    def selection_combo(self) -> QComboBox:
+    def selection_combo(self) -> FormComboBox:
         return self._selection
 
-    def type_combo(self) -> QComboBox:
+    def type_combo(self) -> FormComboBox:
         return self._type
 
     def arg_edit(self) -> QLineEdit:

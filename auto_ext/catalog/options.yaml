@@ -1911,6 +1911,7 @@ options:
     choices_confidence: guess
     nullable: true
     default: null
+    placeholder: (not emitted)
     currently: absent
     observed: false
     question: >-
@@ -1932,6 +1933,7 @@ options:
     choices_confidence: guess
     nullable: true
     default: null
+    placeholder: (not emitted)
     currently: absent
     observed: false
     question: >-
@@ -2010,6 +2012,7 @@ options:
     choices_confidence: guess
     nullable: true
     default: null
+    placeholder: (not emitted)
     currently: absent
     observed: false
     notes: The file form of global_nets_nets. Format not captured.
