@@ -104,7 +104,8 @@ from auto_ext.core.run_store import (
 )
 from auto_ext.model.run import RunRecord
 from auto_ext.ui import theme
-from auto_ext.ui.os_open import open_in_os
+from auto_ext.ui.os_open import can_open, open_in_os
+from auto_ext.ui.widgets.log_view import LogView
 from auto_ext.ui.widgets.failure_chip import (
     CHIP_TONE_FAILED,
     CHIP_TONE_MUTED,
@@ -127,6 +128,15 @@ RUN_ROW_HEIGHT = 40
 
 #: The "no cell filter" entry of the cell combo.
 ALL_CELLS = "all cells"
+
+#: Largest file the built-in viewer will load when the OS cannot open it.
+#: A stage log is kilobytes and an LVS report is a few hundred; an extracted
+#: DSPF is routinely hundreds of megabytes and would take the session with it.
+IN_APP_VIEW_MAX_BYTES = 8 * 1024 * 1024
+
+#: Bytes sniffed to decide whether a file is text. A viewer full of NULs helps
+#: nobody, and the OS handler is the right tool for a binary anyway.
+_SNIFF_BYTES = 4096
 
 # Item roles on a history row.
 _ROLE_RUN_ID = Qt.UserRole
@@ -564,8 +574,54 @@ class RunsScreen(QWidget):
 
         self._stack.addWidget(card_holder)
         self._stack.addWidget(self._empty)
+        self._stack.addWidget(self._build_log_pane())
         layout.addWidget(self._stack, stretch=1)
         return panel
+
+    def _build_log_pane(self) -> QWidget:
+        """The in-app fallback for a file this host cannot hand to a viewer.
+
+        The archived log is *there*, in the run directory, and the user is
+        being told to read it. On a box with no ``xdg-open`` there was no way
+        to -- the one :class:`LogView` in the application is mounted in the
+        Cells run bar and fed only by the live run. This is the same widget,
+        pointed at an archived file.
+        """
+
+        pane = QWidget(self._stack)
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header = QFrame(pane)
+        header.setFrameShape(QFrame.NoFrame)
+        header.setStyleSheet(
+            f"QFrame {{ background: {theme.SURFACE_TOOLBAR}; border: none; "
+            f"border-bottom: 1px solid {theme.LINE_STRUCTURAL}; }}"
+        )
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(
+            theme.SPACE_MD, theme.SPACE_XS, theme.SPACE_MD, theme.SPACE_XS
+        )
+        header_layout.setSpacing(theme.SPACE_MD)
+
+        self._log_title = PathLabel(header, mode=Qt.ElideLeft)
+        self._log_note = QLabel("", header)
+        self._log_note.setWordWrap(True)
+        self._log_note.setStyleSheet(
+            f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_META}px;"
+        )
+        back = QPushButton("Back to the result", header)
+        back.setToolTip("Close the viewer and go back to this run's card.")
+        back.clicked.connect(lambda _c=False: self.close_in_app_view())
+        header_layout.addWidget(self._log_title, stretch=1)
+        header_layout.addWidget(self._log_note, stretch=1)
+        header_layout.addWidget(back)
+        layout.addWidget(header)
+
+        self._log_view = LogView(pane)
+        layout.addWidget(self._log_view, stretch=1)
+        return pane
 
     def _build_detail_header(self, parent: QWidget) -> QWidget:
         band = QFrame(parent)
@@ -1032,9 +1088,39 @@ class RunsScreen(QWidget):
         QMessageBox.information(self, "Calibre Interactive", "\n".join(lines))
 
     def _open_path(self, path: object) -> None:
-        """Open ``path`` with the OS handler, reporting failures in a dialog."""
+        """Open ``path``, in the OS or in the app, and never in silence.
+
+        Three answers, in this order:
+
+        * this host has no file opener at all (no ``xdg-open``, no ``gio`` --
+          the deployment target) -- do not launch anything, show the file in
+          the built-in viewer, and say why;
+        * the launcher failed, or the file has gone -- same fallback for a text
+          file, a dialog naming the path otherwise;
+        * it opened -- say so on the status line.
+
+        The fallback is the point: the user is being told to read an archived
+        log, the log is right there in the run directory, and before this the
+        click did nothing observable whatsoever.
+        """
 
         target = Path(str(path))
+        if not can_open():
+            reason = (
+                "This host has no xdg-open and no gio, so nothing can be handed "
+                "to a viewer. Showing it here instead."
+            )
+            if self.show_in_app(target, reason=reason):
+                return
+            QMessageBox.warning(
+                self,
+                "This host cannot open files",
+                f"Neither xdg-open nor gio is installed, so this cannot be "
+                f"handed to a viewer:\n{target}\n\nInstall xdg-utils, or copy "
+                "the path and open it in a shell.",
+            )
+            return
+
         try:
             open_in_os(target)
         except FileNotFoundError:
@@ -1042,6 +1128,8 @@ class RunsScreen(QWidget):
                 self, "File not found", f"The path no longer exists:\n{target}"
             )
         except OSError as exc:
+            if self.show_in_app(target, reason=f"Could not be opened: {exc}"):
+                return
             QMessageBox.warning(
                 self, "Could not open", f"Failed to open:\n{target}\n\n{exc}"
             )
@@ -1049,6 +1137,54 @@ class RunsScreen(QWidget):
             # The screen no longer re-emits what it opened (M-20), so this is
             # how the host still learns of it.
             self.status_message.emit(f"opened: {target}")
+
+    # ---- the built-in viewer ----------------------------------------------
+
+    def show_in_app(self, path: Path, *, reason: str = "") -> bool:
+        """Show a text file in the built-in viewer. ``False`` when it cannot.
+
+        Refuses a directory, a file too large to hold in a text widget (an
+        extracted DSPF is routinely hundreds of megabytes) and anything with a
+        NUL in its first :data:`_SNIFF_BYTES` bytes -- a pane full of NULs
+        helps nobody, and a binary wants a real viewer anyway.
+        """
+
+        try:
+            if not path.is_file():
+                return False
+            if path.stat().st_size > IN_APP_VIEW_MAX_BYTES:
+                return False
+            with path.open("rb") as handle:
+                head = handle.read(_SNIFF_BYTES)
+        except OSError:
+            return False
+        if b"\0" in head:
+            return False
+
+        self._log_title.set_placeholder(str(path))
+        self._log_note.setText(reason)
+        self._log_view.set_active_log(path)
+        self._stack.setCurrentWidget(self._log_pane())
+        self.status_message.emit(f"showing {path} in the built-in viewer")
+        return True
+
+    def close_in_app_view(self) -> None:
+        """Leave the built-in viewer and go back to the run's card."""
+
+        self._log_view.set_active_log(None)
+        self._stack.setCurrentWidget(
+            self._stack.widget(0) if self._visible else self._empty
+        )
+
+    def in_app_view_path(self) -> Path | None:
+        """The file the built-in viewer is showing, or ``None``."""
+
+        if self._stack.currentWidget() is not self._log_pane():
+            return None
+        return self._log_view.path
+
+    def _log_pane(self) -> QWidget:
+        return self._stack.widget(2)
 
     # ---- layout -----------------------------------------------------------
 

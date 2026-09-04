@@ -821,6 +821,78 @@ def test_a_finished_run_is_never_offered_for_deletion(qtbot, history) -> None:
 
 
 # ============================================================================
+# review 2026-09-04: opening a file on a host that cannot (M-21)
+# ============================================================================
+
+
+def test_a_launcher_that_refuses_falls_back_to_the_built_in_viewer(
+    qtbot, history, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """xdg-open is installed, starts, finds no handler for a .log and exits 3.
+
+    Before, that was indistinguishable from success: the click did nothing at
+    all and the user was left looking at an unchanged screen.
+    """
+
+    def refuses(_path):
+        raise OSError("nothing on this host could open it: xdg-open exited 3")
+
+    monkeypatch.setattr(rs, "open_in_os", refuses)
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+
+    target = screen.entries[0].run_dir / "logs" / "calibre.log"
+    screen._open_path(target)
+
+    assert screen.in_app_view_path() == target
+    assert "output" in screen._log_view.text()
+    assert "exited 3" in screen._log_note.text()
+
+
+def test_the_built_in_viewer_refuses_a_binary_and_says_so_instead(
+    qtbot, history, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pane full of NULs helps nobody; that one gets a dialog naming it."""
+
+    warned: list[tuple] = []
+    monkeypatch.setattr(rs, "can_open", lambda *a, **k: False)
+    monkeypatch.setattr(
+        rs.QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a))
+    )
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+
+    blob = history / "svdb.bin"
+    blob.write_bytes(b"\x00\x01\x02binary\x00")
+    screen._open_path(blob)
+
+    assert screen.in_app_view_path() is None
+    assert warned and str(blob) in warned[0][2]
+
+
+def test_the_built_in_viewer_refuses_a_file_too_large_to_hold(
+    qtbot, history, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An extracted DSPF is hundreds of megabytes; loading one would take the
+    session with it."""
+
+    monkeypatch.setattr(rs, "can_open", lambda *a, **k: False)
+    monkeypatch.setattr(rs, "IN_APP_VIEW_MAX_BYTES", 16)
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+
+    big = history / "amp2.dspf"
+    big.write_text("* extracted netlist, and then some\n", encoding="utf-8")
+    assert screen.show_in_app(big) is False
+
+
+def test_a_directory_is_never_shown_in_the_built_in_viewer(qtbot, history) -> None:
+    screen = RunsScreen(runs_root=history)
+    qtbot.addWidget(screen)
+    assert screen.show_in_app(screen.entries[0].run_dir) is False
+
+
+# ============================================================================
 # design constraints
 # ============================================================================
 

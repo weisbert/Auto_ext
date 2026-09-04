@@ -31,6 +31,7 @@ from auto_ext.model.run import (  # noqa: E402
     allocate_run_dir,
 )
 from auto_ext.ui import main_window as mw  # noqa: E402
+from auto_ext.ui import os_open  # noqa: E402
 from auto_ext.ui.main_window import MainWindow  # noqa: E402
 from auto_ext.ui.screens import runs_screen as rs  # noqa: E402
 
@@ -126,3 +127,35 @@ def test_the_run_directory_is_opened_once_from_the_context_menu(
     entry = screen.entries[0]
     screen._open_path(entry.run_dir)
     assert launches == [entry.run_dir]
+
+
+# ---- M-21: a host that cannot open files at all ----------------------------
+
+
+def test_a_host_with_no_file_opener_shows_the_log_in_the_app(
+    qtbot, window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The office server has neither xdg-open nor gio, and the click was silent.
+
+    Nothing is launched, nothing is asked of the host, and the archived log is
+    readable without leaving the application.
+    """
+
+    monkeypatch.setattr(os_open.sys, "platform", "linux")
+    monkeypatch.setattr(os_open.shutil, "which", lambda _name: None)
+
+    launched: list[Path] = []
+    monkeypatch.setattr(mw, "open_in_os", launched.append)
+    monkeypatch.setattr(rs, "open_in_os", launched.append)
+
+    screen = window.runs_screen
+    screen.result_card._calibre_log_btn.click()
+
+    assert launched == [], "nothing can be launched on this host"
+    shown = screen.in_app_view_path()
+    assert shown is not None and shown.name == "calibre.log"
+    assert "3 discrepancies" in screen._log_view.text()
+    assert "xdg-open" in screen._log_note.text()
+
+    screen.close_in_app_view()
+    assert screen.in_app_view_path() is None

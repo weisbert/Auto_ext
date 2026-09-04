@@ -51,6 +51,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -77,6 +78,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_TOOL_EXECUTABLES",
+    "FILE_OPENERS",
     "HealthError",
     "OPTIONAL_TOOLS",
     "cached_or_check",
@@ -112,6 +114,23 @@ DEFAULT_TOOL_EXECUTABLES: dict[str, str] = {
 #: (``Recipe.reduction.enabled`` defaults to ``False``), so a site without a
 #: Jivaro licence is a perfectly runnable site.
 OPTIONAL_TOOLS: frozenset[str] = frozenset({"jivaro"})
+
+#: Desktop file openers, in the order the GUI tries them on Linux/BSD. Any one
+#: of them is enough. Duplicated from
+#: :func:`auto_ext.ui.os_open.launcher_names` rather than imported: ``core``
+#: never imports ``ui``, and ``tests/ui/test_os_open.py`` asserts the two lists
+#: stay equal.
+#:
+#: Why a *health* check cares: every "Open the log / the report / the runset"
+#: control in the results card ends in one of these binaries, and on a box that
+#: has neither, all of them do nothing at all -- no window, no error. That is a
+#: property of the host, discoverable before the click, and the Setup drawer is
+#: where the host's properties are already listed.
+FILE_OPENERS: tuple[str, ...] = ("xdg-open", "gio")
+
+#: Separator joining the alternatives of an :attr:`PdkCheckKind.ON_PATH`
+#: target. Any one of them being on ``PATH`` satisfies the check.
+ON_PATH_ALTERNATIVES = "|"
 
 _TMP_SUFFIX = ".tmp"
 
@@ -318,6 +337,8 @@ def default_checks(profile: PdkProfile) -> list[PdkCheck]:
         )
     )
 
+    checks.extend(_file_opener_checks())
+
     for stage, executable in DEFAULT_TOOL_EXECUTABLES.items():
         optional = stage in OPTIONAL_TOOLS
         checks.append(
@@ -340,6 +361,37 @@ def default_checks(profile: PdkProfile) -> list[PdkCheck]:
         )
 
     return checks
+
+
+def _file_opener_checks(platform: str | None = None) -> list[PdkCheck]:
+    """The "can this host open a file at all?" row, on the platforms it means.
+
+    A warning, never a blocker: a box with no ``xdg-open`` runs the whole flow
+    perfectly well, it just cannot show you the report afterwards. Omitted on
+    Windows and macOS, where the answer is always yes -- ``ShellExecuteW`` and
+    ``open`` are part of the OS, so there is nothing to look up and a row that
+    can only say "yes" is noise in a list meant to be read.
+    """
+
+    platform = sys.platform if platform is None else platform
+    if platform in ("win32", "darwin"):
+        return []
+    return [
+        PdkCheck(
+            check_id="tool.file_opener",
+            title="Desktop file opener (xdg-open / gio)",
+            kind=PdkCheckKind.ON_PATH,
+            target=ON_PATH_ALTERNATIVES.join(FILE_OPENERS),
+            required=False,
+            fix_hint=(
+                "Every 'Open the log / the report / the runset' button in the "
+                "results card hands the file to one of these, so on this host "
+                "they can do nothing at all. Install `xdg-utils` (or the GLib "
+                "tools, which provide `gio`) to get them back; until then, use "
+                "the in-app log view, which reads the archived log directly."
+            ),
+        )
+    ]
 
 
 def _lvs_checks(profile: PdkProfile, yaml_file: str) -> list[PdkCheck]:
@@ -589,16 +641,25 @@ def _evaluate(
         return _result(check, CheckStatus.OK, observed=_describe(value), message=None, now=now)
 
     if kind is PdkCheckKind.ON_PATH:
-        found = which(check.target)
-        if found is None:
-            return _result(
-                check,
-                CheckStatus.FAIL,
-                observed="(not on PATH)",
-                message=f"{check.target} was not found on PATH",
-                now=now,
-            )
-        return _result(check, CheckStatus.OK, observed=found, message=None, now=now)
+        # ``a|b`` means "either will do". One binary is the normal case; the
+        # alternatives exist because a desktop file opener may be xdg-open or
+        # gio and the box needs only one of them.
+        names = [n for n in check.target.split(ON_PATH_ALTERNATIVES) if n]
+        for name in names:
+            found = which(name)
+            if found is not None:
+                return _result(check, CheckStatus.OK, observed=found, message=None, now=now)
+        return _result(
+            check,
+            CheckStatus.FAIL,
+            observed="(not on PATH)",
+            message=(
+                f"{' and '.join(names)} were not found on PATH"
+                if len(names) > 1
+                else f"{check.target} was not found on PATH"
+            ),
+            now=now,
+        )
 
     if kind in (PdkCheckKind.FILE_EXISTS, PdkCheckKind.DIR_EXISTS, PdkCheckKind.GLOB_NONEMPTY):
         return _evaluate_path(check, resolution, now)
