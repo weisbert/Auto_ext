@@ -1915,9 +1915,41 @@ options:
       pass over all nets and another to the resistance pass over the nets of
       interest. Promoting this row therefore means a field on ExtractRule,
       not on ExtractionSettings.
-      Turning it on is a physics choice with a runtime price, so the default
-      stays "not written" until the owner picks one.
+      RULED 2026-09-04: the owner does not set the field solver in the Quantus
+      GUI and does not want it on the form. Nothing is written, the vendor
+      default (disabled) applies, and this row stays as the record of what
+      that costs us. The reason is in CATALOG_UNREACHABLE, not only here.
     why: The accuracy lever the vendor always sets and we never do.
+
+  - key: field_solver_type
+    groups_with: extract_type
+    template_var: field_solver_type
+    context_path: null
+    owner: recipe
+    type: enum
+    choices: [deterministic, probabilistic]
+    choices_confidence: likely
+    nullable: true
+    default: null
+    placeholder: not written, and the default is not documented
+    currently: absent
+    observed: false
+    notes: >-
+      The companion of use_field_solver, and the half that had no row at all
+      until 2026-09-04 -- so the catalog recorded one of a pair and was silent
+      about the other, which reads as "the tool has no such option". Members
+      and page reference come from this repo's own extUser.pdf transcription
+      (docs/refactor/catalog-quantus.json, p.388, EXT 18.12); the DEFAULT IS
+      NOT DOCUMENTED THERE and is deliberately not guessed here.
+      Applies to every input type, unlike use_field_solver.
+      No `question:` on purpose: the option is meaningless while
+      use_field_solver is unwritten, and the owner ruled on 2026-09-04 that
+      neither is offered, so re-asking the manual would spend a red-zone trip
+      on a row nobody can reach.
+    why: >-
+      The other half of the field-solver pair. Recorded so the gap is a
+      decision with a reason rather than an option this catalog appears never
+      to have heard of.
 
   - key: extract_via_cap
     groups_with: extract_type
@@ -2931,6 +2963,18 @@ options:
       licence and two IVMF rule files we do not model.
       This is a methodology call about a first-order RF coupling term, not a
       transcription, so the question stays open and the value stays put.
+      RULED 2026-09-04: THE LINE STAYS, AND THIS IS WHY, so that nobody
+      reopens it as a tidy-up. Deleting `metal_fill -type virtual` changes
+      nothing on Calibre input -- that is exactly what the manual paragraph
+      above says -- so the only thing a deletion could buy is a smaller file,
+      against the cost of diffing every legacy deck the owner has run for
+      years, all of which carry the line. A no-op we can explain is cheaper
+      than a change we cannot test. Two consequences follow and both are
+      deliberate: the row keeps its control (a user on a future DEF or OA
+      input needs it), and it keeps its `question:`, because "does this line
+      do anything on our input" is answered while "how should dummy fill be
+      modelled in this PDK" is not, and the second is the one backlog TASK-003
+      asks. The template carries a one-line comment pointing here.
     lands_in:
       - {target: quantus.dspf.cmd, section: metal_fill, option: -type, line: 41, quoting: bare}
     why: >-
@@ -4379,7 +4423,7 @@ options:
 
   - key: fail_on_unparsable_lvs_report
     template_var: fail_on_unparsable_lvs_report
-    context_path: recipe.policy.fail_on_unparsable_lvs_report
+    context_path: null
     owner: recipe
     type: bool
     choices_confidence: certain
@@ -4390,6 +4434,22 @@ options:
     notes: >-
       Today an unparsable report raises and the run fails, with no way to say
       otherwise. Same behaviour by default, now stated.
+      CONTEXT PATH DROPPED 2026-09-04. It used to name
+      recipe.policy.fail_on_unparsable_lvs_report, and that made this the one
+      `currently: absent` row the Recipes form still drew as a LIVE control --
+      a tick box a user could set either way with nothing anywhere reading it.
+      A control that changes nothing is a fake action, and the honest answer
+      while the policy is unimplemented is for it not to be on the form.
+      What implementing it would take, so the next person does not have to
+      re-derive it: the verdict is made in CalibreTool.parse_result
+      (auto_ext/tools/calibre.py), which sets success=False and records
+      `lvs_parse_error`. Its only argument is a ToolResult -- by design, per
+      auto_ext/tools/base.py -- so the recipe is not in scope there, and
+      honouring a per-recipe policy means either threading it through the Tool
+      protocol (every tool, plus core/runner.py) or deciding it one level up
+      where runner.py turns result.success into a StageStatus. Neither is a
+      small change, and the RunPolicy field stays so recipes on disk that
+      carry it still load.
     why: Whether a report we cannot parse is a hard failure. A policy, not a condition.
 
   - key: run_provenance_header

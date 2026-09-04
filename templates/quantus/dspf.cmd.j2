@@ -37,7 +37,7 @@ input_db -type calibre \
               -instance_property_value 6 \
               -layer_map_file "[[output_dir]]/query_output/Design.gds.map" \
               -net_property_value 5
-metal_fill \
+[# KEEP. Ruled 2026-09-04: virtual fill does not affect metal fill in LVS input, which is ours, so this line is a no-op today -- and it is in every legacy deck the owner has run, so deleting it would diff them all for nothing. Reason and the still-open PDK question: options.yaml, metal_fill_type. #]metal_fill \
               -type [[metal_fill_type]]
 output_db -type dspf \
               -subtype [[dspf_subtype]] \
