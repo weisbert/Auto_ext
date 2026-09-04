@@ -491,7 +491,11 @@ def test_a_hunk_expands_into_the_diff_it_will_become(
     assert dialog.analyse() is True
 
     hunks = dialog.hunks_section()
-    assert hunks.count() == 1
+    # The banner, plus the two lines on which this build's ext deck and a
+    # pre-existing GUI export disagree: -format "DFII" is no longer emitted
+    # under a Calibre input, and -unique_qrctemp_name now is. The block this
+    # test then opens is still the first one, the banner at line 1.
+    assert hunks.count() == 3
     assert "% of the imported lines" in hunks.hint_text()
     hunks.set_expanded(True)
 

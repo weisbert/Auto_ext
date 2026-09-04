@@ -575,10 +575,19 @@ def test_the_gui_export_needs_only_its_version_banner_as_a_hunk(
 ) -> None:
     """A file this tool never rendered: different Quantus version, different
     PDK, different cell, five different values. Everything but the banner
-    comment is understood, and the banner is kept rather than dropped."""
+    comment and the two options this build's own deck no longer agrees with is
+    understood, and none of the three is dropped.
+
+    The three are the banner (belongs to no catalog row at all), the legacy
+    ``-format "DFII"`` the ext template stopped emitting under a Calibre input,
+    and the ``-unique_qrctemp_name`` the template now emits and this old export
+    never had. The last two are a property of the shipped deck, not of the
+    file: any GUI export from before those two template changes imports with
+    exactly these two extra hunks.
+    """
 
     result = ri.import_recipe([gui_export], recipe_id="gui-export")
-    assert result.hunk_count == 1
+    assert result.hunk_count == 3
     assert "19.14-s012" in result.as_patch[0].summary
     assert result.unmodelled_ratio < 0.05
     assert not result.high_unmodelled
@@ -646,7 +655,11 @@ def test_a_value_that_landed_in_the_recipe_or_the_profile_is_never_also_pinned_b
     So: every line the import claims to understand must be absent from every
     hunk. What is left in the patch is what the catalog does not model -- here
     a whole ``rf_analysis`` statement and the tool's own version banner, which
-    is ``owner: fixed`` and belongs to no object at all.
+    is ``owner: fixed`` and belongs to no object at all -- plus the two options
+    on which this build's ext deck and a pre-existing hand-written file simply
+    disagree: ``-format "DFII"``, which the template no longer emits under a
+    Calibre input, and ``-unique_qrctemp_name``, which it now emits and this
+    file never had.
     """
 
     catalog = builtin_catalog()
@@ -668,10 +681,12 @@ def test_a_value_that_landed_in_the_recipe_or_the_profile_is_never_also_pinned_b
             assert line.strip() not in pinned, f"{key} is both a field and a patch: {line!r}"
 
     # ...and what is left in the patch is only what nothing models.
-    assert result.hunk_count == 2
+    assert result.hunk_count == 4
     summaries = [hunk.summary for hunk in result.as_patch]
     assert any("rf_analysis" in summary for summary in summaries)
     assert any("Quantus UI Version" in summary for summary in summaries)
+    assert any("-format" in summary for summary in summaries)
+    assert any("unique_qrctemp_name" in summary for summary in summaries)
     assert result.roundtrip[RenderTarget.QUANTUS_EXT].identical
 
 

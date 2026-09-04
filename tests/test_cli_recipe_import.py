@@ -472,10 +472,15 @@ def test_what_the_catalog_does_not_model_becomes_a_reported_hunk(
     gui_export: Path, ext_root: Path
 ) -> None:
     """A file this tool never wrote carries its own version banner. That line
-    belongs to no catalog row, so it has to survive as a manual edit."""
+    belongs to no catalog row, so it has to survive as a manual edit.
+
+    Two more hunks come with any pre-existing export: the ext template stopped
+    emitting ``-format "DFII"`` under a Calibre input and started emitting
+    ``-unique_qrctemp_name``, so an old file differs from this build's deck on
+    those two lines as well."""
 
     result = _import(str(gui_export), "--auto-ext-root", str(ext_root), expect=0)
-    assert "Kept as manual edits (1 hunk(s))" in result.output
+    assert "Kept as manual edits (3 hunk(s))" in result.output
     assert_in_output("quantus.ext.cmd", result)
     assert_in_output("Version 19.14-s012", result)
     assert "-1/+1" in result.output
@@ -492,7 +497,9 @@ def test_the_values_a_hand_written_file_changed_reach_the_recipe(
     recipe = load_recipe(ext_root / "recipes" / "dco.yaml")
     assert recipe.extraction.min_res_ohm == 0.005
     assert recipe.extraction.temperature_c == 85.0
-    assert recipe.manual_edit_count == 1
+    # The banner, plus the two options this build's ext deck changed under it:
+    # -format "DFII" is no longer emitted, -unique_qrctemp_name now is.
+    assert recipe.manual_edit_count == 3
 
 
 def test_a_patch_too_big_to_be_a_patch_warns_and_exits_one(
@@ -1030,7 +1037,7 @@ def test_the_patches_travel_with_the_recipe(
     _export("dco", "--out", str(destination), "--auto-ext-root", str(ext_root), expect=0)
 
     landed = load_recipe(destination)
-    assert landed.manual_edit_count == 1
+    assert landed.manual_edit_count == 3
     assert landed.patches[0].hunks[0].after.strip()
 
 
