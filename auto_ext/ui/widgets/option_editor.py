@@ -132,6 +132,7 @@ __all__ = [
     "ChoiceOptionEditor",
     "EditorKind",
     "ElidedLabel",
+    "FormComboBox",
     "FreeChoiceOptionEditor",
     "ListOptionEditor",
     "MultiChoiceOptionEditor",
@@ -779,6 +780,40 @@ def _set_text_from_start(edit: QLineEdit, text: str) -> None:
 # ---- editors ---------------------------------------------------------------
 
 
+class FormComboBox(QComboBox):
+    """A combo box that only answers the wheel once the user is inside it.
+
+    Qt gives every combo ``Qt.WheelFocus`` and steps its current index on a
+    wheel notch, so scrolling a long form edits whichever combo the cursor
+    passes over -- no click, no keystroke, and nothing on screen naming the
+    rows that moved. On the eighty-seven row Recipes form that reached the
+    ``extract -type`` row, where RC-coupled against C-only is the difference
+    between a real extraction and a cheap one.
+
+    Two halves, and both are needed. ``StrongFocus`` stops the wheel from
+    handing the combo focus in the first place, which is what made the very
+    first notch an edit. :meth:`wheelEvent` then IGNORES the event rather
+    than swallowing it: Qt propagates a wheel to the parent only while the
+    receiver leaves it un-accepted, so the scroll area underneath still
+    scrolls. Eating it would trade a silent edit for a form that stops dead
+    wherever a combo happens to be.
+
+    The text editors on this form never had the problem -- a ``QLineEdit``
+    does not act on a wheel -- which is why the fix is a combo of its own
+    rather than something on :class:`OptionEditor`.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if not self.hasFocus():
+            event.ignore()
+            return
+        super().wheelEvent(event)
+
+
 class OptionEditor(QWidget):
     """Base class: a spec, a control, a typed value and one signal.
 
@@ -1090,7 +1125,7 @@ class ChoiceOptionEditor(OptionEditor):
     def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
         self._unset_label = self.UNSET_LABEL if spec.nullable else None
-        self._combo = QComboBox(self)
+        self._combo = FormComboBox(self)
         self._combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLength)
         self._combo.setMinimumContentsLength(6)
         self._combo.setFont(_mono_font(self._combo))

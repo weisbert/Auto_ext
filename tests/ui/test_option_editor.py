@@ -14,7 +14,8 @@ import pytest
 pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
-from PyQt5.QtGui import QDoubleValidator, QIntValidator  # noqa: E402
+from PyQt5.QtCore import QPoint, QPointF, Qt  # noqa: E402
+from PyQt5.QtGui import QDoubleValidator, QIntValidator, QWheelEvent  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
     QApplication,
     QCheckBox,
@@ -987,3 +988,127 @@ def test_an_open_member_list_can_still_take_a_value_nobody_predicted(qtbot) -> N
     editor.other_edit().setText("a_value_nobody_predicted")
     editor.other_edit().textEdited.emit("a_value_nobody_predicted")
     assert "a_value_nobody_predicted" in editor.value()
+
+
+# ---- W-10: a wheel over the form must not edit anything -------------------
+
+
+def _wheel(widget) -> QWheelEvent:
+    """One notch down, delivered where the cursor is."""
+
+    centre = QPointF(widget.rect().center())
+    return QWheelEvent(
+        centre,
+        QPointF(widget.mapToGlobal(widget.rect().center())),
+        QPoint(0, -120),
+        QPoint(0, -120),
+        Qt.NoButton,
+        Qt.NoModifier,
+        Qt.NoScrollPhase,
+        False,
+    )
+
+
+def _combo_spec() -> OptionSpec:
+    return spec(
+        type=OptionType.ENUM,
+        choices=["rc_coupled", "c_only_coupled", "r_only"],
+        choices_confidence=Confidence.CERTAIN,
+        default="rc_coupled",
+    )
+
+
+def test_a_wheel_over_an_unfocused_combo_does_not_change_the_recipe(qtbot) -> None:
+    """Scrolling the 87-row form must not silently pick another value.
+
+    A ``QComboBox`` defaults to ``Qt.WheelFocus``: it takes focus FROM the
+    wheel and then steps its own current index, whether or not it is the
+    thing the user was working in. One flick down the form therefore rewrote
+    whichever rows the cursor crossed -- the extract-rule type among them --
+    with no click, no keystroke and nothing on screen naming what moved.
+    """
+
+    editor = _make(qtbot, _combo_spec())
+    seen: list[object] = []
+    editor.value_changed.connect(lambda _k, v: seen.append(v))
+
+    combo = editor.combo()
+    assert not combo.hasFocus()
+    QApplication.sendEvent(combo, _wheel(combo))
+
+    assert editor.value() == "rc_coupled", "a wheel notch edited an unfocused combo"
+    assert seen == [], "an unfocused combo reported an edit nobody made"
+
+
+def test_a_wheel_still_works_once_the_user_is_in_the_combo(qtbot) -> None:
+    """The guard is about focus, not about taking the wheel away.
+
+    Somebody who has clicked into a combo means to change it, and refusing
+    them the wheel there would be a second defect rather than a fix.
+    """
+
+    editor = _make(qtbot, _combo_spec())
+    editor.show()
+    qtbot.waitExposed(editor)
+
+    combo = editor.combo()
+    combo.setFocus()
+    assert combo.hasFocus()
+    QApplication.sendEvent(combo, _wheel(combo))
+    assert editor.value() == "c_only_coupled"
+
+
+def test_an_unfocused_combo_passes_the_wheel_on_rather_than_eating_it(qtbot) -> None:
+    """Ignoring is not swallowing: the form still scrolls under the cursor.
+
+    Consuming the event instead would trade a silent edit for a form that
+    stops scrolling wherever a combo happens to be, which is the same class
+    of surprise pointed the other way. Qt propagates a wheel event to the
+    parent only while the receiver leaves it un-accepted.
+    """
+
+    editor = _make(qtbot, _combo_spec())
+    combo = editor.combo()
+
+    assert combo.focusPolicy() == Qt.StrongFocus, (
+        "a WheelFocus combo takes focus from the wheel itself, which is how "
+        "the notch that should have scrolled the form became an edit"
+    )
+
+    event = _wheel(combo)
+    event.accept()
+    combo.wheelEvent(event)
+    assert event.isAccepted() is False, (
+        "the unfocused combo accepted the wheel, so the scroll area under it "
+        "never sees the notch"
+    )
+
+
+def test_an_extract_rule_combo_is_guarded_the_same_way(qtbot) -> None:
+    """The sub-form's two combos sit in the same scrolled column.
+
+    ``extract -type`` is the single most consequential value on the screen --
+    RC-coupled against C-only is the difference between a real extraction and
+    a cheap one -- and it was the row a wheel was most likely to cross.
+    """
+
+    from auto_ext.ui.widgets.extract_rules import ExtractRuleRow
+
+    catalog = builtin_catalog()
+    row = ExtractRuleRow(
+        selection_spec=catalog.option("extract_selection"),
+        type_spec=catalog.option("extract_type"),
+    )
+    qtbot.addWidget(row)
+
+    changes: list[object] = []
+    row.changed.connect(lambda: changes.append(row.value()))
+
+    for combo in (row.selection_combo(), row.type_combo()):
+        assert combo.focusPolicy() == Qt.StrongFocus, combo
+        before = combo.currentText()
+        assert not combo.hasFocus()
+        QApplication.sendEvent(combo, _wheel(combo))
+        assert combo.currentText() == before, "a wheel notch edited an extract rule"
+
+    assert changes == [], "the sub-form reported a rule change nobody made"
