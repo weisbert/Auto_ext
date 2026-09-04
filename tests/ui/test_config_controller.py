@@ -404,6 +404,64 @@ def test_save_writes_nothing_when_one_document_cannot_be_rendered(
     assert errors
 
 
+def test_a_failed_write_puts_back_what_it_had_already_written(
+    loaded_controller, v2_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"保存失败，却说'别人改了我的文件'；一半写进去了一半没有."
+
+    The queue was written in a plain loop. A recipe file that refuses to be
+    written (read-only, checked out of a VCS, a full quota) left ``cells.yaml``
+    already rewritten and every recorded mtime stale -- so the very next
+    question the window asks, "did anything change on disk?", answered yes
+    about our own half-finished save and the user was offered a conflict
+    dialog for a write error.
+    """
+
+    controller = loaded_controller
+    config = v2_config_dir / "config"
+    cells_path = config / CELLS_FILENAME
+    before = cells_path.read_bytes()
+    recipe_path = controller.recipe_path("rc-coupled-typical")
+    recipe_before = recipe_path.read_bytes()
+
+    controller.stage_cells(
+        controller.cells.model_copy(
+            update={
+                "cells": [
+                    *controller.cells.cells,
+                    CellEntry(library="LIB", cell="amp", layout_view="layout"),
+                ]
+            }
+        )
+    )
+    controller.stage_recipe(
+        controller.recipe("rc-coupled-typical").model_copy(
+            update={"description": "edited"}
+        )
+    )
+
+    real_write_text = Path.write_text
+
+    def refuse_the_recipe(self, *args, **kwargs):
+        if self == recipe_path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_the_recipe)
+
+    errors: list[str] = []
+    controller.config_error.connect(errors.append)
+    assert controller.save() is False
+
+    assert errors and "write failed" in errors[-1]
+    assert cells_path.read_bytes() == before, "cells.yaml was left half-saved"
+    assert recipe_path.read_bytes() == recipe_before
+    assert controller.has_external_change() is False, (
+        "our own rolled-back writes are being reported as someone else's edit"
+    )
+    assert controller.is_dirty is True, "a refused save keeps the edits"
+
+
 # ---- health -----------------------------------------------------------------
 
 

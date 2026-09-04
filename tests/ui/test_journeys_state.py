@@ -13,6 +13,10 @@ of that looks like a different bug: Save writes the previous value, the box
 still shows the new one, closing throws it away without a word, and a pin
 typed into the Setup drawer is thrown away by the very Re-check that is the
 natural next click.
+
+The last one here is the mirror image: a save that fails half way leaves the
+files it *did* write looking, to the very next question the window asks,
+like somebody else's edit.
 """
 
 from __future__ import annotations
@@ -166,3 +170,72 @@ def test_a_path_typed_in_setup_survives_the_recheck_button(
 
     edit, _pin = _pin_row(window, PROBE_CHECK)
     assert edit.text() == "/pdk/probe/root"
+
+
+# ---- the write error that claimed to be a conflict ---------------------------
+
+
+def test_a_refused_write_is_reported_as_a_write_error_not_a_conflict(
+    window: MainWindow, v2_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"保存失败，却说'别人改了我的文件'；一半写进去了一半没有."
+
+    Two documents staged, the second one impossible to write. The first was
+    already on disk when the failure arrived, which made the window's own
+    "did anything move underneath us?" question answer yes -- about our own
+    writing -- and the user was handed an overwrite-the-other-person's-edits
+    dialog for what was a permission error.
+    """
+
+    warnings: list[tuple[str, str]] = []
+    questions: list[str] = []
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda _p, title, text, *a, **k: warnings.append((title, text))),
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(
+            lambda _p, title, *a, **k: (
+                questions.append(title),
+                QMessageBox.Cancel,
+            )[1]
+        ),
+    )
+
+    profile_path = window.controller.profile_path
+    profile_before = profile_path.read_bytes()
+    recipe_path = next((v2_config_dir / "recipes").glob("*.yaml"))
+    recipe_before = recipe_path.read_bytes()
+
+    # one edit on each of two documents: the profile writes first (the queue
+    # is written in id order), the recipe refuses.
+    row = window.project_screen.row("display_name")
+    row.control().setText("Renamed while the disk says no")
+    row.commit()
+    recipes = window.shell.page("recipes")
+    editor = recipes.editor("temperature_c")
+    editor.line_edit().setText("125.0")
+    editor.line_edit().textEdited.emit("125.0")
+
+    real_write_text = Path.write_text
+
+    def refuse_the_recipe(self, *args, **kwargs):
+        if self == recipe_path:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", refuse_the_recipe)
+
+    _menu_action(window, "&Save").trigger()
+
+    assert questions == [], "a write error was reported as an external conflict"
+    assert warnings, "the write failure was never shown"
+    title, text = warnings[-1]
+    assert title == "Save failed"
+    assert "write failed" in text
+    assert profile_path.read_bytes() == profile_before
+    assert recipe_path.read_bytes() == recipe_before
