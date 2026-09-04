@@ -3143,6 +3143,11 @@ options:
       members lowercase. Ours is what the Cadence Quantus UI 18.21-s340
       export itself wrote -- the golden deck header records the tool -- so
       QRC demonstrably accepts the uppercase spelling and it is kept.
+      THE LIST MUST NOT BE EMPTIED. The option name is written outside the
+      per-value loop, so an empty list emits a bare `-output_xy` in front of
+      the next option; the model refuses it rather than the template dropping
+      the line, because a DSPF with no coordinates at all is a different
+      extraction, not a safe fallback.
     lands_in:
       - {target: quantus.dspf.cmd, section: output_db, option: -output_xy, line: 52, layout: value_per_line}
     why: Which element classes get coordinates in the DSPF. Affects file size and back-annotation.

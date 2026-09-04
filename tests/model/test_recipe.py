@@ -130,6 +130,24 @@ def test_emit_must_name_at_least_one_output_form() -> None:
         make_recipe(output={"emit": ["dspf", "dspf"]})
 
 
+def test_unticking_every_xy_class_is_refused_rather_than_written_as_a_bare_option() -> None:
+    """The DSPF form's checkbox list can be emptied in one click.
+
+    ``-output_xy`` is emitted outside the loop that writes its values, so an
+    empty list used to produce a bare ``-output_xy \\`` followed straight by
+    the next option -- an option with no operand, in a file Quantus reads
+    hours after the user clicked. Its two siblings, ``extraction.extract`` and
+    ``output.emit``, have refused an empty list from the start; this one was
+    the odd one out.
+    """
+
+    with pytest.raises(ValidationError, match="output_xy"):
+        make_recipe(output={"dspf": {"output_xy": []}})
+    assert make_recipe(output={"dspf": {"output_xy": ["MOS"]}}).output.dspf.output_xy == [
+        "MOS"
+    ]
+
+
 def test_emit_is_a_list_so_one_run_can_produce_both_forms() -> None:
     # The whole point of removing the single quantus template slot: today a
     # run structurally cannot emit an extracted view and a DSPF together.

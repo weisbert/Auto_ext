@@ -1012,6 +1012,35 @@ def test_no_assura_only_option_reaches_the_calibre_input_statement(
         )
 
 
+def test_no_quantus_option_reaches_a_deck_without_an_operand(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    """Every ``-option`` line in a command file must carry a value.
+
+    The shape this guards is ``-output_xy \\`` immediately followed by the
+    next option: the option name is written outside the loop that writes its
+    values, so an empty collection leaves the switch standing alone. Stated
+    over the whole deck rather than over that one line, because the same
+    outside-the-loop shape is how every multi-valued option would be written.
+    """
+
+    for key, deck in _both_quantus_decks(tmp_path, profile).items():
+        lines = deck.text.splitlines()
+        for number, raw in enumerate(lines, start=1):
+            body = raw.rstrip().removesuffix("\\").strip()
+            if not body.startswith("-") or len(body.split(None, 1)) == 2:
+                continue
+            # Three options in these files put their value on the NEXT line
+            # (-cdl_out_map_directory, -technology_corner, -temperature), so a
+            # lone switch is only wrong when nothing follows it.
+            following = lines[number].strip() if number < len(lines) else ""
+            operand = following.removesuffix("\\").strip()
+            assert operand and not operand.startswith("-"), (
+                f"{key} line {number} writes an option with no operand: "
+                f"{raw!r} followed by {following!r}"
+            )
+
+
 def test_rendering_refuses_a_setting_the_template_hardcodes(
     tmp_path: Path, profile: PdkProfile
 ) -> None:
