@@ -803,6 +803,12 @@ def _run_single_task(
         "intermediate_dir": _opt_str(context.get("intermediate_dir")),
         "dspf_path": _opt_str(context.get("dspf_out_path")),
         "workarea": str(workarea),
+        # Which project's paths these are. One runs/ root serves every project
+        # opened against this Auto_ext, so a card offering an output dir has
+        # to be able to say whose it is.
+        "config_dir": (
+            str(project.source_path.parent) if project.source_path is not None else None
+        ),
         "run_dir": str(run_dir),
         "work_dir": str(cwd) if parallel and setup_error is None else None,
         "env": EnvBinding.from_resolution(resolution),

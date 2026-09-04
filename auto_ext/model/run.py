@@ -456,6 +456,14 @@ class RunRecord(Frozen):
     dspf_path: str | None = None
     #: CLI ``--workarea``: the shared cwd used by serial runs.
     workarea: str | None = None
+    #: The project this run was launched from: the directory holding its
+    #: ``workspace.yaml`` / ``project.yaml``. Every other path here --
+    #: :attr:`workspace_dir`, :attr:`workarea`, :attr:`dspf_path` -- is that
+    #: project's, and one ``runs/`` root serves however many projects share an
+    #: Auto_ext installation, so without this the history cannot tell whose
+    #: directories a card is offering. ``None`` for a run recorded before the
+    #: field existed, or one dispatched from a config that was never on disk.
+    config_dir: str | None = None
     #: Absolute path of ``runs/<run_id>``.
     run_dir: str | None = None
     #: Parallel isolation cwd (``<run_dir>/work``); ``None`` in serial mode.
