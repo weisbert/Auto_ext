@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, NamedTuple
 
 from auto_ext.core import render
 from auto_ext.model.cells import CellBook, CellEntry
@@ -349,3 +349,123 @@ def make_run(tmp_path: Path, **overrides: Any) -> render.RunFacts:
     }
     fields.update(overrides)
     return render.RunFacts(**fields)
+
+
+# ---- the count rule, extended from data to actions --------------------------
+#
+# This module's second rule ("two of anything the code counts, not one") is
+# about DATA: a library holding one recipe cannot reach the branch that has to
+# choose between two. The rule has an exact twin about ACTIONS, and until
+# 2026-09-04 nobody had written it down:
+#
+#   **Anything the production code holds state across must be driven twice,
+#   and the second time must differ from the first.**
+#
+# The evidence is a whole family of shipped defects -- the user's report that
+# after one Run, adding or editing a cell and pressing Run again does not
+# work. Six separate faults live behind the second press: the Run button is
+# hidden rather than disabled while a run is in flight; ``add_cell``
+# re-points the run set at the new row alone; a blank row carries no recipe
+# and its unresolved state refuses the whole batch; the toolbar Save is
+# disabled on entering the run state and never restored; a cancel that never
+# returns leaves the screen with neither Run nor Cancel; and the worker
+# reference is dropped from inside the worker's own ``finished`` slot. Not one
+# of them is reachable by a test that presses Run once, and every test in the
+# suite pressed Run once.
+#
+# The helpers below are how a test presses it twice. They are deliberately
+# thin: they own the *shape* (act - settle - change something - act again) and
+# nothing about which widget or which assertion, because the shape is the part
+# every caller was getting wrong by omission.
+#
+# PyQt5 is imported by neither helper. ``tests/conftest.py`` reads this module
+# during collection for the non-GUI suites too, so nothing here may depend on
+# a Qt install; both helpers take the widgets they drive as arguments.
+
+
+class SecondTime(NamedTuple):
+    """What the three phases of a :func:`twice` produced.
+
+    ``first`` and ``second`` are whatever the action returned; ``between`` is
+    whatever the mutation returned. Tests assert against ``second`` -- the
+    whole point of the helper is that ``first`` passing proves nothing.
+    """
+
+    first: Any
+    between: Any
+    second: Any
+
+
+def twice(
+    action: Callable[[], Any],
+    *,
+    between: Callable[[], Any],
+    second: Callable[[], Any] | None = None,
+) -> SecondTime:
+    """Perform a state-holding action, change something, perform it again.
+
+    ``between`` is keyword-only and has no default, because a second identical
+    action against unchanged state is the one case that proves nothing: it
+    re-enters the same branch with the same inputs. Every caller has to say
+    what moved -- a row added, a value retyped, a tick moved, a file replaced.
+
+    Pass ``second`` when the repeat is a *different* gesture that has to reach
+    the same state (import, then import a second file; revert, then edit).
+    Otherwise the same callable runs twice.
+
+    Returns a :class:`SecondTime`; assert on ``.second``.
+    """
+
+    first = action()
+    changed = between()
+    again = (second or action)()
+    return SecondTime(first=first, between=changed, second=again)
+
+
+def run_twice(
+    screen: Any,
+    workers: list,
+    *,
+    between: Callable[[], Any],
+    drive: Callable[[Any], Any] | None = None,
+) -> SecondTime:
+    """Click Run, let the run end, change something, click Run again.
+
+    The Cells screen's run lifecycle is the concrete case :func:`twice`
+    abstracts, and it has one wrinkle a plain ``twice`` cannot express: the
+    screen leaves its running state only when the worker's ``finished`` signal
+    arrives, so a second click is a no-op unless the first run is retired
+    first. Doing that by hand in every test is exactly how the suite ended up
+    with no second click anywhere.
+
+    ``workers`` is the list a ``RunWorker`` stand-in appends itself to (the
+    ``FakeWorker.instances`` pattern the GUI tests already use). The helper
+    reads the newest entry rather than being handed a worker, because whether
+    a click produced a worker at all is frequently the thing under test:
+    ``.first`` and ``.second`` are ``None`` when that click dispatched
+    nothing.
+
+    ``drive`` receives the first worker before its ``finished`` is emitted,
+    for a test that needs the reporter driven (stage started, task finished)
+    while the run is still live.
+
+    Both clicks are a real ``QPushButton.click()``, which does nothing on a
+    disabled button -- so a screen that refuses the second run by disabling
+    the control fails here the way the user experiences it, rather than
+    passing because the test called ``start_run()`` directly.
+    """
+
+    base = len(workers)
+
+    screen.run_bar.run_button().click()
+    first = workers[base] if len(workers) > base else None
+    if first is not None:
+        if drive is not None:
+            drive(first)
+        first.finished.emit()
+
+    changed = between()
+
+    screen.run_bar.run_button().click()
+    second = workers[base + 1] if len(workers) > base + 1 else None
+    return SecondTime(first=first, between=changed, second=second)
