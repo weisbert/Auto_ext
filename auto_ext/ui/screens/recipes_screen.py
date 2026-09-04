@@ -66,9 +66,20 @@ Assumptions
   ``owner: profile`` -- a process fact -- and the seam between "the recipe
   names a semantic corner" and "the profile maps it to ``TYPICAL``" is what
   makes a recipe portable.
-* The six recipe-owned rows whose ``currently`` is ``absent`` have no
-  ``context_path`` and therefore no field to bind to. They are proposals, not
-  settings, and are skipped.
+* **21** recipe-owned rows whose ``currently`` is ``absent`` have no
+  ``recipe_field_path`` and therefore no field to bind to, so
+  :func:`recipe_specs` skips them. They are not proposals: eleven are real
+  Quantus ``extract`` / ``filter_*`` / ``global_nets`` options and three are
+  ``strmout`` argv, all written down in our own catalog, and each needs two
+  things it has not got -- a ``Recipe`` field and a hole in the template.
+
+  This docstring said "six" while twenty-one were being dropped, which is the
+  reason the count is now asserted rather than described: every one of them is
+  named with its own reason in ``CATALOG_UNREACHABLE``
+  (``tests/ui/test_reachability.py``), and adding a row to the catalog without
+  either a control or an entry there fails that audit. A comment is the only
+  thing between a deliberate omission and a forgotten one, and a stale count
+  is worse than none -- it reads as a number somebody checked.
 * A row whose ``currently`` is ``hardcoded_literal`` *is* shown, disabled and
   marked -- see :func:`~auto_ext.ui.widgets.option_editor.template_freezes`.
   Hiding it would say "this tool has no such setting", which is false and is
@@ -252,10 +263,18 @@ _GLYPH_EXPANDED = "▾"
 def recipe_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
     """Every catalog row that binds to a Recipe field, in field-path order.
 
-    Rows without a ``recipe_field_path`` are dropped: they are the ``absent``
-    proposals, which name no field to edit. The order is the field path rather
-    than the catalog's own order, because the catalog is sorted by emission
-    line -- correct for the renderer, arbitrary for a form.
+    Rows without a ``recipe_field_path`` are dropped, because there is no
+    field for a control to write to. That is correct and it is not free: the
+    21 rows it drops are real vendor options this catalog records, and
+    dropping them *silently* is what let "we decided not to" and "we forgot"
+    look identical for four months. Each one is now named with its own reason
+    in ``CATALOG_UNREACHABLE`` (``tests/ui/test_reachability.py``), and that
+    audit fails the day this function starts dropping one nobody has written a
+    reason for.
+
+    The order is the field path rather than the catalog's own order, because
+    the catalog is sorted by emission line -- correct for the renderer,
+    arbitrary for a form.
     """
 
     cat = catalog if catalog is not None else builtin_catalog()

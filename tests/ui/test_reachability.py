@@ -26,6 +26,22 @@ either bound to a control or named in an exemption set **with a reason**. The
 reason is the load-bearing part. An exemption is a claim that a human made a
 decision, and it is reviewable in a way that "no test covers this" never was.
 
+Two directions, and both are needed
+-----------------------------------
+The model-field audits below walk ``recipe_field_paths(Recipe)`` and ask
+whether every field we modelled has a control. That can only ever prove the
+inner half. A vendor option we never modelled has no field, so it is
+*structurally invisible* to those tests -- and twenty-one recipe-owned catalog
+rows were in exactly that position: real Quantus and strmout options, written
+down in our own catalog, dropped by ``recipe_specs`` for having no
+``recipe_field_path``, with nothing anywhere saying they had been dropped. The
+screen's own docstring said there were six.
+
+So :data:`CATALOG_UNREACHABLE` audits the outer half, keyed by catalog row
+rather than by model field. It is the same claim in the same shape -- somebody
+looked at this and decided -- one level further out, and it is what makes
+"every knob the vendor has, we modelled" a question this suite can ask at all.
+
 What this cannot catch
 ----------------------
 Reachability is necessary, not sufficient. Two of the eight defects --
@@ -54,8 +70,13 @@ from auto_ext.ui.project_fields import (  # noqa: E402
     WORKSPACE_UNREACHABLE,
     bound_paths,
 )
+from auto_ext.catalog import Owner, builtin_catalog  # noqa: E402
 from auto_ext.ui.screens.cells_screen import EDITABLE_FIELDS, RECIPE_FIELD  # noqa: E402
-from auto_ext.ui.screens.recipes_screen import member_specs, recipe_specs  # noqa: E402
+from auto_ext.ui.screens.recipes_screen import (  # noqa: E402
+    member_specs,
+    pointer_specs,
+    recipe_specs,
+)
 
 #: Recipe field paths with no control, and why. Anything not listed here must
 #: be bound to a control on the Recipes screen.
@@ -77,6 +98,117 @@ RECIPE_UNREACHABLE: dict[str, str] = {
         "the escape hatch's storage. Its control is the manual-edit strip, "
         "which edits hunks rather than this field"
     ),
+}
+
+#: Recipe-owned CATALOG rows with no control, and why. This is the outer half
+#: of the audit: the sets above ask "does every field we modelled have a
+#: control", and this one asks "does every option we wrote down reach the
+#: user at all". Every row here is ``currently: absent`` -- the tool has the
+#: option, we emit no line for it, the tool takes its own default -- and each
+#: needs two things it has not got: a ``Recipe`` field to bind to and a hole
+#: in the template to write into.
+#:
+#: A row leaves this set by growing both, or by being drawn disabled with its
+#: reason the way a ``requires_emit`` miss is (``RECIPES_FORM.md`` section 5).
+#: What it may never do is disappear silently, which is what all twenty-one
+#: were doing: ``recipe_specs`` drops anything without a ``recipe_field_path``
+#: and said so nowhere on screen.
+CATALOG_UNREACHABLE: dict[str, str] = {
+    # -- Calibre LVS supply naming. One office question, three rows.
+    "lvs_extra_power_names": (
+        "no Recipe field and no template hole. Blocked on the office question "
+        "behind lvs_connect_by_name_nets: until we know which of the three "
+        "connect-by-name settings the site actually runs, a control here "
+        "would invite a supply list that changes nothing"
+    ),
+    "lvs_extra_ground_names": (
+        "the ground half of lvs_extra_power_names, and blocked on the same "
+        "question. Shipping one of the pair without the other would read as "
+        "'grounds are handled elsewhere', which is false"
+    ),
+    "lvs_connect_by_name_nets": (
+        "the office question itself -- which connect-by-name mode the flow "
+        "wants -- is unanswered, and this row is the one that would have to "
+        "encode the answer. A guess here changes what LVS considers shorted"
+    ),
+    # -- Quantus ``extract``. Five rows that would each need a rule field.
+    "use_field_solver": (
+        "the accuracy lever, and the catalog's own question asks what an "
+        "omitted line gives us today. Modelling it before that is answered "
+        "would let a user pick a level believing the current runs are at a "
+        "different one"
+    ),
+    "extract_via_cap": (
+        "the manual round has not returned the default, and the catalog's "
+        "question asks whether it interacts with -use_field_solver. A "
+        "check box whose unticked state is not the tool's default is a "
+        "control that silently changes the extraction"
+    ),
+    "extract_gate_diffusion_fringing_cap": (
+        "same round, same reason, plus the open question of whether the PDK "
+        "device model already carries this term -- ticking it could count "
+        "fringing capacitance twice"
+    ),
+    "inductance_nets_file": (
+        "gates the rlc and rlck extract types, and we do not yet know the "
+        "file format or whether it is mandatory. Offering the path before "
+        "the types are usable would be a control that leads nowhere"
+    ),
+    "substrate_nets_file": (
+        "as inductance_nets_file, for the substrate_only and "
+        "decoupled_to_substrate types. Both belong with the extract-rule "
+        "sub-form when they land, not as a scalar beside it"
+    ),
+    # -- Quantus ``extract -selection`` and ``global_nets``.
+    "selection_layers": (
+        "layer-based net selection is a second selection mode the extract "
+        "rule sub-form does not model. It needs a rule field, not a row"
+    ),
+    "selection_dividing_layers_type": (
+        "meaningless without selection_layers -- the catalog's own note says "
+        "one without the other says nothing -- so the pair lands together"
+    ),
+    "global_nets_nets": (
+        "decides what '-selection all' actually covers. The catalog's "
+        "question asks how the four global_nets options interact and how "
+        "they relate to the LVS power/ground names; four controls wired on a "
+        "guess about that is four ways to change the netlist by accident"
+    ),
+    "global_nets_file": "the file form of global_nets_nets; same question, same wait",
+    "global_nets_import_from_lvs": (
+        "the third of the same four, and the one that decides whether the "
+        "recipe's list is used at all"
+    ),
+    "global_nets_force": "the fourth of the same four",
+    # -- Quantus ``filter_*``.
+    "exclude_floating_decoupling_factor": (
+        "only meaningful alongside exclude_floating_nets_limit, and its "
+        "advisory 0-1 range is unverified. A number that redistributes "
+        "capacitance is the wrong place to ship a guessed bound"
+    ),
+    "merge_parallel_via": (
+        "the catalog asks for its documented default and which flow it "
+        "applies to. It changes the extracted resistor count, so a wrong "
+        "default here is a wrong netlist that still runs"
+    ),
+    "min_res_centering": (
+        "the catalog does not yet know whether it is a boolean or an enum, "
+        "which is the one thing a control has to know first"
+    ),
+    "disable_subnodes": (
+        "decides whether split-net subnodes reach the DSPF, and so what can "
+        "be back-annotated at all. Wired to nothing today; it belongs beside "
+        "sub_node_char when it lands"
+    ),
+    # -- strmout. No template at all: the stage is argv, not a rendered file.
+    "strmout_hier_depth": (
+        "strmout takes argv rather than a rendered file, so there is no "
+        "template hole to open. The catalog records that we are relying on "
+        "its defaults without anybody having chosen them, and the office "
+        "question about the manual flow is unanswered"
+    ),
+    "strmout_convert_dot": "as strmout_hier_depth: argv, and the same unanswered question",
+    "strmout_case": "as strmout_hier_depth: argv, and the same unanswered question",
 }
 
 #: Same, for one row of the cell table.
@@ -106,6 +238,81 @@ def _recipe_bound_paths() -> set[str]:
         if spec.context_path
     }
     return {path for path in bound if path is not None}
+
+
+def _undrawn_catalog_rows() -> dict[str, str]:
+    """Recipe-owned catalog rows the Recipes form puts no control in front of.
+
+    "Drawn" is deliberately generous: a row counts as reached whether it gets
+    an editable control, a pointer to the screen that owns it, or a place in
+    the ``extract`` sub-form. A row drawn *disabled* with its reason -- the
+    treatment a ``requires_emit`` miss gets -- also counts, because it is
+    visible and it says why, which is the whole property this file protects.
+    """
+
+    drawn = {spec.key for spec in recipe_specs()}
+    drawn |= {spec.key for spec in member_specs()}
+    drawn |= {spec.key for spec in pointer_specs()}
+    return {
+        opt.key: (opt.why or "").strip()
+        for opt in builtin_catalog().by_owner(Owner.RECIPE)
+        if opt.key not in drawn
+    }
+
+
+def test_every_recipe_owned_catalog_row_is_drawn_or_exempt_with_a_reason() -> None:
+    """The outer half of the audit, and the half nothing was asking.
+
+    ``recipe_specs`` drops every row without a ``recipe_field_path``. That is
+    correct -- there is no field to bind to -- but it was also silent, so
+    twenty-one Quantus and strmout options the catalog itself records sat
+    between "we decided not to" and "we forgot", which in code look the same.
+    Eleven of them are real ``extract`` / ``filter_*`` / ``global_nets``
+    settings, and the design's own rule for a row a recipe cannot reach is to
+    draw it disabled *with the reason*, never to hide it (``RECIPES_FORM.md``
+    section 5).
+    """
+
+    undrawn = set(_undrawn_catalog_rows())
+    assert sorted(undrawn) == sorted(CATALOG_UNREACHABLE), (
+        "a recipe-owned catalog row changed reachability. Either give it a "
+        "control (a Recipe field plus a template hole), or draw it disabled "
+        "with its reason, or add it to CATALOG_UNREACHABLE with a reason -- a "
+        "vendor option that vanishes from the form with no note is the defect "
+        "this test exists for."
+    )
+
+
+def test_the_catalog_exemptions_are_not_one_sentence_copied_twenty_one_times() -> None:
+    """An exemption set is a claim that somebody looked at each row.
+
+    Twenty-one rows sharing one reason is a rubber stamp wearing the shape of
+    a review, and it would pass ``test_every_exemption_carries_a_reason``
+    without anybody having read a single row.
+    """
+
+    reasons = list(CATALOG_UNREACHABLE.values())
+    assert len(set(reasons)) >= len(reasons) - 2, (
+        "these exemptions repeat one another; the set is a rubber stamp"
+    )
+
+
+def test_the_screen_docstring_does_not_undercount_the_rows_it_drops() -> None:
+    """It said "six" while dropping twenty-one, for four months.
+
+    A comment is the only thing standing between a deliberate omission and a
+    forgotten one, and a stale count is worse than none: it reads as a number
+    somebody checked.
+    """
+
+    from auto_ext.ui.screens import recipes_screen
+
+    doc = recipes_screen.__doc__ or ""
+    assert str(len(CATALOG_UNREACHABLE)) in doc, (
+        f"the screen docstring does not name the {len(CATALOG_UNREACHABLE)} "
+        "rows it drops"
+    )
+    assert "six recipe-owned rows" not in doc
 
 
 def test_every_recipe_field_is_reachable_or_explicitly_exempt() -> None:
@@ -183,6 +390,7 @@ def test_every_exemption_carries_a_reason() -> None:
 
     for name, reasons in (
         ("RECIPE_UNREACHABLE", RECIPE_UNREACHABLE),
+        ("CATALOG_UNREACHABLE", CATALOG_UNREACHABLE),
         ("CELL_UNREACHABLE", CELL_UNREACHABLE),
         ("WORKSPACE_UNREACHABLE", WORKSPACE_UNREACHABLE),
         ("PROFILE_UNREACHABLE", PROFILE_UNREACHABLE),
