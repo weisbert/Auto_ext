@@ -577,18 +577,28 @@ def test_the_duplicate_label_index_names_the_pairs(inventory, window, opts) -> N
 # ---------------------------------------------------------------------------
 
 
-def _press(inventory, name: str, opts, needle: str) -> str:
-    """Press the first control on ``name`` whose label contains ``needle``."""
+def _pressable(inventory, name: str, opts) -> list[str]:
+    """The labels of everything the probe would offer to press on ``name``.
+
+    ``_probe_targets`` filters to controls that are visible *and enabled*, so
+    a button the app disables on purpose is simply absent here -- which is the
+    difference between "pressing it does nothing" and "it refuses out loud".
+    """
 
     window = inventory.build_window(opts)
     try:
-        targets = inventory._probe_targets(window, name)
-        matches = [i for i, (label, _) in enumerate(targets) if needle in label]
-        assert matches, f"{name}: no pressable control matching {needle!r}"
-        index = matches[0]
+        return [label for label, _ in inventory._probe_targets(window, name)]
     finally:
         window.close()
-    return inventory._probe_one(name, opts, index)
+
+
+def _press(inventory, name: str, opts, needle: str) -> str:
+    """Press the first control on ``name`` whose label contains ``needle``."""
+
+    labels = _pressable(inventory, name, opts)
+    matches = [i for i, label in enumerate(labels) if needle in label]
+    assert matches, f"{name}: no pressable control matching {needle!r}"
+    return inventory._probe_one(name, opts, matches[0])
 
 
 def test_the_probe_names_the_controls_whose_press_changes_nothing(
@@ -596,13 +606,28 @@ def test_the_probe_names_the_controls_whose_press_changes_nothing(
 ) -> None:
     """M-124. The cheapest possible mechanisation of "nothing happened".
 
-    Four of the ledger's open rows are reachable by pressing one control in a
-    freshly booted window and looking at the dump again, and all four must
-    land in the candidate list today: ``Refresh`` on the Runs screen (M-51),
-    ``Show N discrepancies`` on the result card (M-26), ``Set`` on an empty
-    pin row in the Setup drawer (M-53) and ``Re-check the PDK`` in the View
-    menu with the drawer closed (M-59). When a fix cluster lands, the matching
-    line here has to be updated -- which is the point: the list is the ledger.
+    Four of the ledger's rows were reachable by pressing one control in a
+    freshly booted window and looking at the dump again: ``Refresh`` on the
+    Runs screen (M-51), ``Show N discrepancies`` on the result card (M-26),
+    ``Set`` on an empty pin row in the Setup drawer (M-53) and ``Re-check the
+    PDK`` in the View menu with the drawer closed (M-59). When a fix cluster
+    lands, the matching line here has to be updated -- which is the point: the
+    list is the ledger, and each line says what the instrument sees *now*.
+
+    M-53 is fixed, and its line is the interesting one. The fix was not to
+    make Set do something on an empty box: it was to disable Set until there
+    is a value and say why in the tooltip. A refusal a user can see is not a
+    dead control, and the probe agrees by construction -- ``_probe_targets``
+    only offers what is enabled, so the button is not in the list at all. The
+    line is asserted from both ends so it cannot pass by the pin row having
+    quietly disappeared instead.
+
+    M-26 is fixed too and its line has NOT moved, which is a limit of the
+    instrument rather than a claim about the app: ``show_lvs_detail`` now
+    washes the LVS band in the accent tint, and a stylesheet is not something
+    a text dump of labels and states can see. ``tests/ui/test_affordances.py``
+    presses that button for real and asserts the pixels changed; this line
+    records that a dump-based probe will keep listing it as a candidate.
     """
 
     _lvs_run(runs_root, make_run_record, discrepancies=3, cell="amp2")
@@ -610,8 +635,16 @@ def test_the_probe_names_the_controls_whose_press_changes_nothing(
 
     dead = "NO OBSERVABLE CHANGE"
     assert dead in _press(inventory, "runs", opts, "'Refresh'"), "M-51 is fixed?"
-    assert dead in _press(inventory, "runs", opts, "discrepancies"), "M-26 is fixed?"
-    assert dead in _press(inventory, "setup", unresolved_opts, "'Set'"), "M-53 is fixed?"
+    assert dead in _press(inventory, "runs", opts, "discrepancies"), (
+        "the dump can see the LVS highlight now?"
+    )
+    setup = _pressable(inventory, "setup", unresolved_opts)
+    assert [label for label in setup if "'Browse'" in label], (
+        "the pin row itself is gone, so this line proves nothing about Set"
+    )
+    assert not [label for label in setup if "'Set'" in label], (
+        "Set is pressable on an empty pin row again -- M-53 came back"
+    )
     assert dead in _press(inventory, "menus", opts, "Re-check"), "M-59 is fixed?"
 
 
