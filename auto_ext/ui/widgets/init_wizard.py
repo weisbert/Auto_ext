@@ -300,6 +300,11 @@ class RawFilesPage(QWizardPage):
         adv = QGroupBox("Advanced - identity overrides (optional)", self)
         adv.setCheckable(True)
         adv.setChecked(False)
+        adv.setToolTip(
+            "Tick this to override what the raw exports say the DUT is. "
+            "Unticked, every box below is ignored."
+        )
+        self._advanced = adv
         adv_form = QFormLayout(adv)
         self._cell_edit = QLineEdit(adv)
         self._library_edit = QLineEdit(adv)
@@ -339,6 +344,19 @@ class RawFilesPage(QWizardPage):
         ):
             edit.textChanged.connect(self.completeChanged)
             edit.textChanged.connect(self._refresh_banner)
+
+    def overrides_enabled(self) -> bool:
+        """Whether the six Advanced fields are in force.
+
+        A checkable ``QGroupBox`` nobody reads is a switch painted on the
+        wall. Unticking one only greys its children out, and Qt keeps their
+        text -- which is right for the user who ticks it again, and wrong for
+        a caller that reads the six registered fields whatever the box says.
+        Keeping the text and gating on this is what makes unticking mean
+        "not this time" rather than "retype it if you change your mind".
+        """
+
+        return self._advanced.isChecked()
 
     def _build_row(self, parent_layout: QVBoxLayout, label: str) -> QLineEdit:
         row = QHBoxLayout()
@@ -851,6 +869,11 @@ class InitProjectWizard(QWizard):
         one project root rather than asked for separately: the migration
         writes ``recipes/`` next to ``config/``, so the two directories were
         never independent.
+
+        The six identity overrides are read only while the Advanced box is
+        ticked. Reading them unconditionally is what let an unticked box --
+        greyed out, visibly off -- go on deciding what the project's DUT was
+        called.
         """
 
         def _text(name: str) -> str | None:
@@ -860,6 +883,11 @@ class InitProjectWizard(QWizard):
         def _path(name: str) -> Path | None:
             value = _text(name)
             return Path(value) if value else None
+
+        overrides_on = self._raw_files.overrides_enabled()
+
+        def _override(name: str) -> str | None:
+            return _text(name) if overrides_on else None
 
         root = self.project_root()
         calibre = _path("raw_calibre")
@@ -874,12 +902,12 @@ class InitProjectWizard(QWizard):
             raw_jivaro=_path("raw_jivaro"),
             output_config_dir=root / CONFIG_SUBDIR,
             output_templates_dir=root / TEMPLATES_SUBDIR,
-            cell_override=_text("override_cell"),
-            library_override=_text("override_library"),
-            layout_view_override=_text("override_layout_view"),
-            source_view_override=_text("override_source_view"),
-            out_file_override=_text("override_out_file"),
-            ground_net_override=_text("override_ground_net"),
+            cell_override=_override("override_cell"),
+            library_override=_override("override_library"),
+            layout_view_override=_override("override_layout_view"),
+            source_view_override=_override("override_source_view"),
+            out_file_override=_override("override_out_file"),
+            ground_net_override=_override("override_ground_net"),
             force=bool(self.field("force")),
         )
 
