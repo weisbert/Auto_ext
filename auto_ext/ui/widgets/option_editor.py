@@ -419,6 +419,22 @@ def option_label(spec: OptionSpec) -> str:
     return leaf.replace("_", " ")
 
 
+def _popup_title(spec: OptionSpec) -> str:
+    """What a multi-value popup calls itself: the row's label, plus the key.
+
+    The label is what the user just clicked beside, so it is what ties the
+    overlay back to the row it came from. The catalog key is added only when
+    it differs -- ``output_form`` draws as "emit", and the key is the string
+    every error message and every search quotes, so a popup that showed only
+    "emit" would be unfindable from either.
+    """
+
+    label = option_label(spec)
+    if label.replace(" ", "_") == spec.key:
+        return label
+    return f"{label} {_EM_DASH} {spec.key}"
+
+
 def group_label(name: str) -> str:
     """``extraction`` -> ``Extraction``; ``lvs`` -> ``LVS``.
 
@@ -1440,7 +1456,22 @@ class MultiChoiceOptionEditor(OptionEditor):
         layout = QVBoxLayout(self._row)
         layout.setContentsMargins(theme.SPACE_XS, theme.SPACE_XS, theme.SPACE_XS, theme.SPACE_XS)
         layout.setSpacing(theme.SPACE_XXS)
-        # ``all`` / ``none`` first, because with eight members the common
+
+        # The popup names its own list. Three of these panels exist on the
+        # Recipes form -- stages, output_xy, output_form -- and the overlay
+        # covers the row label that would tell them apart, so an ``all``
+        # click is a five-stage flow change or an eight-column output change
+        # depending on which one happens to be open. Nothing inside the menu
+        # said which.
+        self._header = QLabel(_popup_title(spec), self._row)
+        self._header.setStyleSheet(
+            f"color: {theme.TEXT_SECONDARY}; font-size: {theme.FONT_SIZE_META}px;"
+            f" font-weight: {theme.FONT_WEIGHT_SEMIBOLD};"
+        )
+        self._header.setToolTip(option_tooltip(spec))
+        layout.addWidget(self._header)
+
+        # ``all`` / ``none`` next, because with eight members the common
         # edit is "everything except one" and doing that by hand is eight
         # clicks to get back to where you started. Artboard ``I1``.
         shortcuts = QWidget(self._row)
@@ -1501,6 +1532,11 @@ class MultiChoiceOptionEditor(OptionEditor):
         """The closed control -- the thing that reads ``8 of 8``."""
 
         return self._summary
+
+    def popup_header(self) -> QLabel:
+        """The line inside the popup naming which list it edits."""
+
+        return self._header
 
     def all_button(self) -> QPushButton:
         return self._all

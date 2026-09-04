@@ -991,6 +991,40 @@ def test_all_and_none_tick_every_member_in_one_action(qtbot) -> None:
     assert len(seen) == 2
 
 
+def test_the_popup_names_the_list_its_all_and_none_belong_to(qtbot) -> None:
+    """Three ``all`` / ``none`` pairs on one screen and no way to tell them apart.
+
+    The buttons live inside a ``QMenu`` overlay; the row label that would
+    identify them stays outside it, on the form the overlay is covering. So
+    the popup for ``stages``, the popup for ``output_xy`` and the popup for
+    ``output_form`` are three identical panels of check boxes, and clicking
+    ``all`` in one of them is a five-stage flow change or an eight-column
+    output change depending on which one is open.
+    """
+
+    catalog = builtin_catalog()
+    headers = {}
+    for key in ("stages", "output_xy", "output_form"):
+        editor = build_option_editor(catalog.option(key))
+        qtbot.addWidget(editor)
+        editor.summary_button().menu().popup(editor.mapToGlobal(editor.rect().topLeft()))
+        try:
+            header = editor.popup_header()
+            assert header.isVisible(), f"{key}: the popup opened with no header"
+            headers[key] = header.text()
+        finally:
+            editor.summary_button().menu().close()
+
+    assert headers["stages"] == "stages"
+    # The row label and the catalog key differ here, and error messages quote
+    # the key -- so this one has to carry both.
+    assert "emit" in headers["output_form"]
+    assert "output_form" in headers["output_form"]
+    assert len(set(headers.values())) == 3, (
+        f"two popups are still indistinguishable: {headers}"
+    )
+
+
 def test_an_open_member_list_can_still_take_a_value_nobody_predicted(qtbot) -> None:
     """The other half of I1: type a value the list does not have."""
 
