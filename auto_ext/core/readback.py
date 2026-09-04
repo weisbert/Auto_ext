@@ -488,6 +488,12 @@ def read_back_from_templates(
             continue
         reasons: list[str] = []
         recovered: list[tuple[RenderTarget | None, Any, ReadSite]] = []
+        #: In-scope optional sites whose line the file does not carry. That
+        #: absence IS the value -- the template writes the line only when the
+        #: option is set -- so it is a successful read of "unset", not a
+        #: failure to read one. Without this, every import report grows a
+        #: row saying a line that is supposed to be missing is missing.
+        unset = 0
         for site in option.lands_in:
             if site.target is None or site.target not in parsed:
                 reasons.append(f"{site.target or site.stage}: file not part of this project")
@@ -495,7 +501,10 @@ def read_back_from_templates(
             spec = cat.target(site.target)
             raw = parsed[site.target].get(site_key(site, spec))
             if raw is None:
-                reasons.append(f"{site.target}: {site.option} not found in the file")
+                if site.optional:
+                    unset += 1
+                else:
+                    reasons.append(f"{site.target}: {site.option} not found in the file")
                 continue
             found = ReadSite(
                 target=site.target, section=site.section, option=site.option, line=raw.line
@@ -511,6 +520,13 @@ def read_back_from_templates(
             except NotALiteral as exc:
                 reasons.append(f"{site.target}: {exc}")
         if not recovered:
+            if unset:
+                # Leave it out of both maps: the recipe's own default is the
+                # unset value, so there is nothing to carry over and nothing
+                # went wrong. Same shape as a recovered value -- reasons from
+                # files that were not imported do not override an answer the
+                # files that WERE imported already gave.
+                continue
             unread[option.key] = "; ".join(reasons) or "no readable landing site"
             continue
         first = recovered[0][1]

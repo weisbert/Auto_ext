@@ -16,7 +16,8 @@ capacitance \
               -max_fracture_length_unit "[[max_fracture_length_unit]]" \
               -max_via_array_size "[[max_via_array_size]]" \
               -parasitic_blocking_device_cells_file "[[preserve_cell_list_name]]" \
-              -net_name_space "[[extraction_net_name_space]]"
+[% if parasitic_blocking_device_cells_type %]              -parasitic_blocking_device_cells_type "[[parasitic_blocking_device_cells_type]]" \
+[% endif %]              -net_name_space "[[extraction_net_name_space]]"
 filter_cap \
               -exclude_self_cap [[ "true" if exclude_self_cap else "false" ]] \
               -exclude_floating_nets [[ "true" if exclude_floating_nets else "false" ]] \

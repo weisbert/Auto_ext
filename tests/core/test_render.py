@@ -846,6 +846,72 @@ def test_the_optional_connect_by_name_line_keeps_the_hugging_form(
     assert lines[i + 2] == "*cmnSpecifyLicenseWaitTime: 1"
 
 
+def _extraction_setup(text: str) -> list[str]:
+    """The extraction_setup statement, from its head to its last line."""
+
+    lines = text.splitlines()
+    i = lines.index("extraction_setup \\")
+    out = [lines[i]]
+    while out[-1].rstrip().endswith("\\"):
+        i += 1
+        out.append(lines[i])
+    return out
+
+
+def test_the_inductor_blocking_type_is_omitted_until_it_is_asked_for(
+    tmp_path: Path, recipe: Recipe, profile: PdkProfile, context: dict[str, object]
+) -> None:
+    """Default ``None`` writes nothing, so promoting the row moved no deck.
+
+    Before 2026-09-04 this option had no field, no template line and no way
+    to be spelled: a deck named a blocking cell list and stayed silent about
+    what blocking MEANT, which the tool resolves to ``white`` -- inductor
+    parasitics still extracted and still coupling, on top of whatever the EM
+    model already carries.
+    """
+
+    for rendered in _render_all(tmp_path, recipe, profile, context).values():
+        assert "-parasitic_blocking_device_cells_type" not in rendered.text
+
+
+@pytest.mark.parametrize("value", ["gray", "white"])
+def test_asking_for_a_blocking_type_writes_it_inside_the_statement(
+    tmp_path: Path, profile: PdkProfile, value: str
+) -> None:
+    """The line lands between the file option and ``-net_name_space``.
+
+    Position is the assertion that matters: it is the first optional line in
+    a backslash-continued statement, so a wrong hugging form either truncates
+    ``extraction_setup`` at the guard or leaves ``-net_name_space`` dangling
+    with a continuation and swallows ``filter_cap``.
+    """
+
+    asked = Recipe(
+        recipe_id="blocked",
+        name="blocked",
+        extraction={"parasitic_blocking_device_cells_type": value},
+    )
+    ctx = render.build_context(
+        dut=make_dut(),
+        recipe=asked,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    rendered = _render_all(tmp_path, asked, profile, ctx)["quantus"]
+    body = [line.strip().rstrip("\\").strip() for line in _extraction_setup(rendered.text)]
+
+    i = body.index('-parasitic_blocking_device_cells_type "%s"' % value)
+    assert body[i - 1].startswith("-parasitic_blocking_device_cells_file")
+    assert body[i + 1].startswith("-net_name_space")
+    assert body[i + 1] == body[-1], "-net_name_space must stay the last line"
+    assert not rendered.text.splitlines()[
+        rendered.text.splitlines().index(
+            [l for l in rendered.text.splitlines() if "-net_name_space" in l][0]
+        )
+    ].rstrip().endswith("\\")
+
+
 def test_both_quantus_forms_render_to_different_files(
     tmp_path: Path, profile: PdkProfile
 ) -> None:

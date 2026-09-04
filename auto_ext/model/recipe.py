@@ -262,6 +262,30 @@ SELECTION_ARG_KIND: dict[ExtractSelection, str | None] = {
 }
 
 
+class ParasiticBlocking(StrEnum):
+    """``extraction_setup -parasitic_blocking_device_cells_type``.
+
+    The companion of ``-parasitic_blocking_device_cells_file``, which both
+    quantus templates have always emitted while this option was emitted by
+    neither. That is not a cosmetic gap: the *default changed between
+    releases*, so a deck that names a blocking file and says nothing about
+    the type means one thing on one release and the opposite on another.
+
+    :attr:`WHITE` -- today's default when the line is omitted -- still
+    extracts the parasitics of nets inside a blocked cell and still lets them
+    take part in coupling. :attr:`GRAY` is the old behaviour: not extracted at
+    all. For an RF block whose inductor is modelled in an EM tool and blocked
+    here, ``white`` is double counting, and until this row existed there was
+    no way to say so from the GUI, the YAML or the CLI.
+
+    Blocking is never total either way: coupling between the internal nets of
+    two ADJACENT blocked cells is extracted under both members.
+    """
+
+    WHITE = "white"
+    GRAY = "gray"
+
+
 class MetalFill(StrEnum):
     """``metal_fill -type``.
 
@@ -496,6 +520,11 @@ class ExtractionSettings(Base):
     #: section 1.2 sketch.
     max_fracture_length_unit: str = "MICRONS"
     max_via_array_size: str = "auto"
+    #: ``None`` omits the line entirely, which is what every deck this tool
+    #: has ever generated does -- and what the tool then takes is ``white``.
+    #: Kept as the default so adding this field moves no existing output;
+    #: an RF block that blocks its inductor almost certainly wants ``gray``.
+    parasitic_blocking_device_cells_type: ParasiticBlocking | None = None
 
 
 class CommonOutputSettings(Base):

@@ -13,6 +13,8 @@ at once, a range somebody invented that later got read as a spec.
 
 from __future__ import annotations
 
+import pathlib
+
 from pathlib import Path
 
 import pytest
@@ -456,17 +458,44 @@ def test_skill_booleans_are_recorded_as_skill_booleans(catalog: Catalog) -> None
     assert site.render(catalog.target(site.target)).quoting is Quoting.SKILL_BOOL
 
 
-def test_the_only_conditional_line_is_connect_by_name(catalog: Catalog) -> None:
+def test_every_conditional_line_is_written_in_the_hugging_form(catalog: Catalog) -> None:
     # trim_blocks is off, so a conditional line must be written in the hugging
     # form or it leaves a blank line behind. Any new optional site has to copy
     # templates/calibre/calibre_lvs.qci.j2:31-32 exactly.
+    #
+    # parasitic_blocking_device_cells_type joined on 2026-09-04. It is the
+    # first optional site inside a BACKSLASH-CONTINUED statement, which is why
+    # it is asserted rather than merely counted: its own line has to end in a
+    # continuation and the line the [% endif %] hugs has to stay the last one
+    # in the statement, or the deck Quantus reads is truncated mid-command.
     optional = [
         (opt.key, site.target, site.line)
         for opt in catalog.options
         for site in opt.lands_in
         if site.optional
     ]
-    assert optional == [("lvs_connect_by_name", RenderTarget.LVS_QCI, 31)]
+    assert sorted(optional) == sorted(
+        [
+            ("lvs_connect_by_name", RenderTarget.LVS_QCI, 31),
+            ("parasitic_blocking_device_cells_type", RenderTarget.QUANTUS_EXT, 19),
+            ("parasitic_blocking_device_cells_type", RenderTarget.QUANTUS_DSPF, 19),
+        ]
+    )
+
+    for name in ("ext", "dspf"):
+        lines = (
+            pathlib.Path(f"templates/quantus/{name}.cmd.j2")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        opened, closed = lines[18], lines[19]
+        assert opened.startswith("[% if parasitic_blocking_device_cells_type %]"), name
+        assert opened.rstrip().endswith("\\"), f"{name}: the guarded line must continue"
+        assert closed.startswith("[% endif %]"), name
+        assert not closed.rstrip().endswith("\\"), (
+            f"{name}: -net_name_space is the last line of extraction_setup and "
+            "must not continue into filter_cap"
+        )
 
 
 def test_render_defaults_apply_to_a_target_less_site(catalog: Catalog) -> None:

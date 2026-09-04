@@ -1351,3 +1351,71 @@ def test_broken_rows_do_not_displace_the_recipes_that_did_load(qtbot) -> None:
         for i in range(screen.recipe_list.topLevelItemCount())
     ]
     assert ids == [None, make_recipe().recipe_id]
+
+
+# ---- the sub-form the density arithmetic hid -----------------------------
+
+
+def _extract_group(screen: RecipesScreen):
+    return screen._groups["quantus/extract"]
+
+
+def test_the_extract_sub_form_is_on_screen_in_both_densities(qtbot) -> None:
+    """The 2026-09-04 defect: built, wired, and invisible.
+
+    ``quantus/extract`` is the one section whose rows are ALL
+    ``describes_member`` rows. Those have no entry in ``_editors`` -- the
+    collection they describe is not one control -- so the row count that
+    decides whether a section is drawn came out zero and the section hid
+    itself, taking ``ExtractRulesEditor`` with it. Nothing failed: the
+    catalog was right, the widget was right, and ``test_reachability``
+    passed, because it asks whether a *catalog row* is bound rather than
+    whether a *user* can see the control.
+
+    Against the old behaviour both assertions fail.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    group = _extract_group(screen)
+
+    screen.set_density(DENSITY_COMMON)
+    assert not group.isHidden(), "extract rules hidden in Common"
+    assert screen._member_forms["recipe.extraction.extract"] is not None
+
+    screen.set_density(DENSITY_ALL)
+    assert not group.isHidden(), "extract rules hidden in All"
+
+
+def test_search_finds_the_extract_rules_and_shows_them(qtbot) -> None:
+    """Search skipped the member rows entirely, so the escape hatch was shut.
+
+    ``rc_coupled`` is the value an RF user would actually type. Against the
+    old behaviour ``search_matches`` returns nothing for it.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    group = _extract_group(screen)
+
+    assert [s.key for s in screen.search_matches("rc_coupled")] == ["extract_type"]
+    assert [s.key for s in screen.search_matches("nets_file")] == ["extract_selection"]
+
+    screen._on_search("rc_coupled")
+    assert not group.isHidden(), "search found the row and still did not show it"
+
+    # A search that misses it still hides it: the span follows the same rule
+    # every other row does, which is the point of putting it in the grid.
+    screen._on_search("merge_parallel_res")
+    assert group.isHidden()
+
+
+def test_the_extract_rules_are_a_common_row_not_an_all_only_one(qtbot) -> None:
+    """Choosing C-only against RC is the most consequential row on the form."""
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    bands = screen.search_bands("rc_coupled")
+
+    assert [s.key for s in bands["IN COMMON"]] == ["extract_type"]
+    assert bands["IN ALL ONLY"] == []

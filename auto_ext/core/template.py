@@ -182,9 +182,12 @@ def render_template(
     # paints "None.None.qcilvs" into a path. StrictUndefined only catches
     # missing keys; a present-but-None value falls through.
     referenced = referenced_jinja_vars(substituted)
+    guarded = guarded_jinja_vars(substituted)
     none_keys = sorted(
         name for name in referenced
-        if name in merged_context and merged_context[name] is None
+        if name in merged_context
+        and merged_context[name] is None
+        and name not in guarded
     )
     if none_keys:
         raise TemplateError(
@@ -291,6 +294,10 @@ def collect_var_references(
     return results
 
 
+#: A bare ``[% if name %]`` guard. See :func:`guarded_jinja_vars`.
+_JINJA_GUARD_RE = re.compile(r'\[%-?\s*if\s+([A-Za-z_][A-Za-z0-9_]*)\s*-?%\]')
+
+
 def referenced_jinja_vars(source: str) -> set[str]:
     """Names appearing as ``[[name]]`` in template source.
 
@@ -302,6 +309,23 @@ def referenced_jinja_vars(source: str) -> set[str]:
     templates.
     """
     return set(_JINJA_VAR_RE.findall(source))
+
+
+def guarded_jinja_vars(source: str) -> set[str]:
+    """Names a ``[% if name %]`` in the source makes optional.
+
+    A guarded var may legitimately be ``None``: that is how an optional line
+    spells "omit me", and it is the ONLY way to spell it for an option whose
+    default is to say nothing. Every other ``None`` reaching Jinja is painted
+    into the generated file as the literal ``"None"``, which is the trap the
+    caller below exists to catch.
+
+    Deliberately narrow -- a bare identifier only, no expressions. A var
+    inside ``[% if a and b %]`` is not exempted, because the line can then be
+    written for a reason that has nothing to do with that var being set.
+    """
+
+    return set(_JINJA_GUARD_RE.findall(source))
 
 
 def scan_placeholders(template_path: Path) -> PlaceholderInventory:

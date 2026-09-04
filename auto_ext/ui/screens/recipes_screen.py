@@ -720,6 +720,13 @@ class RecipesScreen(QWidget):
         }
         #: ``context_path -> ExtractRulesEditor``. See :meth:`_add_member_forms`.
         self._member_forms: dict[str, Any] = {}
+        #: ``section key -> {span path: the member rows it draws}``. A span is
+        #: a grid row like any other, but it is keyed by the collection's
+        #: context_path rather than by an option key, so every walk that
+        #: shows and hides rows has to be told about it explicitly. It was
+        #: not, and the one section whose rows are ALL member rows counted
+        #: zero visible rows and hid itself in both densities.
+        self._section_spans: dict[str, dict[str, list[OptionSpec]]] = {}
         #: ``(density, scroll offset)`` from before the current search began.
         self._search_return_to: tuple[str, int] | None = None
         #: The loaded PdkProfile, or None. Only ``choices_from`` rows read it.
@@ -1086,7 +1093,11 @@ class RecipesScreen(QWidget):
         if not text:
             return []
         out: list[OptionSpec] = []
-        for spec in recipe_specs(self._catalog) + self._elsewhere_specs():
+        for spec in (
+            recipe_specs(self._catalog)
+            + member_specs(self._catalog)
+            + self._elsewhere_specs()
+        ):
             haystack = [
                 spec.key,
                 spec.recipe_field_path or "",
@@ -1144,6 +1155,10 @@ class RecipesScreen(QWidget):
                     on = spec.key in keys
                     group.grid.set_row_visible(spec.key, on)
                     here += int(on)
+                for path, specs in self._section_spans.get(section.key, {}).items():
+                    on = any(spec.key in keys for spec in specs)
+                    group.grid.set_row_visible(path, on)
+                    here += int(on)
                 live += here
                 group.setVisible(here > 0)
             self._refresh_tool_header(tool, live)
@@ -1185,7 +1200,9 @@ class RecipesScreen(QWidget):
     def _common_specs(self) -> list[OptionSpec]:
         return [
             spec
-            for spec in recipe_specs(self._catalog) + pointer_specs(self._catalog)
+            for spec in recipe_specs(self._catalog)
+            + member_specs(self._catalog)
+            + pointer_specs(self._catalog)
             if self._shows_in_common(spec)
         ]
 
@@ -1419,11 +1436,38 @@ class RecipesScreen(QWidget):
                 for spec in section.specs:
                     group.grid.set_row_visible(spec.key, spec.key in shown)
                 here = sum(1 for spec in section.specs if spec.key in shown)
+                here += self._apply_density_to_spans(group, section)
                 live += here
                 group.setVisible(here > 0)
             self._refresh_tool_header(tool, live)
         self._refresh_density_bar(len(shown))
         self._refresh_row_states()
+
+    def _apply_density_to_spans(self, group: Any, section: Any) -> int:
+        """Show or hide this section's sub-forms, and say how many are drawn.
+
+        A span has no entry in :attr:`_editors` -- the collection it edits is
+        not one control -- so it is absent from
+        :meth:`visible_option_keys`, which is what the row walk above counts.
+        A section whose rows are ALL member rows therefore counted zero and
+        hid itself, taking the sub-form with it: ``quantus/extract`` is such a
+        section, and the ``extract`` rules were unreachable from the GUI in
+        both densities because of it.
+
+        A span follows the density of the rows it draws, which for the
+        ``extract`` pair is ``Tier.COMMON`` -- so it draws in both modes,
+        which is right: choosing between C-only and RC is the single most
+        consequential thing on this form.
+        """
+
+        drawn = 0
+        for path, specs in self._section_spans.get(section.key, {}).items():
+            on = self._density == DENSITY_ALL or any(
+                self._shows_in_common(spec) for spec in specs
+            )
+            group.grid.set_row_visible(path, on)
+            drawn += int(on)
+        return drawn
 
     def _refresh_tool_header(self, tool: FormTool, live: int) -> None:
         header = self._tool_headers.get(tool.tool)
@@ -1515,6 +1559,9 @@ class RecipesScreen(QWidget):
         for spec in section.specs:
             if spec.describes_member and spec.context_path:
                 by_path.setdefault(spec.context_path, []).append(spec)
+
+        if by_path:
+            self._section_spans[section.key] = by_path
 
         for path, specs in by_path.items():
             selection = next((s for s in specs if s.choice_args), specs[0])

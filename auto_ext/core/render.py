@@ -89,7 +89,11 @@ from auto_ext.core.patch import (
     render_masked,
 )
 from auto_ext.core.patch_models import StagePatchReport
-from auto_ext.core.template import make_jinja_env, referenced_jinja_vars
+from auto_ext.core.template import (
+    guarded_jinja_vars,
+    make_jinja_env,
+    referenced_jinja_vars,
+)
 from auto_ext.model.common import STAGE_ORDER, RenderTarget, Stage
 from auto_ext.model.pdk import PdkProfile
 from auto_ext.model.recipe import OutputKind, Recipe, ResourceProfile
@@ -1100,10 +1104,17 @@ def render_one(
     # renders as the literal "None", which is how "None/None.wodio.qcilvs" gets
     # written into a runset. Every None here is a field the profile or the
     # recipe has not filled in, so say which one.
+    #
+    # The exception is a var the template itself guards with ``[% if x %]``:
+    # None means "omit the line" there, which is the only way to spell a
+    # default of "say nothing". The catalog declares the same fact as
+    # ``LandingSite.optional``; the source is what actually decides, so it is
+    # what is read, and tests/catalog/test_catalog.py asserts the two agree.
+    guarded = guarded_jinja_vars(substituted)
     none_keys = sorted(
         name
         for name in referenced_jinja_vars(substituted)
-        if name in context and context[name] is None
+        if name in context and context[name] is None and name not in guarded
     )
     if none_keys:
         raise RenderError(
