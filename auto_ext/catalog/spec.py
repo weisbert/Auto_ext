@@ -36,13 +36,19 @@ target carries the defaults those rules fall back to. This is why
 What this module does NOT do: render anything. It answers questions about
 options; the renderer is a separate concern and lands with the C2 work.
 
-Verification claims. Nothing in ``options.yaml`` has been checked against a
-real Cadence installation -- there is none on the development machine. Every
-row that depends on one is marked in place with a ``question:`` and mirrored
-in ``docs/refactor/OFFICE_TODO.md``. In particular **no** ``range`` in the
-file has been verified (``range_verified`` is false on every row), and the
-``unit`` of ``coupling_cap_threshold_absolute`` is transcribed from a
-hand-written manifest that is physically impossible as written.
+Verification claims. Nothing in ``options.yaml`` has been *run* against a real
+Cadence installation -- there is none on the development machine. Every row
+that still depends on one is marked in place with a ``question:`` and mirrored
+in ``docs/refactor/OFFICE_TODO.md``. Rows carrying no question have been read
+out of the vendor manual by the red-zone probe (``scripts/extdoc_probe.py``),
+which is evidence about the tool but not about this PDK.
+
+``range_verified`` is false on every row but one: the 0-100 fF bound on
+``coupling_cap_threshold_absolute`` is transcribed from the manual, and it is
+the only bound in this file that is not a guard rail somebody invented. The
+same row's ``unit`` used to say farads, on the strength of a hand-written
+manifest, which made its own default look physically impossible; the unit was
+the wrong half.
 """
 
 from __future__ import annotations

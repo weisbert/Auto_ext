@@ -50,12 +50,17 @@
 #                     can be certainly hardcoded (observed) while its legal
 #                     alternatives are pure guesswork.
 # range               inclusive [lo, hi], int/float only.
-# range_verified      false on every row in this file. Not one range here has
-#                     been checked against a tool manual -- they are guard
-#                     rails someone invented, and reading them as spec is a
-#                     bug. Only a real datasheet flips one to true.
-# unit                display only, and itself sometimes wrong -- see
-#                     coupling_cap_threshold_absolute.
+# range_verified      false on every row but one. The exception is
+#                     coupling_cap_threshold_absolute, whose 0-100 fF bound is
+#                     transcribed from the manual. Every other range here is a
+#                     guard rail someone invented, and reading one as spec is a
+#                     bug -- the form paints an unverified bound and enforces a
+#                     verified one, which is the whole difference. Only a real
+#                     datasheet flips another to true.
+# unit                display only, and it has been wrong: this column said
+#                     farads on coupling_cap_threshold_absolute for long
+#                     enough that the row's own notes called its default
+#                     impossible. It is femtofarads.
 # default             today's effective value.
 # currently           how the value reaches the file TODAY:
 #                     manifest_knob     - [[var]] plus a knob in a manifest
