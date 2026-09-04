@@ -26,6 +26,12 @@ signal**, so a screen used on its own is still fully functional and a host
 that wants to own the launch simply connects and takes over. The same
 mechanism gates the Setup drawer's "pin this value" row.
 
+Opening a log or an artifact is *not* one of those requests. The screen owns
+it end to end -- see :meth:`RunsScreen._open_once` -- because that is where
+the answers to "the file is gone", "the launcher refused" and "this host
+cannot open files at all" live, and because a screen that opened a file and
+then also announced it as a request launched two editors.
+
 Layout contract
 ---------------
 The window floor is 940x560 px, and this screen must fit inside it with room
@@ -235,8 +241,12 @@ class RunsScreen(QWidget):
     #: (or ``None`` when the selection is cleared).
     run_selected = pyqtSignal(object)
     #: Emitted with the absolute :class:`Path` of a stage log the user opened.
+    #: **Not emitted while the screen owns opening** -- see :meth:`_open_once`.
+    #: Kept because a host may be connected to it and because a future host
+    #: that wants to own the launch needs somewhere to connect.
     log_requested = pyqtSignal(object)
     #: Emitted with the absolute :class:`Path` of an artifact the user opened.
+    #: Same contract as :attr:`log_requested`.
     artifact_requested = pyqtSignal(object)
     #: Emitted with the :class:`~auto_ext.model.run.RunRecord` to re-open in
     #: Calibre Interactive. When nothing is connected the screen launches it.
@@ -815,16 +825,32 @@ class RunsScreen(QWidget):
         return self.receivers(signal) > 0
 
     def _on_log_requested(self, path: object) -> None:
-        log_path = Path(str(path)) if path else None
-        if log_path is not None:
-            self._open_path(log_path)
-        self.log_requested.emit(log_path)
+        self._open_once(path)
 
     def _on_artifact_requested(self, path: object) -> None:
+        self._open_once(path)
+
+    def _open_once(self, path: object) -> None:
+        """Act on one "open this" request from the card -- exactly once.
+
+        The screen opens it and deliberately does **not** re-emit. It used to
+        do both, and :class:`~auto_ext.ui.main_window.MainWindow` connects
+        ``log_requested`` and ``artifact_requested`` to an opener of its own,
+        so every click on a log launched two editors -- the second of them
+        through a call site with no ``try``, which takes an unhandled
+        exception in a slot to ``qFatal``.
+
+        Opening stays here rather than moving to the host because this is
+        where the failure cases are answered: a path that has gone, a launcher
+        that refuses, and a server with no file opener at all, which is
+        offered the built-in viewer instead (:meth:`show_in_app`). A host that
+        wants to know what the user opened has :attr:`status_message`.
+        """
+
         target = Path(str(path)) if path else None
-        if target is not None:
-            self._open_path(target)
-        self.artifact_requested.emit(target)
+        if target is None:
+            return
+        self._open_path(target)
 
     def _on_card_rerun(self, _record: object) -> None:
         self._emit_rerun()
@@ -878,6 +904,10 @@ class RunsScreen(QWidget):
             QMessageBox.warning(
                 self, "Could not open", f"Failed to open:\n{target}\n\n{exc}"
             )
+        else:
+            # The screen no longer re-emits what it opened (M-20), so this is
+            # how the host still learns of it.
+            self.status_message.emit(f"opened: {target}")
 
     # ---- layout -----------------------------------------------------------
 

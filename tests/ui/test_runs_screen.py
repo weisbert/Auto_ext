@@ -393,15 +393,27 @@ def test_handoff_reports_a_refused_plan_instead_of_launching(
 def test_opening_a_log_goes_through_os_open_and_is_announced(
     qtbot, history, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The screen opens it, once, and says so on the status line.
+
+    It does *not* re-emit ``log_requested``: a host connected to that signal
+    (``MainWindow`` is) opened the same file a second time -- see
+    ``tests/ui/test_runs_screen_host.py``.
+    """
+
     opened: list[Path] = []
     monkeypatch.setattr(rs, "open_in_os", opened.append)
     screen = RunsScreen(runs_root=history)
     qtbot.addWidget(screen)
     target = screen.entries[0].run_dir / "logs" / "calibre.log"
-    with qtbot.waitSignal(screen.log_requested, timeout=1000) as blocker:
+
+    requests: list[object] = []
+    screen.log_requested.connect(requests.append)
+    with qtbot.waitSignal(screen.status_message, timeout=1000) as blocker:
         screen.result_card.log_requested.emit(target)
+
     assert opened == [target]
-    assert blocker.args == [target]
+    assert str(target) in blocker.args[0]
+    assert requests == [], "re-emitting is what made the host open it twice"
 
 
 def test_clicking_an_artifact_path_opens_it_with_the_os_handler(
@@ -422,10 +434,12 @@ def test_clicking_an_artifact_path_opens_it_with_the_os_handler(
         if label.is_live()
     ]
     assert live, "at least the run directory always exists"
-    with qtbot.waitSignal(screen.artifact_requested, timeout=1000) as blocker:
+    requests: list[object] = []
+    screen.artifact_requested.connect(requests.append)
+    with qtbot.waitSignal(screen.status_message, timeout=1000):
         live[0].clicked.emit(live[0].path)
     assert opened == [live[0].path]
-    assert blocker.args == [live[0].path]
+    assert requests == []
 
 
 def test_a_missing_path_is_reported_not_raised(
