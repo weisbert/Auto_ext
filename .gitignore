@@ -56,3 +56,6 @@ deploy/dist/
 # anything with a real path or employee id in it. THIS REPO IS PUBLIC --
 # nothing under private/ may ever be committed.
 private/
+
+# Backlog.md 任务系统 — 任务正文含真实模块名/芯片号, 本仓是公开仓, 绝不提交
+backlog/
