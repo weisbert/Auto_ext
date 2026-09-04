@@ -105,7 +105,6 @@ from auto_ext.core.run_store import (
 from auto_ext.model.run import RunRecord
 from auto_ext.ui import theme
 from auto_ext.ui.os_open import can_open, open_in_os
-from auto_ext.ui.widgets.log_view import LogView
 from auto_ext.ui.widgets.failure_chip import (
     CHIP_TONE_FAILED,
     CHIP_TONE_MUTED,
@@ -114,6 +113,7 @@ from auto_ext.ui.widgets.failure_chip import (
     Chip,
     PathLabel,
 )
+from auto_ext.ui.widgets.log_view import LogView
 from auto_ext.ui.widgets.result_card import (
     ResultCard,
     format_duration,

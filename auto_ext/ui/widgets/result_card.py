@@ -1811,16 +1811,8 @@ class ResultCard(QWidget):
             act_log = QAction("Open log file", menu)
             if log_path is None or not log_path.is_file():
                 act_log.setEnabled(False)
-                stage = (
-                    next(
-                        (
-                            s
-                            for s in (self._record.stages if self._record else [])
-                            if s.key == item.text(0)
-                        ),
-                        None,
-                    )
-                )
+                stages = self._record.stages if self._record is not None else []
+                stage = next((s for s in stages if s.key == item.text(0)), None)
                 act_log.setToolTip(
                     stage_log_target(self._run_dir, stage).why_not
                     if stage is not None

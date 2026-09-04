@@ -394,7 +394,9 @@ class RunListing:
     error: str | None = None
 
 
-def _index_entry(run_dir: Path, skipped: list[tuple[Path, str]] | None = None) -> RunIndexEntry | None:
+def _index_entry(
+    run_dir: Path, skipped: list[tuple[Path, str]] | None = None
+) -> RunIndexEntry | None:
     """Build an index row, or return ``None`` if this directory is not a run.
 
     Every ``None`` is also appended to ``skipped`` with its reason, so a caller
