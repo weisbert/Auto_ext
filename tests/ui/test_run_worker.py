@@ -109,3 +109,42 @@ def test_a_worker_error_is_reported_rather_than_killing_the_thread(
 
     assert "RuntimeError" in caught.args[0]
     assert "deck directory vanished" in caught.args[0]
+
+
+def test_the_worker_carries_continue_on_lvs_fail_into_the_run(
+    qtbot, worker_inputs, workarea: Path, tmp_path: Path
+) -> None:
+    """M-133/E-1. RunRequest had the value; nothing between it and the runner did.
+
+    ``CellsScreen._dispatch`` read the run bar's checkbox into ``RunRequest``
+    and then built a ``RunWorker`` without it, so the flag stopped there. The
+    worker takes it now, which is the half of the wiring that lives outside
+    the three files another session is rewriting -- see
+    ``scratchpad/handover_runbar.md`` for the caller's side.
+    """
+
+    from auto_ext.core.run_store import read_record
+
+    project, tasks, recipe, profile = worker_inputs
+    assert recipe.policy.continue_on_lvs_fail is False, "the fixture must differ"
+
+    root = tmp_path / "pr"
+    worker = RunWorker(
+        project=project,
+        batches=[RunBatch(recipe=recipe, tasks=tasks)],
+        stages=["si", "calibre"],
+        auto_ext_root=root,
+        workarea=workarea,
+        reporter=QtProgressReporter(),
+        cancel_token=CancelToken(),
+        profile=profile,
+        dry_run=True,
+        continue_on_lvs_fail=True,
+    )
+    with qtbot.waitSignal(worker.finished, timeout=15_000):
+        worker.start()
+
+    runs = sorted(
+        d for d in (root / "runs").iterdir() if d.is_dir() and d.name != "batches"
+    )
+    assert [read_record(d).continue_on_lvs_fail for d in runs] == [True] * len(runs)

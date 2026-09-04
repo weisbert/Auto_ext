@@ -81,6 +81,7 @@ class RunWorker(QThread):
         templates_root: Path | None = None,
         max_workers: int | None = None,
         dry_run: bool = False,
+        continue_on_lvs_fail: bool | None = None,
         layout_export_path: str | None = None,
     ) -> None:
         super().__init__()
@@ -99,6 +100,11 @@ class RunWorker(QThread):
         self._templates_root = templates_root
         self._max_workers = max_workers
         self._dry_run = dry_run
+        # ``None`` = "this dispatch has no opinion", and the recipe's policy
+        # decides. The run bar's checkbox should be the only owner; it is not
+        # passed by the caller yet, which is what makes the box a fake action
+        # today -- see scratchpad/handover_runbar.md and UX_VALIDATION 5.7.
+        self._continue_on_lvs_fail = continue_on_lvs_fail
         self._layout_export_path = layout_export_path
         self._summary: RunSummary | None = None
 
@@ -156,6 +162,7 @@ class RunWorker(QThread):
                     templates_root=self._templates_root,
                     max_workers=self._max_workers,
                     dry_run=self._dry_run,
+                    continue_on_lvs_fail=self._continue_on_lvs_fail,
                     layout_export_path=self._layout_export_path,
                     reporter=self._reporter,
                     cancel_token=self._cancel_token,

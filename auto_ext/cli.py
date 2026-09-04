@@ -164,7 +164,8 @@ def run(
     continue_on_lvs_fail: bool = typer.Option(
         False,
         "--continue-on-lvs-fail",
-        help="Force continue_on_lvs_fail=True on every task (overrides per-task config).",
+        help="Keep going past an LVS mismatch, whatever the recipe's policy "
+        "says. Omitted, the recipe decides.",
     ),
     layout_out: Optional[str] = typer.Option(
         None,
@@ -333,16 +334,6 @@ def run(
         recipe_search_path(auto_ext_root, config_dir, recipes_dir), recipe
     )
     recipe_obj: "Recipe" = loaded_recipe.recipe
-    if continue_on_lvs_fail:
-        # The runner reads recipe.policy, so the flag has to land there or it
-        # would do nothing.
-        recipe_obj = recipe_obj.model_copy(
-            update={
-                "policy": recipe_obj.policy.model_copy(
-                    update={"continue_on_lvs_fail": True}
-                )
-            }
-        )
     ref = recipe_obj.ref(source_path=loaded_recipe.path)
     typer.echo(
         f"recipe {ref.recipe_id} v{ref.version} "
@@ -428,6 +419,13 @@ def run(
             workarea=wa,
             verbose=verbose,
             dry_run=dry_run,
+            # A bare --flag cannot say "leave the recipe alone", so absent is
+            # None rather than False. Passed straight through since
+            # 2026-09-04; it used to be forced into a model_copy of the recipe
+            # because the runner read nothing else -- which also meant the
+            # recipe fingerprint on the run record described a recipe that is
+            # not the one on disk.
+            continue_on_lvs_fail=True if continue_on_lvs_fail else None,
             max_workers=jobs if jobs >= 2 else None,
             layout_export_path=layout_out,
             reporter=reporter,

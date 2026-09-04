@@ -2094,3 +2094,67 @@ def _si_context(project, task, profile, run_dir, workarea, env):
     )
 
 
+
+
+# ---- continue_on_lvs_fail: the caller's answer, with the recipe underneath ---
+
+
+def test_the_record_reports_the_continue_on_lvs_fail_that_was_actually_used(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """M-133. The run bar's tick box was read into RunRequest and dropped.
+
+    ``run_tasks`` only ever consulted ``recipe.policy``, so the checkbox above
+    the Run button changed nothing -- and the result card then told the user
+    "continue_on_lvs_fail: off" about a run where they had ticked it on. A
+    fake action plus a card that lies about it is worse than no control.
+
+    ``continue_on_lvs_fail`` is a parameter now. ``None`` keeps the recipe as
+    the fallback, and whatever was resolved is what the record reports, so the
+    card cannot disagree with the run.
+    """
+
+    project, tasks = _load(project_tools_config)
+
+    on = tmp_path / "asked_on"
+    run_tasks(
+        project, tasks, stages=["calibre"],
+        auto_ext_root=on, workarea=workarea,
+        recipe=_recipe(policy={"continue_on_lvs_fail": False}),
+        profile=_profile(workarea), dry_run=True,
+        continue_on_lvs_fail=True,
+    )
+    assert read_record(_only_run_dir(on)).continue_on_lvs_fail is True
+
+    off = tmp_path / "asked_off"
+    run_tasks(
+        project, tasks, stages=["calibre"],
+        auto_ext_root=off, workarea=workarea,
+        recipe=_recipe(policy={"continue_on_lvs_fail": True}),
+        profile=_profile(workarea), dry_run=True,
+        continue_on_lvs_fail=False,
+    )
+    assert read_record(_only_run_dir(off)).continue_on_lvs_fail is False
+
+
+def test_not_asking_leaves_the_recipe_policy_in_charge(
+    project_tools_config: Path, workarea: Path, tmp_path: Path
+) -> None:
+    """The transitional half, and it has to keep working.
+
+    The run bar's box is not wired into the dispatch yet (the screen that owns
+    it is being rewritten elsewhere), and the CLI flag is a bare ``--flag``
+    that cannot express "no opinion". ``None`` is what both of those pass
+    while they mean nothing in particular, and it must not silently overrule
+    a recipe that says True.
+    """
+
+    project, tasks = _load(project_tools_config)
+    root = tmp_path / "no_opinion"
+    run_tasks(
+        project, tasks, stages=["calibre"],
+        auto_ext_root=root, workarea=workarea,
+        recipe=_recipe(policy={"continue_on_lvs_fail": True}),
+        profile=_profile(workarea), dry_run=True,
+    )
+    assert read_record(_only_run_dir(root)).continue_on_lvs_fail is True

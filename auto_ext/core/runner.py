@@ -52,10 +52,12 @@ Failure handling (identical in both modes):
 - Stage raises :class:`AutoExtError` → that stage is marked failed,
   remaining stages for the task are skipped, runner continues with the
   next task (or the other workers, in parallel mode).
-- ``calibre`` stage returning ``success=False``: if the recipe's
-  ``policy.continue_on_lvs_fail`` is True, log a warning and proceed to the
-  next stage. Otherwise skip remaining stages for this task (same as a
-  generic failure).
+- ``calibre`` stage returning ``success=False``: if this dispatch's
+  ``continue_on_lvs_fail`` is True -- the caller's argument, falling back to
+  ``recipe.policy.continue_on_lvs_fail`` when the caller passes ``None`` --
+  log a warning and proceed to the next stage. Otherwise skip remaining
+  stages for this task (same as a generic failure). The resolved value is
+  what ``RunRecord.continue_on_lvs_fail`` reports.
 - Any other stage returning ``success=False``: skip remaining stages for
   this task.
 - ``jivaro`` runs iff ``jivaro`` is in the requested stages. There is no
@@ -367,6 +369,7 @@ def run_tasks(
     profile: PdkProfile,
     verbose: bool = False,
     dry_run: bool = False,
+    continue_on_lvs_fail: bool | None = None,
     max_workers: int | None = None,
     reporter: ProgressReporter | None = None,
     cancel_token: CancelToken | None = None,
@@ -399,6 +402,17 @@ def run_tasks(
     serially (cwd = ``workarea``, si.env swapped via
     :func:`serial_workdir`); ``>= 2`` runs tasks on a thread pool, each
     task isolated under its own ``runs/<run_id>/work/``.
+
+    ``continue_on_lvs_fail`` is this dispatch's answer to "keep going past an
+    LVS mismatch". ``None`` means the caller has no opinion and
+    ``recipe.policy.continue_on_lvs_fail`` decides, which is the transitional
+    state: it is a decision about *this attempt*, so the run bar should own
+    it outright, and the recipe row survives only until the bar's checkbox is
+    wired into the dispatch (``docs/refactor/UX_VALIDATION.md`` section 5.7).
+    Whatever is resolved here is what ``RunRecord.continue_on_lvs_fail``
+    records, so the result card cannot report a different answer from the one
+    the run used -- which is precisely what it did while the GUI checkbox was
+    read into ``RunRequest`` and then dropped.
 
     ``reporter`` / ``cancel_token`` default to a :class:`NullReporter`
     and a fresh :class:`CancelToken` that is never set — same blocking
@@ -508,6 +522,7 @@ def run_tasks(
             pipeline=pipeline,
             verbose=verbose,
             dry_run=dry_run,
+            continue_on_lvs_fail=continue_on_lvs_fail,
             parallel=parallel,
             max_workers=max_workers or 1,
             batch_id=batch_id,
@@ -728,6 +743,7 @@ def _run_single_task(
     pipeline: RecipePipeline,
     verbose: bool,
     dry_run: bool,
+    continue_on_lvs_fail: bool | None = None,
     parallel: bool = False,
     max_workers: int,
     batch_id: str | None,
@@ -796,7 +812,15 @@ def _run_single_task(
 
     exec_ctx = _TaskExecCtx(cwd=cwd, run_dir=run_dir, paths=paths, parallel=parallel)
     active_stages = [step.key for step in steps]
-    continue_on_lvs_fail = pipeline.recipe.policy.continue_on_lvs_fail
+    # The caller's answer wins; the recipe is the fallback while the run bar's
+    # checkbox is still being wired up. Resolved once, here, so the value the
+    # stage loop honours and the value the record reports are the same object
+    # -- the card used to read the recipe while the user had ticked the bar.
+    effective_continue = (
+        pipeline.recipe.policy.continue_on_lvs_fail
+        if continue_on_lvs_fail is None
+        else continue_on_lvs_fail
+    )
 
     base_fields: dict[str, Any] = {
         "run_id": run_id,
@@ -807,7 +831,7 @@ def _run_single_task(
         "recipe": recipe,
         "requested_stages": active_stages,
         "dry_run": dry_run,
-        "continue_on_lvs_fail": continue_on_lvs_fail,
+        "continue_on_lvs_fail": effective_continue,
         "max_workers": max_workers,
         "workspace_dir": str(context["output_dir"]),
         "intermediate_dir": _opt_str(context.get("intermediate_dir")),
@@ -872,7 +896,7 @@ def _run_single_task(
                 subprocess_env=subprocess_env,
                 tools=tools,
                 pipeline=pipeline,
-                continue_on_lvs_fail=continue_on_lvs_fail,
+                continue_on_lvs_fail=effective_continue,
                 dry_run=dry_run,
                 cancel_token=cancel_token,
                 reporter=reporter,
