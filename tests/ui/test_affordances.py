@@ -108,12 +108,6 @@ PRESSABLE: tuple[tuple[type, tuple[str, ...]], ...] = (
 #: receiver. Reasons that start with "M-nn open" are **not** decisions -- they
 #: are ledger rows whose fix will delete the entry.
 AFFORDANCE_EXEMPT: dict[str, str] = {
-    "result_card:_runset_line": (
-        "M-52 open, not a decision: this one is filled with set_path, so it "
-        "paints itself in the accent colour and takes a pointing-hand cursor "
-        "-- and nothing connects its clicked. The artifact grid two rows down "
-        "wires the identical widget. Deleting this entry is the fix"
-    ),
     "result_card:_launch_line": (
         "by design: filled with set_placeholder, which leaves the path None, "
         "so the label stays in the secondary colour and keeps the arrow "
@@ -126,6 +120,12 @@ AFFORDANCE_EXEMPT: dict[str, str] = {
     "runs_screen:_detail_meta": (
         "by design: set_placeholder only, and what it holds is the cell and "
         "the timestamp -- there is nothing for a press to open"
+    ),
+    "runs_screen:_log_title": (
+        "by design: set_placeholder only, so it stays in the secondary colour "
+        "and keeps the arrow cursor. It is the heading of the built-in log "
+        "viewer and names the file whose text is in the pane directly below "
+        "it -- there is nothing left for a press to reveal"
     ),
     "setup_drawer:SetupDrawer/PathLabel": (
         "by design: every check row uses set_placeholder to show what the "
@@ -512,14 +512,9 @@ def card(runs):
     return runs.result_card
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "M-26 open: show_lvs_detail is only ensureWidgetVisible on a band that "
-        "is already the first child of the scroll, so with a range of 0 the "
-        "labelled button is decoration"
-    ),
-)
+# M-26 is FIXED: show_lvs_detail keeps the scroll for the case where it helps
+# and additionally washes the LVS band in the accent tint for LVS_HIGHLIGHT_MS,
+# so the destination is visible on a card with a scroll range of zero too.
 def test_show_discrepancies_does_something_when_the_card_cannot_scroll(
     card, qtbot
 ) -> None:
@@ -592,14 +587,8 @@ def test_refresh_says_something_new_when_the_directory_has_not_changed(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "M-20 open: RunsScreen opens the path itself and then re-emits, and "
-        "MainWindow connects that signal to a second open_in_os -- the guard "
-        "the module already owns (_delegated) is used only by the hand-off"
-    ),
-)
+# M-20 is FIXED: RunsScreen now asks _delegated whether the host is listening
+# before it opens anything itself, so one press is one editor.
 def test_one_press_on_a_log_launches_exactly_one_editor(
     card, monkeypatch: pytest.MonkeyPatch, qtbot
 ) -> None:
@@ -667,14 +656,10 @@ def test_choosing_a_run_swaps_the_empty_pane_for_the_card(runs, qtbot) -> None:
     assert runs.result_card.isVisible()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "M-52 open: the runset row is a PathLabel filled with set_path, so it "
-        "styles itself as a link and takes a hand cursor, and nothing "
-        "connects its clicked -- the artifact grid wires the identical widget"
-    ),
-)
+# M-52 is FIXED: _runset_line.clicked is connected to artifact_requested, the
+# same receiver the artifact grid's identical widget already had. Its
+# AFFORDANCE_EXEMPT entry is gone with it -- deleting that entry was the fix
+# the entry itself named.
 def test_the_runset_path_opens_the_file_it_points_at(card, tmp_path, qtbot) -> None:
     """A press on a link-coloured path must carry a path that is really there.
 
@@ -697,14 +682,8 @@ def test_the_runset_path_opens_the_file_it_points_at(card, tmp_path, qtbot) -> N
     assert Path(blocker.args[0]).exists()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "M-62 open: _on_list_menu reads itemAt(pos) without moving the "
-        "selection, so the menu acts on one run while the card on the right "
-        "still shows another"
-    ),
-)
+# M-62 is FIXED: _on_list_menu makes the row under the cursor the selected row
+# before it builds the menu, the way CellsScreen already did.
 def test_the_context_menu_acts_on_the_row_that_was_right_clicked(
     window, runs_root: Path, make_run_record, frozen_clock, qtbot
 ) -> None:
