@@ -131,6 +131,8 @@ __all__ = [
     "RunPolicy",
     "TemplatePatch",
     "dump_recipe_yaml",
+    "RETIRED_RECIPE_FIELDS",
+    "RETIRED_RESOURCE_FIELDS",
     "load_recipe",
     "load_recipe_with_raw",
     "offered_extract_types",
@@ -138,6 +140,8 @@ __all__ = [
     "recipe_filename",
     "recipe_from_catalog",
     "save_recipe",
+    "upgrade_retired_fields",
+    "upgrade_retired_resource_fields",
 ]
 
 RECIPE_SCHEMA_VERSION = 1
@@ -165,13 +169,14 @@ PROFILE_FALLBACK_FIELDS: frozenset[str] = frozenset(
 #: is separate because the resolution needs the cell row, not the profile, and
 #: therefore happens in :func:`auto_ext.core.render._recipe_tree` against the
 #: ``DutSnapshot`` rather than in ``resolve_corner``.
-DUT_FALLBACK_FIELDS: frozenset[str] = frozenset(
-    {
-        #: "the view Quantus just wrote" -- the cell's ``out_file``. See the
-        #: field's own comment for why the old literal was a bug.
-        "reduction.views_to_reduce",
-    }
-)
+#:
+#: **Empty since 2026-09-04.** Its only member was
+#: ``reduction.views_to_reduce``, and a fallback is still two copies of one
+#: concept -- one of them merely usually unset. The ONE CONCEPT, ONE OWNER
+#: ruling collapsed it into the cell's ``out_file``, which the render tree now
+#: supplies unconditionally. The set stays as the place the next such field
+#: would be declared, and empty is the statement that there is not one.
+DUT_FALLBACK_FIELDS: frozenset[str] = frozenset()
 
 #: Recipe fields with no catalog row *that binds to them*, and why. Everything
 #: else must have one. Two shapes qualify: a field the catalog has never
@@ -790,7 +795,15 @@ class ReductionSettings(Base):
     device models moved to ``PdkProfile.parasitics``.
     """
 
-    enabled: bool = False
+    #: ``enabled`` is GONE since 2026-09-04. It was half of an AND nobody
+    #: could see: the runner ran the reduction only when this flag was true
+    #: *and* ``jivaro`` was in ``recipe.stages``, and either one false skipped
+    #: the stage in silence, from two different sections of the same form.
+    #: Under ONE CONCEPT, ONE OWNER the jivaro stage is a run-time decision,
+    #: so it is the run bar's tick box alone: jivaro runs iff jivaro is
+    #: requested. What stays here is what Jivaro is *given* once it runs.
+    #: :func:`upgrade_retired_fields` drops it from recipes on disk.
+
     #: The template carried ``| default(14)`` / ``| default(2)`` fallbacks;
     #: those go away and these defaults take the job.
     frequency_limit_ghz: AsWritten = 14.0
@@ -799,40 +812,24 @@ class ReductionSettings(Base):
     reduce_floating_nets: bool = False
     decoupling_auto_threshold: bool = False
     log_verbose_level: str = "trace"
-    #: Which view Jivaro reduces. ``None`` -- the default -- means "the view
-    #: Quantus just wrote", i.e. the cell's ``out_file``, which is also what
-    #: ``inputView`` and Quantus ``-view_name`` already use.
+    #: ``views_to_reduce`` is GONE since 2026-09-04. Which view Jivaro reduces
+    #: is the cell's ``out_file`` and nothing else -- that was the 2026-08-24
+    #: ruling, and this field was the way back to the bug it closed. Its null
+    #: default already resolved to the DUT, but a *typed* value still won for
+    #: Jivaro alone while Quantus went on writing ``out_file``, so one
+    #: keystroke on the Recipes form re-created "Jivaro pointed at a view that
+    #: does not exist". The three real recipes on the red-zone disk carry
+    #: ``views_to_reduce: av_extracted`` to this day; the load-time drop in
+    #: :func:`upgrade_retired_fields` is what finally clears them.
     #:
-    #: RESOLVED 2026-08-24. This was the catalog's most suspicious row: it
-    #: held the separate literal ``"av_extracted"`` while both shipped task
-    #: tables set ``out_file`` to ``"av_ext"``, so Jivaro was being pointed at
-    #: a view that does not exist. In a run that has just extracted, the view
-    #: to reduce is *necessarily* the extraction output, so the two cannot
-    #: legitimately differ and the literal was never a setting.
-    #:
-    #: It stays overridable rather than being deleted: reducing a view some
-    #: earlier run produced, without re-extracting, is the one case where an
-    #: explicit name is right. Set it and it wins; leave it unset and it
-    #: follows the DUT. :func:`auto_ext.core.render._recipe_tree` resolves it.
-    views_to_reduce: str | None = None
+    #: The one case it was kept for -- reducing a view an earlier run produced,
+    #: with no extraction this time -- is a run over a cell whose ``out_file``
+    #: already names that view. It needs a cell row, not a recipe field.
+
     #: ``outputView`` = ``out_file`` + this. The reduced view is the one
-    #: post-layout simulation actually runs on, so its name matters.
+    #: post-layout simulation actually runs on, so its name matters. NOT a
+    #: second copy of the output view: it names a different artefact.
     output_view_suffix: str = "_red"
-
-    @field_validator("views_to_reduce", mode="before")
-    @classmethod
-    def _blank_to_none(cls, value: Any) -> Any:
-        """``""`` means unset, not a view called the empty string.
-
-        A GUI that clears a text box writes ``""``, and ``""`` stored here
-        would defeat the DUT fallback in
-        :func:`auto_ext.core.render._recipe_tree` and render an empty
-        ``viewsToReduce``. Same rule ``CellEntry`` applies to ``out_file``.
-        """
-
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
 
 
 class RunPolicy(Base):
@@ -880,8 +877,14 @@ class ResourceProfile(Base):
     quantus_cpu_count: int = Field(default=1, ge=1)
     #: Jivaro ``<cpu>``.
     reduction_cpu: int = Field(default=1, ge=1)
-    #: How many runs execute at once (CLI ``--jobs`` overrides per invocation).
-    max_workers: int = Field(default=1, ge=1)
+    #: ``max_workers`` is GONE since 2026-09-04. It was persisted here and
+    #: read by **nothing**: how many runs execute at once has only ever come
+    #: from the caller's argument -- the run bar's ``jobs`` spin box or the
+    #: CLI's ``--jobs`` -- and its own comment conceded as much by saying
+    #: ``--jobs`` overrode it. A copy with zero owners is the degenerate case
+    #: of the ONE CONCEPT, ONE OWNER ruler, and the honest fix is to delete it
+    #: rather than to wire a fourth thing into the parallelism decision.
+    #: :func:`upgrade_retired_resource_fields` drops it from files on disk.
 
 
 # ---- the recipe -------------------------------------------------------------
@@ -909,10 +912,14 @@ class Recipe(Base):
     #: Lineage for "save as". Replaces the preset concept.
     derived_from: Slug | None = None
 
-    #: Which stages this recipe intends to run. Replaces CLI ``--stage`` as a
-    #: persisted default; a CLI flag may still narrow it for one invocation,
-    #: and the narrowed set is what ``RunRecord.requested_stages`` records.
-    stages: list[Stage] = Field(default_factory=lambda: list(STAGE_ORDER))
+    #: ``stages`` is GONE since 2026-09-04, by the owner's ruling: *"which
+    #: stages to run appears on both screens -- the stage selector should own
+    #: it"*. It was a second copy of a decision the run bar and ``--stages``
+    #: already make, and the runner intersected the two **silently** -- a
+    #: stage ticked on the bar but missing from the recipe simply did not run,
+    #: with no line anywhere. The run bar is what a user sees first, it sits
+    #: above the Run button, and it is where a decision about *this attempt*
+    #: belongs. :func:`upgrade_retired_fields` drops it from recipes on disk.
 
     netlist: NetlistSettings = Field(default_factory=NetlistSettings)
     lvs: LvsSettings = Field(default_factory=LvsSettings)
@@ -930,10 +937,6 @@ class Recipe(Base):
 
     @model_validator(mode="after")
     def _check(self) -> Recipe:
-        if not self.stages:
-            raise ValueError("recipe.stages must not be empty")
-        if len(set(self.stages)) != len(self.stages):
-            raise ValueError(f"recipe.stages has duplicates: {[s.value for s in self.stages]}")
         keys = [(p.stage, p.template_id) for p in self.patches]
         if len(keys) != len(set(keys)):
             raise ValueError(
@@ -941,35 +944,13 @@ class Recipe(Base):
             )
         return self
 
-    @model_validator(mode="after")
-    def _check_qrc_query_feeds_quantus(self) -> Recipe:
-        """Quantus reads what the LVS query trigger writes, so it must run.
-
-        ``lvs.run_qrc_query`` gates the Calibre post-trigger
-        ``calibre -query_input <deck>/query_cmd -query svdb``, which is the
-        only thing that fills ``<output_dir>/query_output``. Both Quantus
-        decks point at that directory unconditionally -- ``input_db
-        -directory_name``, ``-layer_map_file .../Design.gds.map``,
-        ``-device_properties_file .../Design.props`` -- so turning the trigger
-        off while quantus is staged sends Quantus after three files nobody
-        wrote. It does not fail early either: si and Calibre run first, and
-        the crash lands at the last stage, hours in.
-
-        The knob is refused in this combination rather than removed, because
-        its whole point is an LVS-only pass that does not pay for the
-        query_output dump; that recipe is still legal, it just may not also
-        name quantus.
-        """
-
-        if self.lvs.run_qrc_query or Stage.QUANTUS not in self.stages:
-            return self
-        raise ValueError(
-            "recipe.lvs.run_qrc_query is off while 'quantus' is in recipe.stages. "
-            "The query trigger it disables is what writes <output_dir>/query_output, "
-            "and both Quantus decks read Design.gds.map and Design.props out of "
-            "that directory. Either turn run_qrc_query back on, or drop quantus "
-            "from stages for this LVS-only recipe."
-        )
+    # ``_check_qrc_query_feeds_quantus`` used to live here. It keyed on
+    # ``stages``, which the recipe no longer has, so the check moved to where
+    # the requested stage set actually exists: a runner pre-flight
+    # (``auto_ext.core.runner._validate_qrc_query_feeds_quantus``), refused
+    # before a run directory is created and carrying the same message. The
+    # combination it refuses has not become legal -- it has one home instead
+    # of two.
 
     # -- derived --------------------------------------------------------
 
@@ -1020,6 +1001,7 @@ class Recipe(Base):
         templates: dict[str, str] | None = None,
         dspf_out_path: str | None = None,
         paths: dict[str, str] | None = None,
+        jivaro_enabled: bool = False,
     ) -> RecipeSnapshot:
         """Convert to the S1 :class:`~auto_ext.model.run.RecipeSnapshot`.
 
@@ -1032,6 +1014,14 @@ class Recipe(Base):
         recipe-driven run stays comparable with a knob-driven one. ``templates``
         / ``dspf_out_path`` / ``paths`` are not recipe facts (they belong to
         the catalog, the workspace and the profile) and are passed in.
+
+        ``jivaro_enabled`` joined them on 2026-09-04. The S1 snapshot has a
+        ``JivaroSnapshot.enabled`` slot and readers depend on it, but "is the
+        reduction on" stopped being a recipe fact that day: it is whether the
+        dispatch asked for the jivaro stage. The runner passes what it
+        actually did, so the snapshot keeps meaning what it always claimed to
+        mean -- *effective* settings for this run -- rather than echoing a
+        field that no longer decides anything.
         """
 
         return RecipeSnapshot(
@@ -1057,7 +1047,7 @@ class Recipe(Base):
                 },
             },
             jivaro=JivaroSnapshot(
-                enabled=self.reduction.enabled,
+                enabled=jivaro_enabled,
                 frequency_limit=self.reduction.frequency_limit_ghz,
                 error_max=self.reduction.error_max_pct,
             ),
@@ -1207,6 +1197,21 @@ def load_recipe_with_raw(path: Path) -> tuple[Recipe, Any]:
             raw_extraction.pop("extract_type", None)
             raw_extraction.pop("selection", None)
             raw_extraction["extract"] = payload["extraction"]["extract"]
+    retired = upgrade_retired_fields(payload)
+    if retired:
+        logger.info(
+            "%s: dropped %s -- 2026-09-04 ownership ruling, the run bar and "
+            "the cell row own these now",
+            path,
+            ", ".join(f"{key} ({_shown(value)})" for key, value in retired.items()),
+        )
+        # A narrowed ``stages`` was an intent, so it is named rather than
+        # dropped in silence -- see :func:`upgrade_retired_fields`. The
+        # comment-carrying tree has to follow the payload here for the same
+        # reason as below, and it also takes the retired key's own comment
+        # with it, which would otherwise outlive the field it explained.
+        for dotted in retired:
+            _pop_path(data, dotted)
     moved = upgrade_three_state_payload(payload)
     if moved:
         logger.info(
@@ -1314,6 +1319,99 @@ def upgrade_three_state_payload(payload: Any) -> list[str]:
             common[key] = "true" if common[key] else "false"
             moved.append(key)
     return moved
+
+
+#: Recipe fields the 2026-09-04 ONE CONCEPT, ONE OWNER ruling retired, and who
+#: owns the concept instead. Dotted paths, dropped on load in this order.
+#:
+#: Each one was a *second* copy of a decision another surface already made,
+#: and in all three cases the runner combined the two silently -- the failure
+#: mode this project exists to remove. They are dropped rather than validated
+#: away because ``Base`` forbids extra keys: leaving them would make every
+#: recipe on the red-zone disk fail to load, which is precisely the 2026-08-28
+#: red-zone outage (every recipe refused, empty list, no explanation).
+RETIRED_RECIPE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("stages", "the run bar's stage tick boxes / CLI --stage"),
+    ("reduction.enabled", "the run bar's jivaro tick box"),
+    ("reduction.views_to_reduce", "the cell row's out_file"),
+)
+
+#: The same, for :class:`ResourceProfile`. ``max_workers`` had zero owners --
+#: nothing ever read it -- so there is not even a silent combination to point
+#: at, only a persisted number that never did anything.
+RETIRED_RESOURCE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("max_workers", "the run bar's jobs spin box / CLI --jobs"),
+)
+
+
+def _shown(value: Any) -> str:
+    """A dropped value as the log line should name it."""
+
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value) or "empty"
+    return str(value)
+
+
+def _pop_path(tree: Any, dotted: str) -> Any:
+    """Remove ``dotted`` from a nested mapping, returning what was there."""
+
+    parts = dotted.split(".")
+    for part in parts[:-1]:
+        if not isinstance(tree, dict):
+            return None
+        tree = tree.get(part)
+    if not isinstance(tree, dict):
+        return None
+    return tree.pop(parts[-1], None)
+
+
+def upgrade_retired_fields(payload: Any) -> dict[str, Any]:
+    """Drop the fields the 2026-09-04 ownership ruling took off the Recipe.
+
+    In place, on load, without stopping to ask -- the same policy as
+    :func:`upgrade_three_state_payload`, and for the same reason. Returns
+    ``{dotted path: the value that was there}`` so the caller can name each
+    one in the log.
+
+    *Silent means "does not stop to ask", not "leaves no trace".* A narrowed
+    ``stages: [si, calibre]`` was somebody's intent, and dropping it without a
+    word is the silent-wrong-answer this project exists to remove -- so the
+    caller's line carries the set, and the run bar seeds from it the first
+    time that project is opened (``docs/refactor/UX_VALIDATION.md`` 5.7).
+
+    A field that is simply absent is not reported: only a file that actually
+    carried the old key produces a log line.
+    """
+
+    if not isinstance(payload, dict):
+        return {}
+    dropped: dict[str, Any] = {}
+    for dotted, _owner in RETIRED_RECIPE_FIELDS:
+        parts = dotted.split(".")
+        parent: Any = payload
+        for part in parts[:-1]:
+            parent = parent.get(part) if isinstance(parent, dict) else None
+        if isinstance(parent, dict) and parts[-1] in parent:
+            dropped[dotted] = parent.pop(parts[-1])
+    return dropped
+
+
+def upgrade_retired_resource_fields(payload: Any) -> dict[str, Any]:
+    """The :class:`ResourceProfile` half of :func:`upgrade_retired_fields`.
+
+    ``config/resources.yaml`` is written by ``auto-ext migrate`` and by the
+    new-project wizard, so every deployed copy carries ``max_workers: 1``.
+    Refusing those files would be a worse answer than dropping a number
+    nothing ever read.
+    """
+
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        name: payload.pop(name)
+        for name, _owner in RETIRED_RESOURCE_FIELDS
+        if name in payload
+    }
 
 
 def _merge_into(target: Any, source: Any) -> Any:

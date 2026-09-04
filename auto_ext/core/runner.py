@@ -58,8 +58,10 @@ Failure handling (identical in both modes):
   generic failure).
 - Any other stage returning ``success=False``: skip remaining stages for
   this task.
-- ``jivaro`` stage is silently skipped (not failed) when
-  ``recipe.reduction.enabled`` is False.
+- ``jivaro`` runs iff ``jivaro`` is in the requested stages. There is no
+  second switch: ``recipe.reduction.enabled`` was retired on 2026-09-04
+  because ticking the stage and leaving the flag alone skipped the reduction
+  in silence.
 
 Observability:
 
@@ -301,10 +303,14 @@ class RecipePipeline:
     corner literal              ``PdkProfile.corners`` lookup
     manual edits                ``Recipe.patches``
     quantus invocations         one per ``output.emit``
-    stage set                   ``recipe.stages`` ∩ the caller's ``stages``
-    jivaro on/off               ``recipe.reduction.enabled``
-    continue on LVS fail        ``recipe.policy.continue_on_lvs_fail``
+    stage set                   the caller's ``stages``, and nothing else
+    jivaro on/off               ``jivaro`` being in the caller's ``stages``
+    continue on LVS fail        the caller's, falling back to the recipe
     ==========================  ==============================================
+
+    The last three rows changed on 2026-09-04 (ONE CONCEPT, ONE OWNER): each
+    of them used to have a recipe copy that the runner combined with the
+    caller's answer, and every combination was silent.
     """
 
     recipe: Recipe
@@ -374,8 +380,12 @@ def run_tasks(
     Pre-flight:
 
     - Validates ``stages`` (must be a non-empty subset of :data:`STAGE_ORDER`).
-    - If ``jivaro`` is among ``stages`` and the recipe enables reduction, every
-      task must have ``out_file`` set, else :class:`ConfigError`.
+      It is the *only* stage input: the recipe stopped carrying a second list
+      on 2026-09-04, so nothing narrows what the caller asked for.
+    - If ``quantus`` is among ``stages``, the recipe's ``lvs.run_qrc_query``
+      must be on -- Quantus reads what that trigger writes.
+    - If ``jivaro`` is among ``stages``, every task must have ``out_file``
+      set, else :class:`ConfigError`.
     - Checks whether tasks share a resolved ``extraction_output_dir``. In
       serial that is legal (the workspace is reused, not contended) and only
       logged; in parallel it is refused, because two concurrent tasks writing
@@ -411,7 +421,7 @@ def run_tasks(
     )
 
     _validate_stages(stages)
-    _validate_stage_overlap(stages, pipeline=pipeline)
+    _validate_qrc_query_feeds_quantus(stages, pipeline=pipeline)
     _validate_tasks(tasks, stages, pipeline=pipeline)
     if layout_export_path is not None:
         layout_export_path = _validate_layout_export(layout_export_path, stages, tasks)
@@ -928,7 +938,6 @@ def _execute_stages(
 
     abort = False
     cancel_seen = False  # once set: first stage marked CANCELLED, rest SKIPPED
-    jivaro_enabled = pipeline.recipe.reduction.enabled
 
     for step in steps:
         stage = step.stage
@@ -950,13 +959,11 @@ def _execute_stages(
             )
             continue
 
-        if stage == "jivaro" and not jivaro_enabled:
-            _append_synthetic_stage(
-                task_result, reporter, task.task_id, step,
-                StageStatus.SKIPPED, "jivaro disabled in recipe", run_dir=run_dir,
-            )
-            continue
-
+        # There is no second jivaro switch any more. Until 2026-09-04 this
+        # loop also consulted ``recipe.reduction.enabled`` and skipped the
+        # stage when it was false -- so ticking jivaro on the run bar and
+        # leaving a flag alone in a different section of the Recipes form got
+        # no reduction and no complaint. Jivaro runs iff jivaro is requested.
         if abort:
             _append_synthetic_stage(
                 task_result, reporter, task.task_id, step,
@@ -1297,10 +1304,12 @@ def _run_single_stage(
 def _recipe_steps(pipeline: RecipePipeline, stages: list[str]) -> list[_Step]:
     """Expand a Recipe into the ordered list of steps this run executes.
 
-    The stage set is ``recipe.stages`` intersected with the caller's ``stages``
-    (the CLI's ``--stage``), so a recipe that declares no jivaro stage cannot
-    be talked into running one, and ``--stage calibre`` still narrows a
-    five-stage recipe to one stage.
+    The stage set is the caller's ``stages`` -- the run bar's tick boxes or
+    the CLI's ``--stage`` -- and nothing else. Until 2026-09-04 it was that
+    set intersected with ``recipe.stages``, twice (here and in
+    :func:`~auto_ext.core.render.plan_targets`), and the intersection was
+    silent: a stage the user ticked and the recipe did not name just did not
+    run. One decision, one owner, and the owner is the stage selector.
 
     ``strmout`` is added by hand: it renders nothing, so
     :func:`auto_ext.core.render.plan_targets` has no target to report for it,
@@ -1323,8 +1332,6 @@ def _recipe_steps(pipeline: RecipePipeline, stages: list[str]) -> list[_Step]:
     steps: list[_Step] = []
     for stage in STAGE_ORDER:
         if stage not in stages:
-            continue
-        if Stage(stage) not in pipeline.recipe.stages:
             continue
         targets = by_stage.get(stage)
         if targets:
@@ -1515,6 +1522,9 @@ def _recipe_snapshot_from_recipe(
         templates=templates,
         dspf_out_path=project.dspf_out_path,
         paths=paths,
+        # What this run is actually doing, which since 2026-09-04 is the only
+        # thing "reduction on" can mean: the jivaro step is in the plan.
+        jivaro_enabled=any(step.stage == "jivaro" for step in steps),
     )
 
 
@@ -2037,8 +2047,31 @@ def _validate_layout_export(
 
 
 def _validate_stages(stages: list[str]) -> None:
+    """Refuse a dispatch that would run nothing, and say which side is empty.
+
+    This is what M-23 became. Until 2026-09-04 an empty run could also arise
+    from an *intersection*: the caller's stages against ``recipe.stages``,
+    with nothing in common. That run used to be legal -- it claimed a run
+    directory, took the workspace lock, executed nothing, and
+    ``_compute_overall`` found no failure and returned PASSED. A green
+    "PASSED" over an empty stage strip is the worst answer available, because
+    the one thing the user came for ("did my cell extract?") is answered yes
+    by a run that never looked.
+
+    The recipe side is gone, so only one way to ask for nothing survives:
+    asking for nothing. It is refused *here*, before a run directory exists,
+    and the message names the requested set rather than saying "empty", so a
+    caller that computed the set can see what it computed. The GUI covers its
+    own side earlier and better -- the Run button is disabled at zero ticked
+    stages -- which leaves this for the CLI and for anything programmatic.
+    """
+
     if not stages:
-        raise ConfigError("stages list is empty")
+        raise ConfigError(
+            "the requested stage set is empty, so nothing would run and "
+            "nothing is started. Tick at least one stage on the run bar, or "
+            f"pass --stage with one of {list(STAGE_ORDER)}."
+        )
     unknown = set(stages) - set(STAGE_ORDER)
     if unknown:
         raise ConfigError(
@@ -2046,36 +2079,37 @@ def _validate_stages(stages: list[str]) -> None:
         )
 
 
-def _validate_stage_overlap(stages: list[str], *, pipeline: RecipePipeline) -> None:
-    """Refuse a dispatch whose stage set the recipe cannot honour at all.
+def _validate_qrc_query_feeds_quantus(
+    stages: list[str], *, pipeline: RecipePipeline
+) -> None:
+    """Quantus reads what the LVS query trigger writes, so it must run.
 
-    ``_recipe_steps`` intersects the caller's ``stages`` with
-    ``recipe.stages``, and that intersection can be **empty** -- tick only
-    ``jivaro`` for a recipe that stops at calibre and there is nothing to run.
-    An empty run used to be legal: it claimed a run directory, took the
-    workspace lock, executed nothing, and ``_compute_overall`` found no
-    failure and returned PASSED. A green "PASSED" over an empty stage strip is
-    the worst answer available, because the one thing the user came for --
-    "did my cell extract?" -- is answered yes by a run that never looked.
+    ``lvs.run_qrc_query`` gates the Calibre post-trigger ``calibre
+    -query_input <deck>/query_cmd -query svdb``, which is the only thing that
+    fills ``<output_dir>/query_output``. Both Quantus decks point at that
+    directory unconditionally -- ``input_db -directory_name``,
+    ``-layer_map_file .../Design.gds.map``, ``-device_properties_file
+    .../Design.props`` -- so turning the trigger off while quantus is
+    requested sends Quantus after three files nobody wrote. It does not fail
+    early either: si and Calibre run first, and the crash lands at the last
+    stage, hours in.
 
-    Refused rather than warned, and refused *here*, before a run directory
-    exists: an empty run is never what the user meant, and the two stage lists
-    are both in hand at dispatch time, so the message can name each side and
-    let the user decide which one to change. (Warning instead would leave a
-    run in the history whose only content is the warning -- the same fake
-    action wearing a different colour. The owner can overrule this; it is a
-    contract decision, not a technical one.)
+    This was a ``Recipe`` model validator until 2026-09-04. It keyed on
+    ``recipe.stages``, which no longer exists, so it moved to the one place
+    the requested stage set is in hand -- and it is a better home: a recipe
+    with ``run_qrc_query`` off is perfectly legal on its own, and what is
+    refused is the *dispatch* that pairs it with quantus. Refused before a run
+    directory exists, naming both sides so the user can pick which to change.
     """
 
-    declared = {s.value for s in pipeline.recipe.stages}
-    if declared & set(stages):
+    if pipeline.recipe.lvs.run_qrc_query or Stage.QUANTUS.value not in stages:
         return
     raise ConfigError(
-        f"none of the requested stage(s) {sorted(set(stages))} are in recipe "
-        f"{pipeline.recipe.recipe_id!r}, which declares "
-        f"{[s for s in STAGE_ORDER if s in declared]}. Nothing would run, so "
-        "nothing is started: either pick a stage the recipe declares, or add "
-        "the stage to the recipe."
+        f"recipe {pipeline.recipe.recipe_id!r} has lvs.run_qrc_query off while "
+        "'quantus' is in the requested stages. The query trigger it disables is "
+        "what writes <output_dir>/query_output, and both Quantus decks read "
+        "Design.gds.map and Design.props out of that directory. Either turn "
+        "run_qrc_query back on, or untick quantus for this LVS-only run."
     )
 
 
@@ -2088,24 +2122,24 @@ def _validate_tasks(
     """Refuse a dispatch that cannot produce a valid jivaro input.
 
     ``inputView`` is ``library/cell/out_file``, so a reduction run without an
-    ``out_file`` would render a two-segment view name. Reduction is on when the
-    recipe says so *and* declares the jivaro stage; neither alone is enough.
+    ``out_file`` would render a two-segment view name. One condition now, not
+    three: jivaro runs iff jivaro was requested. ``recipe.reduction.enabled``
+    and ``recipe.stages`` were the other two, and both were retired on
+    2026-09-04 -- between them they were a switch the user could leave off in
+    two different places and get no reduction and no complaint.
     """
 
     if not tasks:
         raise ConfigError("no tasks to run")
     if "jivaro" not in stages:
         return
-    if not pipeline.recipe.reduction.enabled:
-        return
-    if Stage.JIVARO not in pipeline.recipe.stages:
-        return
     for t in tasks:
         if t.out_file is None:
             raise ConfigError(
-                f"task {t.task_id}: recipe {pipeline.recipe.recipe_id!r} enables "
-                "reduction but out_file is not set "
-                "(jivaro inputView renders to library/cell/out_file)"
+                f"task {t.task_id}: 'jivaro' is in the requested stages but "
+                "out_file is not set on this cell "
+                "(jivaro inputView renders to library/cell/out_file). Set the "
+                "cell's out view, or untick jivaro."
             )
 
 

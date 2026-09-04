@@ -996,15 +996,19 @@ def test_the_popup_names_the_list_its_all_and_none_belong_to(qtbot) -> None:
 
     The buttons live inside a ``QMenu`` overlay; the row label that would
     identify them stays outside it, on the form the overlay is covering. So
-    the popup for ``stages``, the popup for ``output_xy`` and the popup for
-    ``output_form`` are three identical panels of check boxes, and clicking
-    ``all`` in one of them is a five-stage flow change or an eight-column
-    output change depending on which one is open.
+    the popup for ``requested_stages``, the popup for ``output_xy`` and the
+    popup for ``output_form`` are three identical panels of check boxes, and
+    clicking ``all`` in one of them is a five-stage flow change or an
+    eight-column output change depending on which one is open.
+
+    ``requested_stages`` stands in for the retired ``stages`` row here: it is
+    the surviving stage list, drawn by the run bar rather than by this form,
+    and the widget contract it exercises is the same one.
     """
 
     catalog = builtin_catalog()
     headers = {}
-    for key in ("stages", "output_xy", "output_form"):
+    for key in ("requested_stages", "output_xy", "output_form"):
         editor = build_option_editor(catalog.option(key))
         qtbot.addWidget(editor)
         editor.summary_button().menu().popup(editor.mapToGlobal(editor.rect().topLeft()))
@@ -1015,7 +1019,8 @@ def test_the_popup_names_the_list_its_all_and_none_belong_to(qtbot) -> None:
         finally:
             editor.summary_button().menu().close()
 
-    assert headers["stages"] == "stages"
+    # The label, which is the key with its underscores opened up.
+    assert headers["requested_stages"] == "requested stages"
     # The row label and the catalog key differ here, and error messages quote
     # the key -- so this one has to carry both.
     assert "emit" in headers["output_form"]

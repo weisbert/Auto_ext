@@ -111,8 +111,8 @@ DEFAULT_TOOL_EXECUTABLES: dict[str, str] = {
 }
 
 #: Tools whose absence is a warning, not a blocker. Reduction is opt-in
-#: (``Recipe.reduction.enabled`` defaults to ``False``), so a site without a
-#: Jivaro licence is a perfectly runnable site.
+#: (the run bar's ``jivaro`` box starts unticked), so a site without a Jivaro
+#: licence is a perfectly runnable site.
 OPTIONAL_TOOLS: frozenset[str] = frozenset({"jivaro"})
 
 #: Desktop file openers, in the order the GUI tries them on Linux/BSD. Any one

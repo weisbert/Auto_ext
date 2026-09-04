@@ -263,21 +263,26 @@ def test_each_target_imports_on_its_own_and_round_trips(
 def test_all_five_targets_import_into_one_recipe(shipped: dict[RenderTarget, str]) -> None:
     result = ri.import_recipe(_sources(shipped), recipe_id="all-five")
     assert set(result.targets) == set(shipped)
-    assert [stage.value for stage in result.recipe.stages] == [
-        "si",
-        "calibre",
-        "quantus",
-        "jivaro",
-    ]
+    # Which files arrived is reported as ``targets`` and nowhere else. It used
+    # to be written into ``recipe.stages`` as well, which made the recipe a
+    # second owner of a decision the run bar makes per dispatch.
+    assert not hasattr(result.recipe, "stages")
     assert result.recipe.output.emit == [OutputKind.EXTRACTED_VIEW, OutputKind.DSPF]
     assert result.clean_roundtrip, [t.diff for t in result.roundtrip.values()]
     assert result.hunk_count == 0
     assert result.summary().endswith("round trip clean")
 
 
-def test_only_the_imported_stages_end_up_in_the_recipe(
+def test_the_imported_files_are_reported_but_not_written_into_the_recipe(
     shipped: dict[RenderTarget, str],
 ) -> None:
+    """Which files came in is import provenance, not an extraction condition.
+
+    Before 2026-09-04 this wrote ``recipe.stages``, so importing an si.env and
+    a jivaro.xml produced a recipe that would refuse to run calibre -- from a
+    row the importing user never saw, against tick boxes above the Run button.
+    """
+
     result = ri.import_recipe(
         [
             ri.ImportSource(label="a.env", text=shipped[RenderTarget.SI_ENV]),
@@ -285,7 +290,8 @@ def test_only_the_imported_stages_end_up_in_the_recipe(
         ],
         recipe_id="two-stages",
     )
-    assert result.recipe.stages == [Stage.SI, Stage.JIVARO]
+    assert set(result.targets) == {RenderTarget.SI_ENV, RenderTarget.JIVARO_XML}
+    assert not hasattr(result.recipe, "stages")
 
 
 def test_one_quantus_file_selects_the_matching_output_kind(

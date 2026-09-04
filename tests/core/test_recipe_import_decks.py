@@ -121,7 +121,7 @@ def test_the_resources_a_deck_says_nothing_about_keep_the_caller_s_own(
 
     from auto_ext.model.recipe import ResourceProfile
 
-    mine = ResourceProfile(resource_id="mine", max_workers=6)
+    mine = ResourceProfile(resource_id="mine", reduction_cpu=6)
     result = ri.import_recipe(
         [
             ri.ImportSource(
@@ -131,40 +131,45 @@ def test_the_resources_a_deck_says_nothing_about_keep_the_caller_s_own(
         recipe_id="mine",
         resources=mine,
     )
-    assert result.resources.max_workers == 6
+    assert result.resources.reduction_cpu == 6
     assert result.resources.resource_id == "mine"
 
 
 # ---- the jivaro stage --------------------------------------------------------
 
 
-def test_importing_the_jivaro_xml_enables_the_stage_it_declares(
+def test_importing_the_jivaro_xml_brings_in_its_parameters_and_nothing_else(
     golden_dir: Path,
 ) -> None:
     """"I imported the Jivaro XML and the reduction stage doesn't run."
 
-    ``recipe.stages`` says the stage is part of the flow;
-    ``recipe.reduction.enabled`` is what the runner actually gates on. Setting
-    one without the other is a recipe that declares a stage it has disabled."""
+    The old answer was a coupling: the importer wrote ``recipe.stages`` and,
+    when jivaro was among them, forced ``recipe.reduction.enabled`` on -- two
+    writes to keep two switches agreeing about one outcome. Both switches were
+    retired on 2026-09-04. A jivaro XML in the import set now means exactly
+    what it says: here are Jivaro's parameters. Whether the reduction runs is
+    whether the user ticks jivaro, which they can see while they do it.
+    """
 
     text = (golden_dir / "jivaro.xml").read_text(encoding="utf-8")
     result = ri.import_recipe(
         [ri.ImportSource(label="jivaro.xml", text=text, target=RenderTarget.JIVARO_XML)],
         recipe_id="jivaro",
     )
-    assert Stage.JIVARO in result.recipe.stages
-    assert result.recipe.reduction.enabled is True
+    assert RenderTarget.JIVARO_XML in result.targets
+    assert not hasattr(result.recipe.reduction, "enabled")
+    # What the file actually said about Jivaro is what came across.
+    assert result.recipe.reduction.log_verbose_level == "trace"
+    assert result.recipe.reduction.output_view_suffix == "_red"
 
 
-def test_a_deck_without_a_jivaro_file_does_not_enable_reduction(
-    golden_dir: Path,
-) -> None:
+def test_a_quantus_deck_says_nothing_about_jivaro(golden_dir: Path) -> None:
     """The counterpart: nothing about importing a Quantus deck says the user
-    owns a Jivaro licence."""
+    owns a Jivaro licence, and nothing in the result claims it does."""
 
     result = _import_qci(_qci(golden_dir), recipe_id="no-jivaro")
-    assert Stage.JIVARO not in result.recipe.stages
-    assert result.recipe.reduction.enabled is False
+    assert RenderTarget.JIVARO_XML not in result.targets
+    assert not hasattr(result.recipe, "stages")
 
 
 # ---- files the importer refuses ----------------------------------------------

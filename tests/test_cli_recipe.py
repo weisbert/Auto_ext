@@ -893,7 +893,7 @@ def test_migrate_write_produces_the_whole_v2_file_set(
     assert len(profiles) == 1
     assert len(recipes) == 1
     assert read_profile_yaml(profiles[0]).tech_name == "HN001"
-    assert load_recipe(recipes[0]).reduction.enabled is True
+    assert load_recipe(recipes[0]).reduction.frequency_limit_ghz == 14.0
     assert len(load_cells(out / "config" / "cells.yaml")) == 1
     assert load_workspace(out / "config" / "workspace.yaml").output_dir_pattern
     assert (out / "config" / "resources.yaml").is_file()

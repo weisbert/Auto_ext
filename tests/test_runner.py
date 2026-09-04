@@ -414,9 +414,10 @@ def test_jivaro_without_out_file_rejected(
 
     Jivaro's ``inputView`` renders to ``library/cell/out_file``; with
     ``out_file`` unset there is no view name, and the run has to say so before
-    a stage starts rather than hand Jivaro a path with a hole in it. The switch
-    that reaches this check moved from ``task.jivaro.enabled`` to
-    ``recipe.reduction.enabled``, which is why the error now names the recipe.
+    a stage starts rather than hand Jivaro a path with a hole in it. One
+    condition reaches this check since 2026-09-04 -- jivaro is in the
+    requested stages -- where there used to be three (that, plus
+    ``recipe.reduction.enabled``, plus ``jivaro`` in ``recipe.stages``).
     """
 
     _write_tasks(project_tools_config, [{"library": "LIB"}])  # no out_file
@@ -431,7 +432,7 @@ def test_jivaro_without_out_file_rejected(
             stages=["si", "jivaro"],
             auto_ext_root=tmp_path / "project_root",
             workarea=workarea,
-            recipe=_recipe(reduction={"enabled": True}),
+            recipe=_recipe(),
             profile=_profile(workarea),
             dry_run=True,
         )
@@ -861,7 +862,7 @@ def test_phase59_bc_rendered_path_for_accepts_an_explicit_record(
 def test_phase59_bc_rendered_path_for_skipped_stage_returns_none(
     project_tools_config: Path, workarea: Path, tmp_path: Path
 ) -> None:
-    """Reduction is off in the recipe, so jivaro rendered nothing to open."""
+    """The run never asked for jivaro, so it rendered nothing to open."""
     from auto_ext.core.runner import rendered_path_for
 
     project, tasks = _phase59_bc_load(project_tools_config)
@@ -869,10 +870,10 @@ def test_phase59_bc_rendered_path_for_skipped_stage_returns_none(
     run_tasks(
         project,
         tasks,
-        stages=["calibre", "jivaro"],
+        stages=["calibre"],
         auto_ext_root=ae_root,
         workarea=workarea,
-        recipe=_recipe(reduction={"enabled": False}),
+        recipe=_recipe(),
         profile=_profile(workarea),
         dry_run=True,
     )
@@ -1011,7 +1012,11 @@ def test_run_record_carries_the_effective_configuration(
 
     recipe = read_record(_only_run_dir(ae_root)).recipe
     assert recipe.knobs["quantus"]["temperature"] == 85.0
-    assert recipe.jivaro.enabled is True
+    # ``enabled`` is what this dispatch did, not what the recipe said: the
+    # snapshot claims to hold the *effective* settings, and since 2026-09-04
+    # the only thing that can make the reduction effective is asking for the
+    # jivaro stage. This run asked for quantus alone.
+    assert recipe.jivaro.enabled is False
     assert recipe.jivaro.frequency_limit == 14
     assert recipe.jivaro.error_max == 2
     assert set(recipe.paths) >= {"calibre_lvs_dir", "qrc_deck_dir"}
@@ -1264,24 +1269,40 @@ def test_failed_run_is_recorded_in_full_with_skip_reasons(
     assert record.results.lvs.discrepancies == 3
 
 
-def test_disabled_jivaro_records_its_own_skip_reason(
+def test_ticking_jivaro_is_the_only_switch_the_reduction_has(
     project_tools_config: Path, workarea: Path, tmp_path: Path
 ) -> None:
-    """A stage that never ran must say why, or the record is unreadable later."""
+    """The silent skip this pair of switches used to produce, closed.
+
+    Until 2026-09-04 asking for the jivaro stage was not enough: the runner
+    also read ``recipe.reduction.enabled``, in a different section of a
+    different screen, and either one false skipped the reduction with a
+    ``skipped`` row and a reason nobody was looking for. Now the stage the
+    user ticked is the stage that runs, and a stage they did not tick does not
+    appear in the record at all -- no phantom row to read a decision out of.
+    """
     project, tasks = _load(project_tools_config)
     ae_root = tmp_path / "project_root"
     run_tasks(
         project, tasks, stages=["calibre", "jivaro"],
         auto_ext_root=ae_root, workarea=workarea,
-        recipe=_recipe(reduction={"enabled": False}),
+        recipe=_recipe(),
         profile=_profile(workarea), dry_run=True,
     )
 
     record = read_record(_only_run_dir(ae_root))
     jivaro = record.stage("jivaro")
-    assert jivaro is not None
-    assert jivaro.status == "skipped"
-    assert jivaro.skip_reason == "jivaro disabled in recipe"
+    assert jivaro is not None, "jivaro was requested, so jivaro must have run"
+    assert jivaro.status != "skipped"
+
+    other = tmp_path / "no_jivaro"
+    run_tasks(
+        project, tasks, stages=["calibre"],
+        auto_ext_root=other, workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea), dry_run=True,
+    )
+    assert read_record(_only_run_dir(other)).stage("jivaro") is None
 
 
 def test_cancelled_run_is_recorded_completely(
@@ -1670,12 +1691,10 @@ def _profile(workarea: Path) -> "PdkProfile":
 def _recipe(**overrides):
     """The Recipe every run in this file uses unless it says otherwise.
 
-    ``reduction.enabled`` is **on**, which is not the schema default. It
-    mirrors what ``project_tools_config``'s tasks.yaml used to say
-    (``jivaro: {enabled: true}``): that switch moved from the task to the
-    Recipe when the catalog took over rendering, and the stage-orchestration
-    tests below are about what happens with all five stages live. A test that
-    is about the off state passes ``reduction={"enabled": False}``.
+    It carries no switch for the reduction any more. ``reduction.enabled``
+    was retired on 2026-09-04: the jivaro stage runs iff jivaro is in the
+    ``stages`` a call passes, so a test that wants the reduction asks for it
+    in the dispatch, where the user asks for it.
     """
 
     from auto_ext.model.recipe import Recipe
@@ -1683,7 +1702,6 @@ def _recipe(**overrides):
     fields = {
         "recipe_id": "rc-coupled-typical",
         "name": "RC coupled, typical",
-        "reduction": {"enabled": True},
     }
     fields.update(overrides)
     return Recipe(**fields)
@@ -1704,7 +1722,7 @@ def test_recipe_path_runs_every_stage_and_names_files_after_the_artifact(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=ae_root,
         workarea=workarea,
-        recipe=_recipe(reduction={"enabled": True}),
+        recipe=_recipe(),
         profile=_profile(workarea),
     )
 
@@ -1814,29 +1832,44 @@ def test_recipe_emitting_both_output_forms_runs_quantus_twice(
     assert record.requested_stages == ["quantus.ext", "quantus.dspf"]
 
 
-def test_recipe_stages_narrow_the_run(
+def test_the_requested_stage_set_is_the_only_thing_that_narrows_a_run(
     project_tools_config: Path,
     workarea: Path,
     mocks_on_path: Path,
     tmp_path: Path,
 ) -> None:
+    """One owner for "which stages run", and it is the caller's argument.
+
+    This test used to prove the opposite: that a recipe declaring
+    ``[si, calibre]`` cut a five-stage request down to two. It did that
+    silently, from a row ninety deep in a form, against tick boxes sitting
+    above the Run button -- so the owner ruled on 2026-09-04 that the stage
+    selector owns the decision. Asking for two stages runs two; asking for
+    five runs five; the recipe has no say either way.
+    """
+
     project, tasks = _load(project_tools_config)
-    ae_root = tmp_path / "project_root"
 
+    two = tmp_path / "two"
     summary = run_tasks(
-        project,
-        tasks,
-        stages=["si", "strmout", "calibre", "quantus", "jivaro"],
-        auto_ext_root=ae_root,
-        workarea=workarea,
-        recipe=_recipe(stages=["si", "calibre"]),
-        profile=_profile(workarea),
+        project, tasks, stages=["si", "calibre"],
+        auto_ext_root=two, workarea=workarea,
+        recipe=_recipe(), profile=_profile(workarea),
     )
-
     assert [s.stage for s in summary.tasks[0].stages] == ["si", "calibre"]
 
+    five = tmp_path / "five"
+    summary = run_tasks(
+        project, tasks, stages=["si", "strmout", "calibre", "quantus", "jivaro"],
+        auto_ext_root=five, workarea=workarea,
+        recipe=_recipe(), profile=_profile(workarea),
+    )
+    assert [s.stage for s in summary.tasks[0].stages] == [
+        "si", "strmout", "calibre", "quantus", "jivaro",
+    ]
 
-def test_reduction_enabled_comes_from_the_recipe_not_the_task(
+
+def test_reduction_comes_from_the_requested_stages_not_the_task(
     project_tools_config: Path,
     workarea: Path,
     mocks_on_path: Path,
@@ -1846,8 +1879,8 @@ def test_reduction_enabled_comes_from_the_recipe_not_the_task(
 
     The field is still on the model with a reader-less default (see
     ``core/config``'s module docstring), so the way to prove the runner
-    ignores it is to set it to the *opposite* of the recipe and watch the
-    recipe win. With both at their defaults the test would pass for a runner
+    ignores it is to set it to the *opposite* of the dispatch and watch the
+    dispatch win. With both at their defaults the test would pass for a runner
     that read either one.
     """
 
@@ -1857,17 +1890,14 @@ def test_reduction_enabled_comes_from_the_recipe_not_the_task(
         for t in tasks
     ]
     assert tasks[0].jivaro.enabled is True
-    ae_root = tmp_path / "project_root"
 
     summary = run_tasks(
-        project, tasks, stages=["jivaro"],
-        auto_ext_root=ae_root, workarea=workarea,
-        recipe=_recipe(reduction={"enabled": False}), profile=_profile(workarea),
+        project, tasks, stages=["calibre"],
+        auto_ext_root=tmp_path / "project_root", workarea=workarea,
+        recipe=_recipe(), profile=_profile(workarea),
     )
 
-    stage = summary.tasks[0].stages[0]
-    assert stage.status == "skipped"
-    assert stage.error == "jivaro disabled in recipe"
+    assert [s.stage for s in summary.tasks[0].stages] == ["calibre"]
 
 
 def test_half_a_configuration_cannot_even_be_expressed() -> None:

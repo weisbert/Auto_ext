@@ -60,12 +60,22 @@ Assumptions
   Twenty-three Quantus rows write both command files; drawing them twice
   would ask the user which copy is the real one, and moving a row between
   modes would break the toggle's promise to keep the focused row.
-* ``extraction.corner`` has no landing site, so it lives under ``Flow`` with
-  the other four decisions that are about the run rather than about a line in
-  a file. The catalog owns the *literal* as ``technology_corner`` with
-  ``owner: profile`` -- a process fact -- and the seam between "the recipe
-  names a semantic corner" and "the profile maps it to ``TYPICAL``" is what
-  makes a recipe portable.
+* ``Flow`` is the bucket for a row with no landing site, and it is down to
+  **one** row. It was built for five -- which stages, reduction on or off,
+  and two policy flags -- but three of those were decisions about *this run*
+  rather than about this recipe, and the owner ruled on 2026-09-04 that the
+  run bar owns those: ``stages`` and ``reduction_enabled`` were deleted from
+  the catalog outright, and ``fail_on_unparsable_lvs_report`` lost its
+  ``context_path`` the same day for being a control nothing read.
+  ``policy.continue_on_lvs_fail`` is the one left, and it is transitional --
+  the run bar's tick box has to be wired into the dispatch before the row can
+  go (``docs/refactor/UX_VALIDATION.md`` section 5.7).
+  ``extraction.corner`` used to sit here too, for the same "no landing site"
+  reason, and it was the case that forced ``groups_with``: what reaches
+  Quantus is the profile-owned ``technology_corner`` literal, so the row
+  lands nowhere while the person looking for it looks under Quantus beside
+  the temperature. The seam between "the recipe names a semantic corner" and
+  "the profile maps it to ``TYPICAL``" is what makes a recipe portable.
 * **23** recipe-owned rows whose ``currently`` is ``absent`` have no
   ``recipe_field_path`` and therefore no field to bind to, so
   :func:`recipe_specs` skips them. They are not proposals: thirteen are real

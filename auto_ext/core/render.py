@@ -486,14 +486,18 @@ def _recipe_tree(
     *resolved* values so no template needs to know about the fallback, while
     ``pdk.corner`` carries the tool literal.
 
-    ``reduction.views_to_reduce`` is the same idea against the DUT rather than
-    the profile (``auto_ext.model.recipe.DUT_FALLBACK_FIELDS``): unset means
-    "the view Quantus just wrote", which is ``out_file`` -- the same name
-    ``inputView`` and ``-view_name`` already carry. It resolves to ``None``
-    when the cell has no ``out_file``, exactly as the flat ``out_file`` alias
-    beside it does; a DUT with no extracted view is a reduction that should
-    not have been scheduled, and that belongs to the runner's stage gate, not
-    to a silent substitution here.
+    ``reduction.views_to_reduce`` is no longer a field at all. It is derived
+    here, unconditionally, from the DUT: the view Jivaro reduces IS the view
+    Quantus just wrote, which is ``out_file`` -- the same name ``inputView``
+    and ``-view_name`` already carry. Until 2026-09-04 the recipe could
+    override it, and a typed value won for Jivaro alone while Quantus went on
+    writing ``out_file``; that is exactly the "Jivaro reduces a view that does
+    not exist" bug the 2026-08-24 ruling closed, one keystroke away.
+
+    It resolves to ``None`` when the cell has no ``out_file``, exactly as the
+    flat ``out_file`` alias beside it does; a DUT with no extracted view is a
+    reduction that should not have been scheduled, and that belongs to the
+    runner's pre-flight, not to a silent substitution here.
     """
 
     tree = _model_tree(recipe)
@@ -505,8 +509,7 @@ def _recipe_tree(
     tree["id"] = recipe.recipe_id
     tree["extraction"]["corner"] = corner.name
     tree["extraction"]["temperature_c"] = corner.temperature_c
-    if tree["reduction"].get("views_to_reduce") is None:
-        tree["reduction"]["views_to_reduce"] = dut.out_file
+    tree["reduction"]["views_to_reduce"] = dut.out_file
     return tree
 
 
@@ -976,10 +979,15 @@ def plan_targets(
     express that at all: ``ProjectConfig.templates`` has a single quantus slot,
     so a run emitted one form and structurally could not emit the other.
 
-    ``stages`` narrows the plan the way the CLI's ``--stage`` does; ``None``
-    means "every stage this recipe declares". ``strmout`` never appears here:
-    it renders nothing, its argv is built from the context by
-    :class:`~auto_ext.tools.strmout.StrmoutTool`.
+    ``stages`` is the requested set -- the run bar's tick boxes or the CLI's
+    ``--stage`` -- and it is the **only** stage input. ``None`` means "every
+    stage there is a target for". Until 2026-09-04 the recipe carried a second
+    list and this function intersected the two in silence, so a stage ticked
+    on the bar but absent from the recipe simply did not run with no line
+    anywhere; the owner ruled that the stage selector owns the decision.
+
+    ``strmout`` never appears here: it renders nothing, its argv is built from
+    the context by :class:`~auto_ext.tools.strmout.StrmoutTool`.
     """
 
     cat = catalog if catalog is not None else builtin_catalog()
@@ -993,12 +1001,11 @@ def plan_targets(
     per_stage[Stage.QUANTUS] = [EMIT_TARGETS[kind] for kind in recipe.output.emit]
 
     plans: list[TargetPlan] = []
-    # Canonical stage order, not the order the recipe happens to list them in:
-    # si must netlist before Calibre compares against it, whatever the YAML says.
-    declared = set(recipe.stages)
+    # Canonical stage order, not the order the caller happens to ask in:
+    # si must netlist before Calibre compares against it, whatever the request
+    # says. There is no second filter here any more -- ``recipe.stages`` was
+    # retired on 2026-09-04 and the requested set is the only stage input.
     for stage in STAGE_ORDER:
-        if stage not in declared:
-            continue
         if wanted is not None and stage.value not in wanted:
             continue
         for target in per_stage.get(stage, []):

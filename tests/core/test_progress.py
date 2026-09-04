@@ -179,64 +179,60 @@ def test_stage_failure_emits_synthetic_skipped_for_remaining(
     assert task_end[2] == TaskStatus.FAILED
 
 
-def test_jivaro_disabled_emits_synthetic_skipped_pair(
+def test_a_stage_nobody_asked_for_emits_no_events_at_all(
     project_tools_config: Path,
     workarea: Path,
     tmp_path: Path,
     recipe: Recipe,
     pdk_profile: PdkProfile,
 ) -> None:
-    """``reduction.enabled: false`` skips the stage; it does not delete it.
+    """An unrequested stage is absent, not "there but skipped".
 
-    A GUI stage tree keys on the pair: an ``on_stage_start`` with no matching
-    ``on_stage_end`` leaves a row stuck at "running", and a stage that never
-    starts at all leaves the user wondering whether they asked for it. The
-    switch moved from ``TaskConfig.jivaro.enabled`` to the Recipe when the
-    catalog took over rendering; the event contract did not move with it.
+    This test used to assert the opposite for jivaro, because a second switch
+    -- ``recipe.reduction.enabled`` -- could turn off a stage the user had
+    ticked, and a stage that vanished after being asked for had to leave a
+    ``skipped`` pair behind or the GUI tree would go quiet on a row the user
+    was watching. That switch was retired on 2026-09-04: what is requested
+    runs, and what is not requested was never in the strip to begin with.
+
+    The pair contract itself is unchanged and still load-bearing for the
+    skips that remain (cancelled, aborted after a failure) -- see
+    :func:`test_a_stage_skipped_after_a_failure_still_emits_its_pair`.
     """
 
     project, tasks = _load(project_tools_config)
-    off = recipe.model_copy(
-        update={"reduction": recipe.reduction.model_copy(update={"enabled": False})}
-    )
     reporter = SpyReporter()
 
     run_tasks(
         project,
         tasks,
-        stages=["si", "jivaro"],
+        stages=["si"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
-        recipe=off,
+        recipe=recipe,
         profile=pdk_profile,
         dry_run=True,
         reporter=reporter,
     )
 
-    # Both a start and an end for jivaro even though no work ran.
-    jivaro_events = [e for e in reporter.events if len(e) >= 3 and e[2] == "jivaro"]
-    kinds = [e[0] for e in jivaro_events]
-    assert kinds == ["stage_start", "stage_end"]
-    assert jivaro_events[1][3] == StageStatus.SKIPPED
+    assert [e for e in reporter.events if len(e) >= 3 and e[2] == "jivaro"] == []
 
 
-def test_jivaro_enabled_in_the_recipe_actually_runs_the_stage(
+def test_asking_for_jivaro_is_what_runs_the_stage(
     project_tools_config: Path,
     workarea: Path,
     tmp_path: Path,
     recipe: Recipe,
     pdk_profile: PdkProfile,
 ) -> None:
-    """The other half of the switch: with reduction on, jivaro is not skipped.
+    """The other half: a ticked jivaro runs, with no second switch to satisfy.
 
-    Without this, the test above passes for a recipe whose stage list simply
-    never contained jivaro, which is a different bug wearing the same result.
+    Without this, the test above passes for a runner that never runs jivaro at
+    all, which is a different bug wearing the same result.
     """
 
     project, tasks = _load(project_tools_config)
-    on = recipe.model_copy(
-        update={"reduction": recipe.reduction.model_copy(update={"enabled": True})}
-    )
+    on = recipe
     reporter = SpyReporter()
 
     run_tasks(

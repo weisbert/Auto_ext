@@ -139,46 +139,59 @@ def _run_dirs(auto_ext_root: Path) -> list[Path]:
     )
 
 
-# ---- M-23: requested stages that miss the recipe ---------------------------
+# ---- M-23: a dispatch that would run nothing -------------------------------
 
 
-def test_stages_that_do_not_intersect_the_recipe_are_refused_by_name(
+def test_an_empty_requested_stage_set_is_refused_by_name(
     project_tools_config: Path, workarea: Path, tmp_path: Path
 ) -> None:
-    """Asking for a stage the recipe does not run must not "pass".
+    """A run that would execute nothing must not report PASSED.
 
-    The symptom: tick only ``jivaro`` for a recipe whose stage list stops at
-    calibre and the dispatch reports PASSED with an empty stage strip.
+    The original symptom was an *intersection*: tick only ``jivaro`` for a
+    recipe whose ``stages`` stopped at calibre, and the dispatch claimed a run
+    directory, took the workspace lock, executed nothing, and reported PASSED
+    over an empty stage strip. The recipe side of that intersection was
+    retired on 2026-09-04 (the stage selector owns which stages run), so the
+    only surviving way to ask for nothing is to ask for nothing -- and it is
+    refused here, before a run directory exists, naming the valid set so the
+    caller can see what it should have asked for.
+
+    The GUI covers its own half earlier and better: the Run button is disabled
+    while no stage is ticked. This is the CLI's and the API's backstop.
     """
 
     project, tasks = _load(project_tools_config)
-    recipe = _recipe(stages=["si", "strmout", "calibre"])
 
     with pytest.raises(ConfigError) as excinfo:
         run_tasks(
             project,
             tasks,
-            stages=["jivaro"],
+            stages=[],
             auto_ext_root=tmp_path / "project_root",
             workarea=workarea,
-            recipe=recipe,
+            recipe=_recipe(),
             profile=_profile(workarea),
             dry_run=True,
         )
 
     message = str(excinfo.value)
-    # Both sets, so the user can see which side to change.
-    assert "jivaro" in message
-    assert "calibre" in message
-    assert recipe.recipe_id in message
+    assert "empty" in message
+    assert "nothing would run" in message
+    # Names the set it would accept, rather than only what it refused.
+    assert "jivaro" in message and "calibre" in message
     # And nothing was written: a refused dispatch leaves no run behind.
     assert _run_dirs(tmp_path / "project_root") == []
 
 
-def test_a_narrowed_stage_set_that_still_overlaps_is_accepted(
+def test_a_narrowed_stage_set_is_accepted_and_runs_exactly_it(
     project_tools_config: Path, workarea: Path, tmp_path: Path
 ) -> None:
-    """The refusal must not catch the ordinary "only run calibre" narrowing."""
+    """The refusal must not catch the ordinary "only run calibre" narrowing.
+
+    And the narrowing is now exact: nothing downstream trims the set further.
+    Asking for ``calibre`` and ``jivaro`` runs both, where a recipe declaring
+    only the first three stages used to drop ``jivaro`` in silence.
+    """
 
     project, tasks = _load(project_tools_config)
     summary = run_tasks(
@@ -187,12 +200,12 @@ def test_a_narrowed_stage_set_that_still_overlaps_is_accepted(
         stages=["calibre", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
-        recipe=_recipe(stages=["si", "strmout", "calibre"]),
+        recipe=_recipe(),
         profile=_profile(workarea),
         dry_run=True,
     )
     assert summary.total == 1
-    assert [s.key for s in summary.tasks[0].stages] == ["calibre"]
+    assert [s.key for s in summary.tasks[0].stages] == ["calibre", "jivaro"]
 
 
 # ---- M-25: the runner records a verdict, not just a status -----------------

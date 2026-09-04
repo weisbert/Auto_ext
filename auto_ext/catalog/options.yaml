@@ -406,8 +406,9 @@ options:
       - {target: jivaro.xml, section: general, option: outputView, line: 3}
     notes: >-
       TaskSpec.out_file itself defaults to None; av_ext is what both shipped
-      tasks.yaml files carry. Note the collision with
-      reduction_views_to_reduce, which is hardcoded to a DIFFERENT name.
+      tasks.yaml files carry. It is the SOLE owner of the extracted view name
+      since 2026-09-04: reduction_views_to_reduce used to be a second, settable
+      copy that won for Jivaro alone, and it now derives from this row.
     why: >-
       Names the extracted view this DUT produces, and therefore the view
       Jivaro reads. Per-DUT, so it belongs to the cell table.
@@ -3940,34 +3941,41 @@ options:
   - key: reduction_views_to_reduce
     template_var: jivaro_views_to_reduce
     context_path: recipe.reduction.views_to_reduce
-    owner: recipe
+    owner: fixed
     type: str
     choices_confidence: certain
     default: null
-    nullable: true
-    placeholder: follows the cell's extracted view (out_file)
     currently: jinja_var
     observed: true
     source_ref: templates/jivaro/default.xml.j2:6
     notes: >-
-      RESOLVED 2026-08-24 by the user, and it WAS the live bug this row was
-      flagged for. Three places name the view to work on: inputView uses
-      out_file, the Quantus -view_name uses out_file, and this one used to be
-      a separate literal "av_extracted" while both shipped task tables set
-      out_file to "av_ext" -- so Jivaro was pointed at a view that does not
-      exist. The user's ruling: after a Quantus run the view to reduce is
-      NECESSARILY the extraction output, so the two cannot legitimately
-      differ and the literal was never a setting.
-      Default is now null, meaning "the cell's out_file", resolved in
-      core/render.py::_recipe_tree against the DutSnapshot. It stays
-      overridable rather than being deleted, because reducing a view an
-      earlier run produced -- Jivaro on its own, no extraction this time --
-      is the one case where naming it explicitly is right.
-      A recipe migrated from before this change still carries the literal
-      "av_extracted"; clearing the field is what adopts the fix.
+      RESOLVED 2026-08-24, RETIRED 2026-09-04. Three places name the view to
+      work on: inputView uses out_file, the Quantus -view_name uses out_file,
+      and this one used to be a separate literal "av_extracted" while both
+      shipped task tables set out_file to "av_ext" -- so Jivaro was pointed at
+      a view that does not exist. The 2026-08-24 ruling: after a Quantus run
+      the view to reduce is NECESSARILY the extraction output, so the two
+      cannot legitimately differ and the literal was never a setting.
+      That round made the default null and resolved it against the DUT, but
+      left the control on the form -- and a typed non-null value still won for
+      Jivaro alone while Quantus went on writing out_file, so the bug was one
+      keystroke away. ONE CONCEPT, ONE OWNER (2026-09-04): the output view name
+      is the cell's. The Recipe field is gone, this row's context_path is
+      dropped so the form draws no control, and core/render.py::_recipe_tree
+      fills the template variable from the DutSnapshot unconditionally.
+      The row stays so the catalog-to-template audit still sees the line the
+      XML carries, and so the import reader can still name what a hand-written
+      file said. `owner: fixed` is what removes the control: recipe_field_path
+      is None for a non-recipe owner, so the form skips it and the importer's
+      _assignable refuses it, while context_path keeps naming where in the
+      render tree the derived value lands. The one case the field was kept for -- reducing a view an
+      earlier run produced, no extraction this time -- is a run over a cell
+      whose out_file already names that view.
+      The three recipes migrated before this change carry "av_extracted";
+      auto_ext.model.recipe.upgrade_retired_fields drops it on load.
     lands_in:
       - {target: jivaro.xml, section: general, option: viewsToReduce, line: 6}
-    why: Which view Jivaro reduces. Derived from the DUT, overridable for a standalone run.
+    why: Which view Jivaro reduces. The cell's out_file, always -- see out_file.
 
   - key: parasitic_res_model
     template_var: jivaro_r_model
@@ -4141,33 +4149,6 @@ options:
     lands_in:
       - {target: jivaro.xml, section: selectivity, option: "<!-- Selectivity settings -->", line: 21, quoting: none}
     why: A known empty extension point. Better documented than rediscovered.
-
-  - key: reduction_enabled
-    tier: common
-    template_var: reduction_enabled
-    context_path: recipe.reduction.enabled
-    owner: recipe
-    type: bool
-    choices_confidence: certain
-    default: false
-    currently: config_field
-    observed: true
-    source_ref: auto_ext/core/config.py:36
-    notes: >-
-      Not a knob either, despite the draft: it is JivaroConfig.enabled with a
-      per-cell JivaroOverride on top. The override goes away -- a per-cell
-      difference in reduction settings is a second Recipe, not a patch on the
-      first.
-      TWO SWITCHES, ONE OUTCOME. runner.py runs the reduction only when this
-      flag is true AND `jivaro` is in recipe.stages; either one false skips
-      the stage silently. The two rows sit in different sections of the form,
-      so the AND between them cannot be seen -- ticking the stage and leaving
-      this flag alone gets no reduction and no complaint. Both `why` texts
-      name the other row on purpose, and a catalog test keeps them doing it.
-    why: >-
-      Whether the jivaro stage runs at all. It is not enough on its own --
-      `jivaro` must ALSO be listed in stages, or the reduction is skipped
-      without a word. Gates the stage; emits nothing itself.
 
   # ---- strmout: a whole stage with no template at all ----------------------
   # argv is assembled in auto_ext/tools/strmout.py, which is exactly why a
@@ -4353,30 +4334,6 @@ options:
     notes: How many runs execute at once (CLI --jobs). Recorded per run in RunRecord.max_workers.
     why: A machine property. Belongs with the other resource settings, not in a Recipe.
 
-  - key: stages
-    tier: common
-    template_var: stages
-    context_path: recipe.stages
-    owner: recipe
-    type: list
-    choices: [si, strmout, calibre, quantus, jivaro]
-    choices_confidence: certain
-    default: [si, strmout, calibre, quantus, jivaro]
-    currently: config_field
-    observed: true
-    source_ref: auto_ext/core/runner.py:141
-    notes: >-
-      The persisted default. A CLI --stage may narrow it for one invocation;
-      the narrowed set is what RunRecord.requested_stages records. Listed here
-      so nobody re-files the CLI flag into the Recipe by mistake.
-      `jivaro` is the one member that is not sufficient by itself: the runner
-      also requires reduction_enabled. See that row.
-    why: >-
-      Which steps this recipe intends to run. A recipe-level intent with a
-      per-run override. Listing `jivaro` here does NOT switch the reduction
-      on by itself -- reduction.enabled must be true as well, or the stage is
-      skipped in silence.
-
   - key: requested_stages
     template_var: requested_stages
     context_path: run.stages
@@ -4388,8 +4345,15 @@ options:
     currently: config_field
     observed: true
     source_ref: auto_ext/cli.py:66
-    notes: The per-invocation narrowing of recipe.stages ("LVS only", "resume from QRC").
-    why: This invocation, not this recipe. A Run fact.
+    notes: >-
+      The stage set this dispatch asked for ("LVS only", "resume from QRC"),
+      recorded in RunRecord.requested_stages.
+      SOLE OWNER since 2026-09-04. The word used to name three different
+      things -- recipe.stages, the run bar's tuple and this row -- and the
+      runner intersected the first two in silence, so a stage ticked on the
+      bar but missing from the recipe just did not run. recipe.stages is gone;
+      the run bar and CLI --stage set this, and nothing narrows it afterwards.
+    why: This invocation, not this recipe. A Run fact, and the only stage fact.
 
   - key: dry_run
     template_var: dry_run

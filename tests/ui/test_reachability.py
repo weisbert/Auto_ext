@@ -530,6 +530,33 @@ def test_every_exemption_carries_a_reason() -> None:
         assert blank == [], f"{name}: these exemptions have no real reason: {blank}"
 
 
+def _closed_lists_drawn_as_text() -> list[str]:
+    """Recipes rows with a closed value set that get a free-text control.
+
+    ``stages`` asked for as a comma-separated string was one of the eight, and
+    it was *reachable the whole time* -- the control was simply the wrong
+    kind. The row is gone, so this keeps the rule it stood for.
+
+    Only ``certain`` sets count. A *guessed* list is deliberately drawn as an
+    editable control, because the guesses are worth offering and not worth
+    trapping the user inside -- that is the same decision, not a violation of
+    it.
+    """
+
+    from auto_ext.catalog import Confidence, OptionType
+    from auto_ext.ui.widgets.option_editor import EditorKind, editor_kind
+
+    free = {EditorKind.TEXT, EditorKind.LIST}
+    return [
+        spec.key
+        for spec in recipe_specs()
+        if spec.choices
+        and spec.choices_confidence is Confidence.CERTAIN
+        and spec.type in (OptionType.ENUM, OptionType.LIST)
+        and editor_kind(spec) in free
+    ]
+
+
 def test_the_four_settings_the_office_round_could_not_find_are_reachable_now() -> None:
     """The regression, named. Each of these was unreachable on 2026-08-24."""
 
@@ -541,8 +568,14 @@ def test_the_four_settings_the_office_round_could_not_find_are_reachable_now() -
     # "Extraction Type 这个属性也无法编辑" -- it is a field of a rule now, and
     # the rules list is what the sub-form edits.
     assert "extraction.extract" in bound
-    # "里面有很多参数你是选择的是 blank 填写" -- stages was the named case.
-    assert "stages" in bound
+    # "里面有很多参数你是选择的是 blank 填写" -- ``stages`` was the named case,
+    # and its answer changed on 2026-09-04 from "give it the right control" to
+    # "it was never this screen's row". The defect it stood for was a closed
+    # value set asked for as free text, so the regression it leaves behind is
+    # that no closed list on this form is a text box.
+    assert not _closed_lists_drawn_as_text(), (
+        "a closed value set is being asked for as free text again"
+    )
     # "没有地方可以改 ext 输出的文件名称" -- per DUT, so it is a cell column.
     assert "out_file" in set(EDITABLE_FIELDS.values())
 
@@ -551,16 +584,22 @@ def test_the_fallbacks_that_only_existed_in_the_model_are_visible_now() -> None:
     """A default of ``None`` that means something has to say what.
 
     Two recipe fields resolve elsewhere when left unset -- the corner from the
-    profile, the view to reduce from the DUT -- and ``temperature_c`` takes
-    the corner's suggestion. All three were reachable only by hand-editing
-    YAML, because the form had no way to express "unset" and no way to say
-    what unset would do.
+    profile, and ``temperature_c`` from the corner's suggestion. Both were
+    reachable only by hand-editing YAML, because the form had no way to
+    express "unset" and no way to say what unset would do.
+
+    ``reduction_views_to_reduce`` was the third, and it is instructive that it
+    is no longer here. A nullable control whose unset value resolves elsewhere
+    is still two owners for one concept, with one of them *usually* quiet: set
+    it and Jivaro reduced the view you typed while Quantus went on writing the
+    cell's ``out_file``. The 2026-09-04 ruling collapsed it into the cell.
     """
 
     from auto_ext.catalog import builtin_catalog
 
     catalog = builtin_catalog()
-    for key in ("extraction_corner", "reduction_views_to_reduce", "temperature_c"):
+    for key in ("extraction_corner", "temperature_c"):
         spec = catalog.option(key)
         assert spec.nullable is True, key
         assert spec.placeholder, f"{key}: unset means something and must say what"
+    assert catalog.option("reduction_views_to_reduce").recipe_field_path is None

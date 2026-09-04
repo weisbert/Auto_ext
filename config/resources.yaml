@@ -21,4 +21,3 @@ lvs_license_wait_time: 10
 # spells that?
 quantus_cpu_count: 1
 reduction_cpu: 1
-max_workers: 1

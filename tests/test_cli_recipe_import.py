@@ -241,7 +241,10 @@ def test_write_saves_a_recipe_that_loads_back(
     path = ext_root / "recipes" / "inv1-rc.yaml"
     recipe = load_recipe(path)
     assert recipe.recipe_id == "inv1-rc"
-    assert [stage.value for stage in recipe.stages] == ["si", "calibre", "quantus", "jivaro"]
+    # Which files were imported is reported, never written into the recipe:
+    # the run bar owns which stages a dispatch runs (2026-09-04).
+    assert not hasattr(recipe, "stages")
+    assert recipe.output.emit
 
 
 def test_write_refuses_to_clobber_without_force(

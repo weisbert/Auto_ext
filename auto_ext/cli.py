@@ -1979,11 +1979,13 @@ def _catalog_backed_recipe_fields() -> set[str]:
 
 def _load_resources(path: Path) -> "ResourceProfile":
     """Load ``config/resources.yaml``, or exit 2 explaining why not."""
+    import logging
+
     from pydantic import ValidationError
     from ruamel.yaml import YAML
     from ruamel.yaml.error import YAMLError
 
-    from auto_ext.model.recipe import ResourceProfile
+    from auto_ext.model.recipe import ResourceProfile, upgrade_retired_resource_fields
 
     try:
         data = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
@@ -2000,6 +2002,17 @@ def _load_resources(path: Path) -> "ResourceProfile":
             err=True,
         )
         raise typer.Exit(code=2)
+    retired = upgrade_retired_resource_fields(data)
+    if retired:
+        # Every deployed copy of this file carries ``max_workers``: migrate
+        # and the new-project wizard both wrote it. Refusing the file over a
+        # number nothing ever read would be the 2026-08-28 failure mode again.
+        logging.getLogger(__name__).info(
+            "%s: dropped %s -- the run bar's jobs box and --jobs own "
+            "parallelism (2026-09-04 ownership ruling)",
+            path,
+            ", ".join(f"{key}: {value}" for key, value in retired.items()),
+        )
     try:
         return ResourceProfile.model_validate(data)
     except ValidationError as exc:
@@ -2170,7 +2183,6 @@ def recipe_list(
     table.add_column("recipe_id", style="cyan", no_wrap=True)
     table.add_column("name", max_width=24, overflow="fold")
     table.add_column("ver", no_wrap=True)
-    table.add_column("stages", max_width=12, overflow="fold")
     table.add_column("emit", max_width=14, overflow="fold")
     table.add_column("edits", justify="right", no_wrap=True)
     table.add_column("from", no_wrap=True)
@@ -2188,14 +2200,15 @@ def recipe_list(
             recipe = load_recipe(path)
         except AutoExtError as exc:
             broken += 1
-            table.add_row(recipe_id, f"[red]unreadable: {exc}[/]", "", "", "", "", origin)
+            table.add_row(recipe_id, f"[red]unreadable: {exc}[/]", "", "", "", origin)
             continue
-        stages = [item.value for item in recipe.stages]
+        # No stages column since 2026-09-04: which stages run is a property
+        # of the dispatch, not of the recipe, so a per-recipe answer here
+        # would be a second copy of the run bar's / --stage's decision.
         table.add_row(
             recipe_id,
             recipe.name,
             recipe.version,
-            "all" if stages == [item.value for item in STAGE_ORDER] else ",".join(stages),
             ",".join(k.value for k in recipe.output.emit),
             str(recipe.manual_edit_count) if recipe.manual_edit_count else "-",
             origin,
@@ -2269,7 +2282,7 @@ def recipe_show(
             ("description", recipe.description or "-"),
             ("tags", ", ".join(recipe.tags) or "-"),
             ("derived from", recipe.derived_from or "-"),
-            ("stages", ", ".join(s.value for s in recipe.stages)),
+            ("emits", ", ".join(k.value for k in recipe.output.emit)),
             ("manual edits", recipe.manual_edit_count),
             ("content sha256", recipe.content_sha256()[:16]),
             ("updated at", recipe.updated_at.isoformat()),
@@ -2746,7 +2759,6 @@ def _print_import_report(
             ("name", result.recipe.name),
             ("files", len(result.sources)),
             ("targets", ", ".join(t.value for t in result.targets)),
-            ("stages", ", ".join(s.value for s in result.recipe.stages)),
             ("emits", ", ".join(k.value for k in result.recipe.output.emit)),
             ("catalog", result.catalog_version),
             (

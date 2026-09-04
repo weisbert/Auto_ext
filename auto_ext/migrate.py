@@ -141,6 +141,7 @@ from auto_ext.model.recipe import (
     ExtractType,
     OutputKind,
     Recipe,
+    ReductionSettings,
     ResourceProfile,
     load_recipe,
     recipe_from_catalog,
@@ -471,7 +472,12 @@ class _GroupKey:
     """
 
     knobs: tuple[tuple[str, tuple[tuple[str, Any], ...]], ...]
-    jivaro: tuple[bool, float | None, float | None]
+    #: The reduction *parameters* as they will land, never the on/off switch:
+    #: whether Jivaro runs is a per-dispatch decision since 2026-09-04, and
+    #: splitting a library over it would hand the user two identical recipes.
+    #: Resolved rather than raw, so a task that says nothing and a task that
+    #: says the default do not become two indistinguishable recipes.
+    jivaro: tuple[float, float]
     continue_on_lvs_fail: bool
     templates: tuple[tuple[str, str], ...]
 
@@ -586,9 +592,35 @@ def _human_name(recipe: Recipe) -> str:
     if recipe.extraction.temperature_c is not None:
         bits.append(f"{_number_token(recipe.extraction.temperature_c)}C")
     bits.append("+".join(kind.value for kind in recipe.output.emit) or "no output")
-    if recipe.reduction.enabled:
-        bits.append("with reduction")
+    # No "with reduction" bit any more: whether Jivaro runs is decided on the
+    # run bar per dispatch (2026-09-04), so it cannot be part of what names a
+    # recipe. The reduction *parameters* still are, via _discriminators.
     return ", ".join(bits)
+
+
+def _jivaro_key(task: Any) -> tuple[float, float]:
+    """The reduction parameters this task will actually put in a Recipe.
+
+    Two things are deliberately absent. ``enabled`` is not here because since
+    2026-09-04 nothing on a Recipe decides whether the reduction runs -- the
+    run bar's jivaro box does -- so two cells that differed only in that used
+    to become ``...-red`` and ``...-nored``, and would now become two byte
+    identical recipes with a number on the end.
+
+    And the values are *resolved* against the schema defaults rather than
+    taken raw, because ``jivaro: {enabled: false}`` leaves both at ``None``
+    while ``jivaro: {frequency_limit: 14, error_max: 2}`` states them, and
+    those two produce the same Recipe. Keying on the raw pair split them
+    anyway, which is the same defect one level down.
+    """
+
+    defaults = ReductionSettings()
+    limit = task.jivaro.frequency_limit
+    error = task.jivaro.error_max
+    return (
+        float(limit) if limit is not None else float(defaults.frequency_limit_ghz),
+        float(error) if error is not None else float(defaults.error_max_pct),
+    )
 
 
 def _discriminators(recipe: Recipe) -> list[str]:
@@ -601,7 +633,6 @@ def _discriminators(recipe: Recipe) -> list[str]:
         emit or "noout",
         str(recipe.lvs.deck_variant),
         "cbn" if recipe.lvs.connect_by_name else "nocbn",
-        "red" if recipe.reduction.enabled else "nored",
         _number_token(recipe.reduction.frequency_limit_ghz, "ghz"),
         _number_token(recipe.reduction.error_max_pct, "pct"),
         "lenient" if recipe.policy.continue_on_lvs_fail else "strict",
@@ -1455,7 +1486,7 @@ def _group_tasks(
         knobs = _effective_knobs(task, project, template_set)
         key = _GroupKey(
             knobs=_freeze_knobs(knobs),
-            jivaro=(task.jivaro.enabled, task.jivaro.frequency_limit, task.jivaro.error_max),
+            jivaro=_jivaro_key(task),
             continue_on_lvs_fail=task.continue_on_lvs_fail,
             templates=template_set.fingerprint,
         )
@@ -1574,15 +1605,26 @@ def _recipe_from_group(
                 )
             )
 
-    # jivaro block -> reduction
+    # jivaro block -> reduction. Its parameters move; its on/off switch does
+    # not, because since 2026-09-04 nothing on a Recipe decides whether the
+    # reduction runs -- ticking jivaro on the run bar is the whole decision.
     jivaro = group.members[0].jivaro
-    recipe.reduction.enabled = jivaro.enabled
     if jivaro.frequency_limit is not None:
         recipe.reduction.frequency_limit_ghz = float(jivaro.frequency_limit)
     if jivaro.error_max is not None:
         recipe.reduction.error_max_pct = float(jivaro.error_max)
     dispositions.append(
         FieldDisposition("tasks.yaml:jivaro", "moved", "recipe:reduction", f"cells [{member_ids}]")
+    )
+    dispositions.append(
+        FieldDisposition(
+            "tasks.yaml:jivaro.enabled",
+            "dropped",
+            "run bar / --stage jivaro",
+            f"was {jivaro.enabled!r}; whether the reduction runs is a decision "
+            f"about one dispatch, so it is ticked per run rather than stored "
+            f"(cells [{member_ids}])",
+        )
     )
 
     recipe.policy.continue_on_lvs_fail = group.members[0].continue_on_lvs_fail

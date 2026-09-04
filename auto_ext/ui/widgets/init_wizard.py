@@ -568,8 +568,8 @@ class PreviewPage(QWizardPage):
                 bound = len(report.bindings.get(recipe.recipe_id, []))
                 lines.append(
                     f"{'recipe':>16}: {recipe.recipe_id}  ({recipe.name}, "
-                    f"{bound} cell(s), stages: "
-                    f"{', '.join(s.value for s in recipe.stages)})"
+                    f"{bound} cell(s), emits: "
+                    f"{', '.join(k.value for k in recipe.output.emit)})"
                 )
             self._v2_view.setPlainText("\n".join(lines))
 

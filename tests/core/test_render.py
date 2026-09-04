@@ -388,12 +388,23 @@ def test_stage_narrowing_intersects_recipe_and_caller(recipe: Recipe) -> None:
     assert [p.stage_key for p in plans] == ["calibre", "quantus"]
 
 
-def test_a_recipe_that_omits_a_stage_never_plans_it() -> None:
-    recipe = Recipe(
-        recipe_id="lvs-only", name="lvs only", stages=[Stage.SI, Stage.CALIBRE]
-    )
-    plans = render.plan_targets(recipe, stages=list(s.value for s in Stage))
+def test_the_recipe_cannot_narrow_the_plan_any_more() -> None:
+    """Only the requested set decides. 2026-09-04: one concept, one owner.
+
+    ``plan_targets`` used to filter by ``recipe.stages`` *before* applying the
+    caller's request, so a stage the user asked for and the recipe did not
+    declare vanished from the plan with nothing said. That was one of two
+    intersections (the other was in ``runner._recipe_steps``); the recipe side
+    of both is gone.
+    """
+
+    recipe = Recipe(recipe_id="lvs-only", name="lvs only")
+    plans = render.plan_targets(recipe, stages=["si", "calibre"])
     assert [p.stage_key for p in plans] == ["si", "calibre"]
+    # ``None`` means "every stage there is a target for", not "every stage the
+    # recipe declares" -- there is no such list to consult.
+    every = render.plan_targets(recipe, stages=None)
+    assert [p.stage_key for p in every] == ["si", "calibre", "quantus", "jivaro"]
 
 
 def test_every_target_has_a_filename_and_a_stage_key() -> None:

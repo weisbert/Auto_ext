@@ -85,6 +85,7 @@ from auto_ext.core.render import (
 )
 from auto_ext.core.template import make_jinja_env
 from auto_ext.model.cells import CellEntry
+from auto_ext.model.common import STAGE_ORDER
 from auto_ext.model.pdk import PdkProfile
 from auto_ext.model.recipe import Recipe, ResourceProfile
 from auto_ext.model.run import DutSnapshot, utcnow
@@ -274,7 +275,11 @@ def build_preview(
         intermediate_dir=paths.intermediate_dir,
         dspf_out_path=paths.dspf_out_path,
         started_at=now if now is not None else utcnow(),
-        stages=tuple(stage.value for stage in recipe.stages),
+        # Every stage, because a preview renders whatever the recipe can
+        # render. Which stages a real run executes is the run bar's answer,
+        # not the recipe's (2026-09-04 ownership ruling), and a preview has
+        # no run bar to ask.
+        stages=tuple(stage.value for stage in STAGE_ORDER),
     )
     dut = DutSnapshot(
         library=cell.library,

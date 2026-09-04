@@ -361,35 +361,35 @@ def test_the_four_rows_the_draft_called_knobs_are_not_knobs(catalog: Catalog) ->
     # migration with a different risk.
     for key in (
         "dspf_out_path",
-        "reduction_enabled",
+        # ``reduction_enabled`` was the fourth. The row is gone entirely since
+        # 2026-09-04: whether the reduction runs is whether the jivaro stage
+        # was requested, and the run bar owns that.
         "reduction_frequency_limit_ghz",
         "reduction_error_max_pct",
     ):
         assert catalog.option(key).currently is not Currently.MANIFEST_KNOB, key
 
 
-def test_the_two_controls_that_gate_jivaro_each_name_the_other(
+def test_only_one_row_can_still_decide_whether_the_reduction_runs(
     catalog: Catalog,
 ) -> None:
-    """One outcome, two independent switches, and the AND between them is
-    stated nowhere the user can see it.
+    """The pair that used to AND silently is a single row now.
 
-    ``runner`` runs the reduction only when ``reduction.enabled`` is true AND
-    ``jivaro`` is in ``stages``. A first-time user reading the form ticks the
-    stage, leaves the flag alone, and gets no reduction and no complaint. The
-    two rows are far apart in the form and belong to different sections, so
-    the only place the pairing can be said is each row's own ``why`` -- which
-    is what the tooltip shows.
+    Until 2026-09-04 ``reduction_enabled`` and ``stages`` were two independent
+    switches over one outcome: the runner reduced only when the flag was true
+    AND ``jivaro`` was listed, and the two rows sat in different sections of
+    the same form, so a user ticked the stage, left the flag alone, and got no
+    reduction and no complaint. The mitigation was prose -- each ``why`` named
+    the other row -- which is the shape this project stopped accepting. Both
+    rows are gone; ``requested_stages`` is what says whether jivaro runs.
     """
 
-    enabled = catalog.option("reduction_enabled")
-    stages = catalog.option("stages")
-    assert "stages" in enabled.why, (
-        "reduction_enabled must say that the jivaro stage has to be listed too"
-    )
-    assert "reduction" in stages.why and "jivaro" in stages.why, (
-        "stages must say that listing jivaro is not enough on its own"
-    )
+    for gone in ("reduction_enabled", "stages"):
+        with pytest.raises(KeyError):
+            catalog.option(gone)
+    requested = catalog.option("requested_stages")
+    assert requested.owner is Owner.RUN
+    assert requested.context_path == "run.stages"
 
 
 def test_lvs_deck_basename_has_no_invented_pdk_default(catalog: Catalog) -> None:
@@ -465,10 +465,16 @@ def test_the_jivaro_view_bug_is_fixed_by_derivation_not_by_a_second_literal(
 
     views = catalog.option("reduction_views_to_reduce")
     assert views.default is None
-    assert views.nullable is True
-    assert views.placeholder, "an unset control has to say what it falls back to"
     assert not views.question, "the question this row carried has been answered"
     assert catalog.option("out_file").default == "av_ext"
+    # RETIRED 2026-09-04, one step further than the 2026-08-24 fix. Null-plus-
+    # derivation still left a control that, typed into, won for Jivaro alone
+    # while Quantus went on writing out_file -- the same bug, one keystroke
+    # away. ``owner: fixed`` removes the control; the row keeps its
+    # context_path so the template variable still resolves off the render
+    # tree, which render._recipe_tree now fills from the cell unconditionally.
+    assert views.owner is Owner.FIXED
+    assert views.recipe_field_path is None
 
 
 def test_the_coupling_threshold_is_femtofarads_with_the_vendors_own_range(

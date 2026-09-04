@@ -276,10 +276,20 @@ def test_output_db_splits_by_the_format_it_writes(qtbot) -> None:
 
 
 def test_rows_with_no_landing_site_collect_under_flow(qtbot) -> None:
+    """Flow is down to one row, and that is the point of the 2026-09-04 round.
+
+    It was built for five -- which stages, reduction on or off, and two policy
+    flags -- all "decisions about the run rather than lines in a file". Three
+    of them were decisions about *this run*, which is the run bar's question,
+    so ``stages`` and ``reduction_enabled`` were deleted outright and
+    ``fail_on_unparsable_lvs_report`` lost its control the same day.
+    ``continue_on_lvs_fail`` is the last one standing, and it is transitional:
+    the run bar's tick box is not wired yet (see UX_VALIDATION 5.7).
+    """
+
     flow = next(tool for tool in form_layout() if tool.tool == FLOW_TOOL)
     assert not any(spec.lands_in for spec in flow.specs)
-    # Decisions about the run rather than lines in a file.
-    assert {"stages", "reduction_enabled"} <= {spec.key for spec in flow.specs}
+    assert {spec.key for spec in flow.specs} == {"continue_on_lvs_fail"}
 
 
 def test_a_profile_backed_list_says_where_it_came_from(qtbot, tmp_path) -> None:
@@ -360,7 +370,9 @@ def test_groups_with_is_refused_when_it_cannot_resolve() -> None:
     # (b) naming a row that itself lands nowhere
     bad2 = {**payload}
     bad2["options"] = [
-        {**o, "groups_with": "stages"} if o["key"] == "extraction_corner" else o
+        {**o, "groups_with": "continue_on_lvs_fail"}
+        if o["key"] == "extraction_corner"
+        else o
         for o in payload["options"]
     ]
     with _pytest.raises(Exception) as caught2:
@@ -380,14 +392,20 @@ def test_the_control_type_follows_the_catalog(qtbot) -> None:
     assert isinstance(simulator, FreeChoiceOptionEditor)
     assert simulator.combo().isEditable() is True
     # A closed LIST -> one check box per member, not a comma-separated string.
-    stages = screen.editor("stages")
-    assert isinstance(stages, MultiChoiceOptionEditor)
-    assert list(stages.check_boxes()) == [
-        "si",
-        "strmout",
-        "calibre",
-        "quantus",
-        "jivaro",
+    # ``stages`` was the named case in the office report ("里面有很多参数你是选择
+    # 的是 blank 填写") and it is no longer a recipe row at all; ``output_xy`` is
+    # the surviving closed list on this form and carries the same contract.
+    columns = screen.editor("output_xy")
+    assert isinstance(columns, MultiChoiceOptionEditor)
+    assert list(columns.check_boxes()) == [
+        "CANONICAL_RES",
+        "PARASITIC_RES",
+        "CANONICAL_CAP",
+        "PARASITIC_CAP",
+        "DIODE",
+        "MOS",
+        "BIPOLAR",
+        "GENERIC",
     ]
 
 

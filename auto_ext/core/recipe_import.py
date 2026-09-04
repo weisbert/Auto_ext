@@ -1898,11 +1898,6 @@ def _load(files: Iterable[Path | str | ImportSource]) -> list[ImportSource]:
     return loaded
 
 
-def _stages_for(targets: Sequence[RenderTarget], catalog: Catalog) -> list[Stage]:
-    present = {catalog.target(target).stage for target in targets}
-    return [stage for stage in STAGE_ORDER if stage in present]
-
-
 def _emit_for(targets: Sequence[RenderTarget]) -> list[OutputKind] | None:
     kinds = [
         kind
@@ -2495,14 +2490,14 @@ def import_recipe(
             )
         )
 
-    tree["stages"] = _stages_for(order, cat)
-    if Stage.JIVARO in tree["stages"]:
-        # A stage in the list and a stage that runs are two different facts,
-        # and the runner reads the second one: ``recipe.reduction.enabled`` is
-        # what gates the jivaro stage. Importing the XML and leaving it False
-        # declares a stage the same recipe has also disabled. The migration
-        # path has always set it; this one had not.
-        tree.setdefault("reduction", {})["enabled"] = True
+    # Nothing about stages is written into the recipe any more. Which files
+    # the user handed us says which stages their old flow ran -- it is real
+    # information, and it is reported as ``RecipeImportResult.targets`` -- but
+    # writing it into the recipe made the recipe a second owner of a decision
+    # the run bar makes per dispatch, and the pair of writes this used to do
+    # (``stages`` plus a forced ``reduction.enabled``) was a coupling nobody
+    # could see from either row. A jivaro XML in the import set now means
+    # exactly what it says: here are Jivaro's parameters.
     emit = _emit_for(order)
     if emit is not None:
         tree.setdefault("output", {})["emit"] = emit
