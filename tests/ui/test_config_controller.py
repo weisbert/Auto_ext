@@ -479,6 +479,43 @@ def test_refresh_health_emits_a_report_for_the_loaded_profile(
     assert controller.health_report is report
 
 
+def test_refresh_health_reads_the_staged_profile_not_the_loaded_one(
+    loaded_controller, profile_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"按提示 pin 了变量，按 Re-check，还是说变量缺失."
+
+    Every other reader goes through the staged-first :attr:`profile`
+    property; the health check read the loaded attribute directly, so the one
+    edit the drawer exists to make -- pinning a variable -- was invisible to
+    the verdict until the whole project had been saved.
+    """
+
+    from auto_ext.model.pdk import CheckStatus
+
+    var = "AUTO_EXT_PIN_PROBE"
+    check_id = "env.auto_ext_pin_probe"
+    monkeypatch.delenv(var, raising=False)
+
+    controller = loaded_controller
+    profile = controller.profile.model_copy(update={"required_env": [var]})
+    controller.stage_profile(profile)
+
+    report = controller.refresh_health(force=True)
+    assert report is not None
+    statuses = {r.check_id: r.status for r in report.results}
+    assert statuses.get(check_id) is CheckStatus.FAIL, statuses
+
+    controller.stage_profile(
+        profile.model_copy(
+            update={"env_overrides": {**profile.env_overrides, var: "/pinned/value"}}
+        )
+    )
+    report = controller.refresh_health(force=True)
+    assert report is not None
+    statuses = {r.check_id: r.status for r in report.results}
+    assert statuses.get(check_id) is CheckStatus.OK, statuses
+
+
 def test_refresh_health_without_a_profile_emits_none(qtbot) -> None:
     controller = ConfigController()
     seen: list[object] = []

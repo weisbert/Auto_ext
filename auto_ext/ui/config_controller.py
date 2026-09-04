@@ -592,20 +592,34 @@ class ConfigController(QObject):
     # ---- health -------------------------------------------------------
 
     def refresh_health(self, *, force: bool = False) -> PdkHealthReport | None:
-        """Evaluate the loaded profile's checks and emit :attr:`health_changed`.
+        """Evaluate the current profile's checks and emit :attr:`health_changed`.
+
+        *Current*, not loaded: the staged-first :attr:`profile`, like every
+        other reader. Pinning an environment variable stages a profile and
+        does not write one -- a health row must not be able to rewrite the
+        PDK profile behind the user's back -- so reading ``self._profile``
+        here meant the one edit the Setup drawer exists to make was the one
+        edit the verdict could not see, and Re-check went on reporting the
+        variable missing until the whole project had been saved.
 
         Uses the ``<profile>.health.json`` cache unless ``force``; a cache
         that describes a different profile revision is never returned, so a
-        stale "you can run" cannot survive a profile edit.
+        stale "you can run" cannot survive a profile edit. Nothing is written
+        *to* that cache while the profile is staged: a verdict about a
+        revision that exists in no file has no business outliving the session.
         """
 
-        if self._profile is None or self._profile_path is None:
+        profile = self.profile
+        if profile is None or self._profile_path is None:
             self._health = None
             self.health_changed.emit(None)
             return None
         try:
             report, _from_cache = cached_or_check(
-                self._profile_path, self._profile, force=force
+                self._profile_path,
+                profile,
+                force=force,
+                write="profile" not in self._pending,
             )
         except (AutoExtError, OSError) as exc:
             self.config_error.emit(f"health check failed: {exc}")

@@ -12,7 +12,7 @@ actions -- the keyboard ones -- that reach nothing at all, and every symptom
 of that looks like a different bug: Save writes the previous value, the box
 still shows the new one, closing throws it away without a word, and a pin
 typed into the Setup drawer is thrown away by the very Re-check that is the
-natural next click.
+natural next click, and is invisible to the verdict even when it survives.
 
 The last one here is the mirror image: a save that fails half way leaves the
 files it *did* write looking, to the very next question the window asks,
@@ -30,6 +30,7 @@ pytest.importorskip("pytestqt")
 
 from PyQt5.QtWidgets import QLineEdit, QMessageBox, QPushButton  # noqa: E402
 
+from auto_ext.model.pdk import CheckStatus  # noqa: E402
 from auto_ext.ui.main_window import MainWindow  # noqa: E402
 
 #: A variable no shell exports, so the check for it always starts red.
@@ -170,6 +171,43 @@ def test_a_path_typed_in_setup_survives_the_recheck_button(
 
     edit, _pin = _pin_row(window, PROBE_CHECK)
     assert edit.text() == "/pdk/probe/root"
+
+
+def test_a_pinned_variable_makes_the_check_pass_on_the_next_recheck(
+    window_missing_env: MainWindow, qtbot
+) -> None:
+    """"按提示 pin 了变量，按 Re-check，还是说变量缺失."
+
+    The pin is staged, not written -- pressing Set must not rewrite the PDK
+    profile behind the user's back. But the verdict read the *loaded* profile
+    directly, so the one edit the drawer exists to make was the one edit it
+    could not see, and Re-check kept reporting the variable missing until the
+    whole project had been saved.
+    """
+
+    window = window_missing_env
+    _menu_action(window, "&Setup drawer").trigger()
+
+    drawer = window.setup_drawer
+    report = drawer.report()
+    assert report is not None
+    before = {r.check_id: r.status for r in report.results}
+    assert before[PROBE_CHECK] is CheckStatus.FAIL
+
+    edit, pin = _pin_row(window, PROBE_CHECK)
+    qtbot.keyClicks(edit, "/pdk/probe/root")
+    pin.click()
+
+    _recheck(window)
+
+    report = drawer.report()
+    assert report is not None
+    after = {r.check_id: r.status for r in report.results}
+    assert after[PROBE_CHECK] is CheckStatus.OK, after
+    # the row is no longer a problem row, so it no longer offers a pin box
+    row = drawer.row_widget(PROBE_CHECK)
+    assert row is not None
+    assert row.findChildren(QLineEdit) == []
 
 
 # ---- the write error that claimed to be a conflict ---------------------------
