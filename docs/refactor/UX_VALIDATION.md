@@ -155,7 +155,7 @@ agent，给它一个具体任务，例如：
 - DECISIONS #19 已按用户裁定改写（猜测枚举 → 可编辑下拉框）。**其余 22 条决定同样是在
   一台没有 Cadence 的机器上替用户做的**，同样没有经过第 3 层。它们排在 backlog 里。
 
-## 五、第二轮（2026-09-04）：三层没量到的维度，和补上的六把尺子
+## 五、第二轮（2026-09-04）：三层没量到的维度，和补上的七把尺子
 
 > 立档于 2026-09-04。起因是用户在真实使用里又撞到四条：LVS 失败后两个「看报告」按钮一个没用；
 > recipe 改了忘保存、回来就没了，而且「连 RC / R only 这种常见 extraction type 都没有」；cells 列
@@ -189,6 +189,9 @@ agent，给它一个具体任务，例如：
 
 ### 5.3 六把尺子各量出了什么
 
+（第七把尺子「单一归属」不在这张表里：它是 2026-09-04 owner 那条重叠裁定带出来的，
+展开在 5.7，机械半也落在 `tests/ui/test_reachability.py` 上。）
+
 六份只读账本共 147 条，去重后 **135 条**（高 52 / 中 65 / 低 18），全文在 backlog 的
 `docs/gui-review-2026-09-04-master-ledger.md`。用户报的四条只是其中 4 条。最重的几类：
 
@@ -219,6 +222,7 @@ agent，给它一个具体任务，例如：
 | N 二有其二 | `tests/support/v2.py` + `tests/ui/test_second_run.py` | 「动作做两遍、第二遍不同」的 helper 和它的第一批用例 |
 | V/W 仪器 | `scripts/ui_inventory.py` + `tests/test_ui_inventory.py` | 修 12 处盲区，加密度开关、enabled/visible/receivers/scroll-range 列、Runs 屏 dumper，以及仪器自检 |
 | D 领域对齐 | `tests/ui/test_reachability.py` 扩展 | `currently: absent` 的行必须画成禁用的「未接线」行或进带理由的豁免集 |
+| **O 单一归属** | `tests/ui/test_reachability.py` 再扩展 | 带 `screen:` 的行只在那个屏幕被编辑、别处只许放无值的链接；每个 run bar 控件恰好接到一个 GUI 真的传了的 runner 入参，且没有 recipe 孪生行。**这一把量的是屏幕之间的关系，前六把量的都是单个界面自己** —— 见 5.7 |
 
 判断半（W 走查、D 对手册的映射）不进 CI，每轮 GUI 改动之后、送红区之前跑一次。
 `extUser.pdf` 第 3 章是 Quantus GUI 的逐字段参考（每节末尾有 `Quantus: <cmd> -<opt>` / `RSF: ?<var>` 对），
@@ -285,3 +289,90 @@ Quantus GUI 里真正会动的那些，八条波 3 的账因此不是「实现�
 一行、代价是把那些 deck 全 diff 一遍，所以**留着**，事实写在 catalog 行和模板的一行
 Jinja 注释里，免得下一个人当成整洁化再删一次。至于「这颗 PDK 的 dummy fill 到底该怎么
 建模」——那是另一个问题，`question:` 保持打开。
+
+### 5.7 第七把尺子：单一归属（ONE CONCEPT, ONE OWNER，2026-09-04 裁定）
+
+> owner 原话：**「Recipe 和 Cell 两个屏幕有重叠：要跑哪些 stage 两边都有 —— 很乱，
+> 应该由 stage 选择器（run bar）说了算；输出的 av_extracted view 名字两边也都有 ——
+> 应该由 cell 说了算。」**
+
+**为什么前六把尺子全绿。** 5.3 的六把尺子每一把都只量**一个界面自己**：字段有没有绑控件
+（层 1）、控件点了有没有效果（尺子 A）、控件文本够不够（层 3）、动作做第二遍还行不行
+（尺子 N）。**一个概念的两份拷贝，每一份都单独通过全部六把。** 这就是 `stages`
+能同时长在 Recipes 表单和 run bar 上四个月、979 条 GUI 测试全绿的原因；也是
+Recipes 表单能在「set per cell, not per recipe」这句话旁边画出一个 catalog 默认值
+`av_ext` 的原因 —— 那个值不属于任何一个 cell，也不属于任何一个 project。
+
+**规则（backlog decision-008）。** 每个用户可见的概念，**有且只有一个屏幕显示并编辑它的值**：
+
+| 概念是什么 | 归属 |
+|---|---|
+| 关于**这一次运行**的决定（跑哪些 stage、几个 job、dry run、LVS 失败要不要继续） | **run bar** |
+| **每个 cell 自己的事实**（library / cell / view / ground net / 输出 view 名） | **Cells** |
+| **萃取物理**（corner、extract 规则、耦合门限、Jivaro 参数） | **recipe** |
+| **PDK 事实**（corner 字面量、deck 路径、寄生器件名） | **profile** |
+
+别的屏幕可以放一条**链接**指过去，但**不许显示值**。「链接」在
+`tests/ui/test_reachability.py` 里是机械定义的：`EditorKind.POINTER` 且
+`displayed_value() == ""`。不是「显示的值要保持正确」—— 要保护的性质不是正确性，
+是单一归属；一条重新开始显示东西的行，无论显示得对不对都必须挂。
+
+**这一轮退役的五样东西。** 每一样都是「一个决定，两个所有者，runner 在中间**静默地**
+把两边合起来」：
+
+1. **`Recipe.stages`** —— runner 交集了两次（`render.plan_targets` 在应用请求集合*之前*
+   过一遍，`runner._recipe_steps` 再过一遍）。在 Run 按钮正上方勾了、而九十行深的表单里
+   没写的 stage，**就是不跑，任何地方都不留一行字**。M-23 的拒绝留下来了，但只剩下唯一
+   还可能发生的那种：**请求集合为空**，在 run 目录被创建之前拒绝，并报出它接受的集合。
+2. **`Recipe.reduction.enabled`** —— 同一个缺陷的第二张脸：一个跨两个 section 的 AND，
+   任一为假就静默跳过整个 reduction。现在 **jivaro 勾了就跑，没勾就不在 record 里出现**
+   —— 不再有一行 `skipped` 让人去猜是谁决定的。
+3. **`Recipe.reduction.views_to_reduce`** —— cell 的 `out_file` 的第二份拷贝。
+   2026-08-24 那一轮把默认值改成 null 并从 DUT 解析，但**控件留着**：一旦填进去，
+   它只对 Jivaro 生效，而 Quantus 照旧写 `out_file` —— 那个「Jivaro 指向一个不存在的 view」
+   的 bug 只差一次敲键盘。**一个通常为空、空的时候去别处取值的可空控件，仍然是两个所有者**，
+   只不过其中一个平时不出声。
+4. **`ResourceProfile.max_workers`** —— 这把尺子的退化情形：**零个所有者**。
+   持久化在 `config/resources.yaml` 里，grep 证明没有任何代码解析它，它自己的注释还承认
+   `--jobs` 会覆盖它。删掉，而不是把它接成同一个决定的第四个输入。
+5. **指针行的「值」那一半**（`out_file` 和 `dspf_out_path`）—— 画的是
+   `_display_default(spec)`，即 **catalog 默认值**。这比一份过期拷贝更糟：它断言了一件
+   可能对这个项目里任何一个 cell 都不成立的事。改一次 widget 修掉整类，包括以后任何
+   带 `screen:` 的新行。
+
+**磁盘上的东西怎么办。** 红区那三份真配方带着 `stages:`、`reduction.enabled` 和
+`views_to_reduce: av_extracted`，`Recipe` 又是 `extra="forbid"` —— 不迁移就是
+**每一个配方都加载失败、列表空白、没有解释**，也就是 2026-08-28 那次红区事故本身。
+所以走 `upgrade_three_state_payload` 的先例：**加载时就地丢掉，一行日志点名丢了什么，
+并且同步改掉带注释的 raw 树**，否则下一次保存又把旧 key 写回去、升级在每次加载时重新发生。
+*「静默」是指「不停下来问」，不是「不留痕迹」*：一个被收窄过的 `stages: [si, calibre]`
+是某个人的意图，日志必须把它念出来，run bar 第一次打开这个项目时应当用它做种子
+（见 `scratchpad/handover_runbar.md`）。`config/resources.yaml` 的
+`max_workers` 同理，因为 migrate 和新建项目向导都写过它。
+
+**`continue_on_lvs_fail` 是半成品，而且它自己说了。** 它是关于**这一次尝试**的决定，
+所以概念上完全归 run bar。今天：`run_tasks` / `RunWorker` 都收
+`continue_on_lvs_fail: bool | None` 了，`None` 表示「调用方没有意见」，回退到
+`recipe.policy`；解析出来的那个值就是 `RunRecord` 记下的值，所以**结果卡片不可能再和
+这次运行说的不一样** —— 而在此之前，run bar 的勾选框被读进 `RunRequest` 然后被丢掉，
+卡片再回过头告诉用户「continue_on_lvs_fail 是关的」。剩下的一步在
+`cells_screen._dispatch` 里，那个文件另一个会话正在重写，所以 recipe 上那一行**暂时留着**，
+`tests/ui/test_reachability.py` 用 `xfail(strict=True, reason="M-133/E-1: …")` 钉住这一格
+—— **接手的会话必须翻掉自己的 xfail**，这是 5.4 的规矩。
+
+**机械半**（`tests/ui/test_reachability.py`，两条断言就是整把尺子）：
+
+| 断言 | 形状 |
+|---|---|
+| (a) 带 `screen:` 的行在**且仅在**那个屏幕上被编辑，别的屏幕不显示它的值 | `SCREEN_BINDERS` 三张表 + 对每条 pointer 行断言 `displayed_value() == ""`、`link_label()` 非空 |
+| (b) 每个 run bar 控件恰好接到一个 runner 入参，**GUI 真的传了它**，且 catalog 里没有绑到 Recipe 字段的孪生行 | `inspect.signature(run_tasks)`；用 `ast` 读 `cells_screen.py` 里 `RunWorker(...)` 的关键字（要量的是这个参数**有没有被写出来**）；`recipe_field_path is None` |
+
+**判断半（不进 CI）**：新增一条带 `screen:` 的 catalog 行、或者往 run bar 上加一个控件时，
+先问一句「这个概念今天由谁拥有」，再问「另一边要不要一条链接」。
+
+**尺子的下一格，本轮没做。** catalog 侧还有一条便宜的检查：断言没有两行落在同一个
+`(target, section, option)` 三元组上。今天有 15 处三元组重合，但其中大部分是
+**一行由几个事实拼出来**（`inputView` = library/cell/out_file，`-design_cell_name` =
+cell/layout_view/library）—— 合法的组合和真正的双所有者长得一样，分开它们需要逐条判断
+「这是拼装还是重复」，那是一次独立的复核，不是这一轮能顺手带过的。
+

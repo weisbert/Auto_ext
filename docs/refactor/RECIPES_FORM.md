@@ -37,7 +37,8 @@ Level 1 is the tool, read off the row's landing site, and a row with no
 landing site falls into the synthetic `Flow` bucket. That was right for the
 five rows Flow was built for — which stages, reduction on or off, the two
 policy flags, all decisions *about* the run rather than lines in a file — and
-wrong the moment a real setting had no site of its own.
+wrong the moment a real setting had no site of its own. (Flow is down to one
+row since 2026-09-04; see §2.)
 
 `extraction_corner` is the case that forced the column. What reaches Quantus
 is the profile-owned `technology_corner` literal, so the corner row lands
@@ -98,9 +99,24 @@ Two properties the code holds and the tests assert:
   toggle's "keep the focused row" behaviour depends on.
 
 Safe because **no option carries a different `section` in different target
-files** — verified across all 80 rows that have a landing site. The other 5 have
-none and are the `Flow` bucket: they are decisions about the run rather than
-lines in a file (corner, stages, reduction on/off, two policy flags).
+files** — verified across all 80 rows that have a landing site.
+
+### The `Flow` bucket, and why it is down to one row
+
+Flow collects the rows with no landing site: decisions *about* the run rather
+than lines in a file. It was built for five, and four of them have left.
+
+| row | where it went |
+|---|---|
+| `stages` | **deleted 2026-09-04.** Which stages run is a decision about *this attempt*, and it was already being made on the run bar, above the Run button. The runner intersected the two lists twice and in silence. |
+| `reduction_enabled` | **deleted 2026-09-04.** The same decision wearing a second face: an AND across two sections of this form, either half of which skipped the whole reduction without a word. Jivaro runs iff jivaro is ticked. |
+| `fail_on_unparsable_lvs_report` | **control retired 2026-09-04** (§5, and `UX_VALIDATION.md` §5.6): the row kept a `context_path` while nothing read the policy, so the form drew a live tick box that changed nothing. |
+| `extraction_corner` | moved out under `groups_with: technology_corner` (§1.1). It still has no landing site; it is drawn beside the temperature, where a person looks for it. |
+| `continue_on_lvs_fail` | **still here, transitionally.** It is a run-time decision too, so the run bar should own it outright — `run_tasks` and `RunWorker` take it as an argument since 2026-09-04, and the recipe is only the fallback when the caller passes `None`. The row goes when `cells_screen._dispatch` passes the bar's checkbox; `UX_VALIDATION.md` §5.7 carries the cut-over. |
+
+The general rule behind all four is `UX_VALIDATION.md` §5.7 — **one concept,
+one owner**. A run-time decision belongs to the run bar, a per-cell fact to
+Cells, extraction physics to the recipe, a PDK fact to the profile.
 
 ## 3. Density — what Common shows
 
@@ -157,6 +173,29 @@ Five columns: marker · label · control · annotation · flag.
   so opening it reflows nothing.
 
 ## 5. Disabled, hidden, absent
+
+### The pointer row shows no value
+
+A row another screen owns is drawn as a **link and nothing else** — the
+sentence "set per cell, not per recipe — open the Cells column", clickable,
+with no value beside it. Until 2026-09-04 it drew `_display_default(spec)`
+first: `av_ext` for `out_file`, a `${WORK_ROOT2}` pattern for `dspf_out_path`.
+That is not a stale copy of the owning screen's value, it is the **catalog
+default** — a value that may be true of no cell and no project in the loaded
+workspace, shown on the screen a user reads while deciding what a run will
+produce. The cost of believing it is a run pointed at a view that does not
+exist, which is the 2026-08-24 Jivaro bug arriving through a different door.
+
+`reduction_views_to_reduce` went the same way and one step further: it was a
+*settable* second copy of the cell's `out_file`, and a typed value won for
+Jivaro alone while Quantus went on writing `out_file`. The Recipe field is
+gone, the row is `owner: fixed` so no control is drawn, and its `context_path`
+stays only so the template variable still resolves — `render._recipe_tree`
+fills it from the DUT.
+
+`tests/ui/test_reachability.py` defines "link" mechanically —
+`EditorKind.POINTER` with `displayed_value() == ""` — so the rule holds for
+any future row that grows a `screen:`, not just the two shipped ones.
 
 | case | treatment | why |
 |---|---|---|
@@ -358,7 +397,11 @@ one level up.
 
 A v1 recipe carrying the two scalars is upgraded to a one-rule list **on
 load**, in place, silently — the user ruled that on 2026-08-25 over an
-explicit step in the deploy. Silent means "does not stop to ask", not "leaves
+explicit step in the deploy. The 2026-09-04 retirements (`stages`,
+`reduction.enabled`, `reduction.views_to_reduce`, and `max_workers` on the
+ResourceProfile) follow the same precedent for the same reason: `Recipe` is
+`extra="forbid"`, so a key left on disk with no field is not a value that does
+nothing, it is a recipe that refuses to load. Silent means "does not stop to ask", not "leaves
 no trace": `load_recipe_with_raw` writes one line to the log naming the file,
 and the comment-carrying tree is updated too, or a later save would write the
 v1 keys straight back and the upgrade would un-happen on every load. A file

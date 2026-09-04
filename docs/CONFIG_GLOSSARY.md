@@ -230,6 +230,25 @@ GUI 的 Project tab：
 
 ## 什么不再支持？
 
+### 2026-09-04：单一归属裁定退役的四个字段（**加载时自动丢弃，不报错**）
+
+owner 裁定「一个概念只能有一个屏幕说了算」（`docs/refactor/UX_VALIDATION.md` §5.7）
+之后，下面四个字段没有了。它们和本节其余条目**不一样**：不需要手动迁移，加载时就地丢掉
+并写一行日志说明丢了什么 —— 红区磁盘上那三份真配方带着其中三个，而 `extra="forbid"`
+意味着不迁移就是每个配方都加载失败、列表空白、没有解释。
+
+| 文件 | 字段 | 现在谁说了算 |
+|---|---|---|
+| `recipes/*.yaml` | `stages:` | run bar 的 stage 勾选框 / CLI `--stage` |
+| `recipes/*.yaml` | `reduction.enabled` | run bar 的 jivaro 勾选框（勾了就跑） |
+| `recipes/*.yaml` | `reduction.views_to_reduce` | cell 行的 `out_file`（Cells 屏的 out view 列） |
+| `config/resources.yaml` | `max_workers` | run bar 的 jobs 数字框 / CLI `--jobs` |
+
+被收窄过的 `stages:`（比如只有 `[si, calibre]`）是某人的意图，所以日志会把丢掉的集合
+念出来，而不是无声删除。
+
+### Phase 5.6.5
+
 Phase 5.6.5 删除了以下字段（旧 yaml 加载会报错，因为 pydantic `extra="forbid"`）：
 
 - `pdk_subdir` / `pdk_subdir_env_vars`
