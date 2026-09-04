@@ -2853,7 +2853,6 @@ def _print_import_report(
         )
 
     # 3. what stayed at the catalog default ----------------------------------
-    landed = {row.key for row in result.mapped if row.applied_to}
     rows: list[tuple[str, str, str, str]] = []
     agreed = 0
     for row in sorted(result.mapped, key=lambda item: item.key):
@@ -2864,13 +2863,12 @@ def _print_import_report(
             agreed += 1
             continue
         rows.append((row.key, _fmt_value(row.value), _fmt_value(default), row.note))
-    for key, reason in sorted(result.unread.items()):
-        # A key the literal reader could not read but something else did --
-        # ``lvs_connect_by_name`` comes from whether its line exists at all --
-        # is in the recipe, and listing it here as well would contradict the
-        # section above it.
-        if key in landed:
-            continue
+    # ``left_at_default`` and not ``unread``: a key the literal reader could
+    # not read but something else did -- ``lvs_connect_by_name`` comes from
+    # whether its line exists at all -- is in the recipe, and listing it here
+    # as well would contradict the section above it. The filter lives on the
+    # result so this table and the GUI's third section give one answer.
+    for key, reason in sorted(result.left_at_default.items()):
         rows.append(
             (key, "(not readable)", _fmt_value(catalog.option(key).default), reason)
         )

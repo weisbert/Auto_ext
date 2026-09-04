@@ -447,6 +447,26 @@ class RecipeImportResult:
     def clean_roundtrip(self) -> bool:
         return all(trip.identical for trip in self.roundtrip.values())
 
+    @property
+    def left_at_default(self) -> dict[str, str]:
+        """:attr:`unread` minus every key that reached an object anyway.
+
+        "The literal reader could not read this" and "this stayed at the
+        catalog default" are not the same statement, and the difference is a
+        whole class of key: ``*lvsRulesFile`` carries four modelled values on
+        one line, so the reader refuses it whole and the variable solver then
+        recovers each share and lands it. Reporting such a key as left at the
+        default contradicts, three lines further down the same report, the
+        section that says where it went.
+
+        One property because there is one answer. The CLI grew this filter
+        first and the import dialog never got it, so the same import told a
+        terminal and a window two different stories about the same file.
+        """
+
+        landed = {row.key for row in self.mapped if row.applied_to}
+        return {key: why for key, why in self.unread.items() if key not in landed}
+
     def summary(self) -> str:
         files = ", ".join(f"{f.label} -> {f.target.value}" for f in self.sources)
         return (

@@ -223,6 +223,33 @@ def test_a_deck_spelling_out_an_env_var_imports_once_the_value_is_supplied(
     ].diff
 
 
+def test_left_at_the_default_never_names_a_key_the_recipe_holds(
+    golden_dir: Path,
+) -> None:
+    """One answer to "what stayed at the catalog default", for every surface.
+
+    A key the literal reader could not read is not thereby a key the import
+    left alone. ``*cmnVConnectNamesState: ALL`` is a boolean spelled as a word,
+    so the reader files it under ``unread`` -- and the presence reader gets it
+    right and puts it in the recipe. Listing it under "left at the catalog
+    default" contradicts the section above, which says where it went. The CLI
+    filtered such keys out; the import dialog did not, which is two answers to
+    one question about one import.
+    """
+
+    text = _qci(
+        golden_dir,
+        replace=("*lvsReportOptions: S", "*cmnVConnectNamesState: ALL\n*lvsReportOptions: S"),
+    )
+    result = _import_qci(text, recipe_id="agree")
+    landed = {row.key for row in result.mapped if row.applied_to}
+    assert "lvs_connect_by_name" in result.unread
+    assert "lvs_connect_by_name" in landed
+    assert "lvs_connect_by_name" not in result.left_at_default
+    assert not set(result.left_at_default) & landed
+    assert set(result.left_at_default) == set(result.unread) - landed
+
+
 def test_the_env_solver_does_not_answer_a_reference_with_itself(
     raw_dir: Path,
 ) -> None:

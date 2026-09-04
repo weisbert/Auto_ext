@@ -175,12 +175,45 @@ def test_the_third_section_merges_the_unread_and_the_unassignable(
     rows = rid.default_rows(result)
 
     unassignable = [value for value in result.mapped if not value.applied_to]
-    assert len(rows) == len(unassignable) + len(result.unread)
+    assert len(rows) == len(unassignable) + len(result.left_at_default)
     keys = {row.key for row in rows}
-    assert set(result.unread) <= keys
+    assert set(result.left_at_default) <= keys
     # An unread key has no value to show; an unassignable one does.
-    assert all(row.value == "" for row in rows if row.key in result.unread)
+    assert all(row.value == "" for row in rows if row.key in result.left_at_default)
     assert any(row.value for row in rows)
+
+
+def test_the_third_section_never_lists_a_value_the_recipe_holds(
+    qtbot, shipped: dict[RenderTarget, str]
+) -> None:
+    """"Left at the catalog default" has to mean it.
+
+    ``lvs_connect_by_name`` is recovered from whether its line is written at
+    all, so the literal reader files it under ``unread`` while the recipe
+    holds the value. The CLI's report has always dropped such a key from this
+    section; the dialog extended from ``unread`` unconditionally, so the two
+    surfaces gave different answers about one import -- and the GUI's answer
+    was the wrong one, listing a value the user's recipe already carries.
+    """
+
+    # A runset from a site that does connect by name: the line is a boolean
+    # spelled as a word, which is what the literal reader cannot take.
+    connecting = dict(shipped)
+    qci = connecting[RenderTarget.LVS_QCI]
+    assert "*cmnVConnectNamesState" not in qci
+    connecting[RenderTarget.LVS_QCI] = qci.replace(
+        "*lvsReportOptions:", "*cmnVConnectNamesState: ALL\n*lvsReportOptions:"
+    )
+
+    dialog = _analysed(qtbot, connecting)
+    result = dialog.result_object()
+    landed = {row.key for row in result.mapped if row.applied_to}
+    assert "lvs_connect_by_name" in landed, "the sample no longer exercises the case"
+    assert "lvs_connect_by_name" in result.unread
+
+    listed = {row.key for row in rid.default_rows(result)}
+    assert "lvs_connect_by_name" not in listed
+    assert not set(result.left_at_default) & landed
 
 
 def test_the_third_section_groups_by_reason_biggest_first(
