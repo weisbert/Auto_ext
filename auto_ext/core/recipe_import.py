@@ -899,8 +899,26 @@ def _implausible(option: OptionSpec, value: Any) -> _Verdict:
 
     A value the *model* then refuses is not lost either: see
     :func:`_validate_degrading`.
+
+    ``choices_not_offered`` is the third case and it is neither of the other
+    two: the value is a legal one this tool declines to offer (the nine
+    ``extract -type`` members whose deck no template can complete). Letting it
+    through would hand the model a value it refuses and take the whole import
+    down; passing it silently would be worse still. So it is refused *here*,
+    where the catalog can name the reason and the default the deck will be
+    imported as -- which is the difference between "your file was rejected"
+    and "your file was imported, here is what changed and how to change it
+    back".
     """
 
+    not_offered = {str(member) for member in option.choices_not_offered}
+    if not_offered and str(value) in not_offered:
+        return _Verdict(
+            refused=(
+                f"{value!r} is not offered here ({option.not_offered_reason}); "
+                f"imported as {str(option.default)!r} -- edit if that is wrong"
+            )
+        )
     if option.type is OptionType.ENUM and option.choices and value not in option.choices:
         mismatch = f"{value!r} is not one of the catalog's choices {option.choices}"
         if option.choices_confidence is Confidence.CERTAIN:

@@ -34,6 +34,17 @@
 #                     so a wrong guess here cannot lock a user out of the
 #                     spelling their tool wants. A bare text box, which is
 #                     what this used to mean, told the user nothing at all.
+# choices_not_offered members of ``choices`` the TOOL accepts and this FORM
+#                     does not draw, with ``not_offered_reason`` saying why.
+#                     The two claims are different and used to share one edit:
+#                     dropping a member from ``choices`` says the tool has no
+#                     such value, while listing it here says the tool has it
+#                     and we chose not to offer it. Readback, import and every
+#                     error message still name these members, so the value set
+#                     stays whole -- only the combo shrinks. Required together:
+#                     the catalog self-check refuses one without the other,
+#                     refuses a member that is not in ``choices``, and refuses
+#                     a set that hides the row's own default.
 # choices_from        a PdkProfile table that supersedes ``choices`` once a
 #                     profile is loaded: profile.corners /
 #                     profile.lvs_decks.variants. ``choices`` stays as the
@@ -1816,6 +1827,21 @@ options:
       - rlck_decoupled
       - rlck_coupled
       - rlck_decoupled_to_substrate
+    choices_not_offered:
+      - substrate_only
+      - c_only_decoupled_to_substrate
+      - rc_decoupled_to_substrate
+      - rlc_decoupled
+      - rlc_coupled
+      - rlc_decoupled_to_substrate
+      - rlck_decoupled
+      - rlck_coupled
+      - rlck_decoupled_to_substrate
+    not_offered_reason: >-
+      owner ruled 2026-09-04: not used in this shop, and no template can
+      complete their deck -- the rlc/rlck members need -ind_component and
+      -mutual_ind_component, substrate_only and the *_to_substrate members
+      need substrate_nets_file
     choices_confidence: certain
     default: rc_coupled
     currently: jinja_var
@@ -1836,6 +1862,20 @@ options:
       (-ind_component / -mutual_ind_component), which neither template emits,
       so choosing an rlc or rlck member today gets an incomplete deck. That
       is a template gap, not a value-set one.
+      RULED 2026-09-04: nine of the fifteen are no longer offered on the form
+      -- see choices_not_offered. Six are drawn (none, r_only,
+      c_only_decoupled, c_only_coupled, rc_decoupled, rc_coupled) and every
+      one of them renders a deck that is complete with what the templates
+      emit today. The nine that are not: the six rlc/rlck members would run,
+      report success and produce a netlist with no inductor in it, because
+      neither command file emits -ind_component / -mutual_ind_component; and
+      substrate_only plus the three *_decoupled_to_substrate members would run,
+      report success and produce no substrate network at all, because the
+      manual says substrate_nets_file must be given explicitly or no nets are
+      extracted as connected to the substrate, and that row is absent. Both
+      are silent successes, which is the failure shape this catalog exists to
+      remove. All fifteen stay in choices and in ExtractType so readback and
+      import can still name what a colleague's deck says.
     lands_in:
       - {target: quantus.ext.cmd, section: extract, option: -type, line: 12}
       - {target: quantus.dspf.cmd, section: extract, option: -type, line: 12}

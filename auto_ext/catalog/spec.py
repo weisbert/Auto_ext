@@ -477,6 +477,29 @@ class OptionSpec(Frozen):
     type: OptionType
     default: Any = None
     choices: list[Any] | None = None
+    #: Members of :attr:`choices` the tool accepts and this form does NOT
+    #: draw. Not a correction of the value set -- ``choices`` stays the
+    #: vendor's complete list, because readback, import and every error
+    #: message still have to be able to name a member we do not offer.
+    #:
+    #: The distinction this column exists to make: a member missing from
+    #: ``choices`` is a claim about the *tool* ("no such value"), and a member
+    #: listed here is a claim about *us* ("the tool has it, we do not offer
+    #: it, and here is why"). Before this column the two were the same edit.
+    #:
+    #: Nine of ``extract_type``'s fifteen members are here. The owner ruled on
+    #: 2026-09-04 that a knob they do not understand is a knob they will never
+    #: use, and that a form must not offer one whose deck the templates cannot
+    #: complete -- the ``rlc*``/``rlck*`` members need an inductor component
+    #: contract no template emits, and the ``*_to_substrate`` members need a
+    #: ``substrate_nets_file`` that is unreachable, so choosing one today buys
+    #: a run that succeeds and extracts nothing of what was asked for.
+    choices_not_offered: list[Any] = Field(default_factory=list)
+    #: Why the :attr:`choices_not_offered` members are not drawn. Required
+    #: when that list is non-empty and refused when it is empty: an exemption
+    #: with no reason is exactly the "we decided not to" / "we forgot" pair
+    #: this catalog exists to keep apart.
+    not_offered_reason: str | None = None
     #: A PdkProfile table that supersedes ``choices`` once a profile is
     #: loaded. ``choices`` stays as the no-profile fallback and as the record
     #: of what one real PDK answered. See :class:`ChoicesSource`.
@@ -588,6 +611,7 @@ class OptionSpec(Frozen):
                 raise ValueError(f"{self.key}: choices contains duplicates")
         if self.type is OptionType.ENUM and self.choices is None:
             raise ValueError(f"{self.key}: an enum option must list its choices")
+        self._check_not_offered()
         if self.choices_from is not None and self.type is not OptionType.ENUM:
             raise ValueError(
                 f"{self.key}: choices_from is only meaningful for an enum "
@@ -634,6 +658,58 @@ class OptionSpec(Frozen):
             )
         return self
 
+    def _check_not_offered(self) -> None:
+        """The self-check behind :attr:`choices_not_offered`.
+
+        Three properties, and each of them is a way the column could quietly
+        become useless: a member nobody has to justify is a rubber stamp, a
+        member that is not in ``choices`` is a value-set edit wearing this
+        column's clothes, and a set that swallows every member (or the row's
+        own default) leaves a control with nothing to offer.
+        """
+
+        if not self.choices_not_offered:
+            if self.not_offered_reason is not None:
+                raise ValueError(
+                    f"{self.key}: not_offered_reason is set but no member is "
+                    f"listed in choices_not_offered"
+                )
+            return
+        if not (self.not_offered_reason or "").strip():
+            raise ValueError(
+                f"{self.key}: choices_not_offered needs a not_offered_reason. "
+                f"A member the tool accepts and this form hides is a decision, "
+                f"and a decision nobody wrote down is indistinguishable from an "
+                f"omission."
+            )
+        if self.choices is None:
+            raise ValueError(
+                f"{self.key}: choices_not_offered is only meaningful for a row "
+                f"that lists its choices"
+            )
+        known = {str(choice) for choice in self.choices}
+        unknown = sorted({str(m) for m in self.choices_not_offered} - known)
+        if unknown:
+            raise ValueError(
+                f"{self.key}: choices_not_offered names {unknown}, which are not "
+                f"in choices. Not offering a value the tool does not have is a "
+                f"correction to choices, not an exemption."
+            )
+        if len({str(m) for m in self.choices_not_offered}) != len(self.choices_not_offered):
+            raise ValueError(f"{self.key}: choices_not_offered contains duplicates")
+        if not self.offered_choices:
+            raise ValueError(
+                f"{self.key}: choices_not_offered hides every member, leaving "
+                f"the control nothing to offer"
+            )
+        if self.default is not None and str(self.default) not in {
+            str(c) for c in self.offered_choices
+        }:
+            raise ValueError(
+                f"{self.key}: default {self.default!r} is not offered, so a new "
+                f"recipe would start on a value the form refuses to draw"
+            )
+
     def _check_default(self) -> None:
         if self.default is None:
             return
@@ -662,6 +738,23 @@ class OptionSpec(Frozen):
                     f"{self.key}: default {self.default} is outside "
                     f"[{self.range[0]}, {self.range[1]}]"
                 )
+
+    @property
+    def offered_choices(self) -> list[Any]:
+        """The members a control may draw: ``choices`` minus the exempted ones.
+
+        Every form that builds a combo out of a row reads this rather than
+        :attr:`choices`. ``choices`` stays the vendor's whole set so that
+        readback can still recognise a deck, the importer can still name what
+        it read, and a model error can still quote the value it refused --
+        three readers that must not lose a member just because we stopped
+        offering it.
+        """
+
+        if self.choices is None:
+            return []
+        hidden = {str(member) for member in self.choices_not_offered}
+        return [choice for choice in self.choices if str(choice) not in hidden]
 
     @property
     def free_input(self) -> bool:
@@ -745,9 +838,15 @@ def choices_for(spec: OptionSpec, profile: Any | None = None) -> list[str]:
     """The value set to offer for ``spec``, given the loaded PDK profile.
 
     Without a ``choices_from`` row, or without a profile, this is the
-    catalog's own ``choices``. With both, it is the semantic ``name`` of every
-    entry in the profile table the row names -- which corners *this* PDK
-    defines, which LVS deck variants *this* release shipped.
+    catalog's own :attr:`~OptionSpec.offered_choices`. With both, it is the
+    semantic ``name`` of every entry in the profile table the row names --
+    which corners *this* PDK defines, which LVS deck variants *this* release
+    shipped.
+
+    ``offered_choices`` rather than ``choices``: this function answers "what
+    may a control draw", which is not the same question as "what does the
+    tool accept". A member the owner has ruled out is still a legal value the
+    importer must be able to name, and it must still never appear in a combo.
 
     Duck-typed on purpose: a ``PdkProfile`` import here would make the catalog
     depend on the model it is supposed to describe. A profile whose table is
@@ -755,7 +854,7 @@ def choices_for(spec: OptionSpec, profile: Any | None = None) -> list[str]:
     because an empty drop-down is indistinguishable from a broken one.
     """
 
-    fallback = [str(choice) for choice in (spec.choices or [])]
+    fallback = [str(choice) for choice in spec.offered_choices]
     if spec.choices_from is None or profile is None:
         return fallback
     node: Any = profile

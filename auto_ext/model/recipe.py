@@ -106,8 +106,11 @@ from auto_ext.model.run import JivaroSnapshot, RecipeSnapshot
 __all__ = [
     "CATALOG_EXEMPT_FIELDS",
     "DUT_FALLBACK_FIELDS",
+    "INDUCTOR_CONTRACT",
+    "NOT_OFFERED_EXTRACT_TYPES",
     "PROFILE_FALLBACK_FIELDS",
     "RECIPE_SCHEMA_VERSION",
+    "SUBSTRATE_CONTRACT",
     "BaseFingerprint",
     "CommonOutputSettings",
     "DspfOutput",
@@ -130,6 +133,7 @@ __all__ = [
     "dump_recipe_yaml",
     "load_recipe",
     "load_recipe_with_raw",
+    "offered_extract_types",
     "recipe_field_paths",
     "recipe_filename",
     "recipe_from_catalog",
@@ -211,6 +215,13 @@ class ExtractType(StrEnum):
     need ``-ind_component`` / ``-mutual_ind_component`` in the output section
     and neither template emits them. That is a template gap, tracked on the
     catalog row, not a reason to hide legal values here.
+
+    Nine members are nevertheless **not offered** and are refused by
+    :class:`ExtractRule` -- see :data:`NOT_OFFERED_EXTRACT_TYPES`. The enum
+    keeps all fifteen anyway, because refusing a value and being unable to
+    *name* it are different things: readback has to recognise the deck a
+    colleague wrote, the importer has to report what it read, and the refusal
+    message itself has to quote the member it is refusing.
     """
 
     NONE = "none"
@@ -228,6 +239,55 @@ class ExtractType(StrEnum):
     RLCK_DECOUPLED = "rlck_decoupled"
     RLCK_COUPLED = "rlck_coupled"
     RLCK_DECOUPLED_TO_SUBSTRATE = "rlck_decoupled_to_substrate"
+
+
+#: The two contracts an ``extract -type`` member can depend on and that this
+#: repository cannot supply today. Named separately from the member list
+#: because the refusal message has to say WHICH one is missing: "not offered"
+#: on its own tells a user nothing they can act on, while "no template emits
+#: -ind_component" tells them exactly what would have to change.
+INDUCTOR_CONTRACT = (
+    "the inductor half of the parasitic device contract -- no template emits "
+    "-ind_component or -mutual_ind_component, so the netlist would carry no "
+    "inductor at all"
+)
+SUBSTRATE_CONTRACT = (
+    "substrate_nets_file, which the manual says must be given explicitly or "
+    "no nets are extracted as connected to the substrate -- so the run would "
+    "produce no substrate network at all"
+)
+
+#: ``extract -type`` members the form does not offer, and the contract each
+#: one is missing. Mirrors the catalog row's ``choices_not_offered``; a
+#: catalog test asserts the two stay equal, the same way
+#: :data:`SELECTION_ARG_KIND` mirrors ``choice_args``.
+#:
+#: The owner ruled on 2026-09-04: *"the knobs you listed for me to decide on
+#: -- honestly I do not understand any of them, and if I do not understand
+#: them I will most likely never use them."* The ruler for this form is what
+#: they use in the Quantus GUI, not what the vendor manual contains, so a
+#: member that is not understood is not offered. Every one of these nine also
+#: renders a deck that runs, reports success, and silently omits the thing it
+#: was chosen for, which is why they are refused here rather than merely
+#: hidden: a value the form will not draw but the model will hold comes back
+#: through YAML, import and Duplicate.
+NOT_OFFERED_EXTRACT_TYPES: dict[ExtractType, str] = {
+    ExtractType.SUBSTRATE_ONLY: SUBSTRATE_CONTRACT,
+    ExtractType.C_ONLY_DECOUPLED_TO_SUBSTRATE: SUBSTRATE_CONTRACT,
+    ExtractType.RC_DECOUPLED_TO_SUBSTRATE: SUBSTRATE_CONTRACT,
+    ExtractType.RLC_DECOUPLED: INDUCTOR_CONTRACT,
+    ExtractType.RLC_COUPLED: INDUCTOR_CONTRACT,
+    ExtractType.RLC_DECOUPLED_TO_SUBSTRATE: INDUCTOR_CONTRACT,
+    ExtractType.RLCK_DECOUPLED: INDUCTOR_CONTRACT,
+    ExtractType.RLCK_COUPLED: INDUCTOR_CONTRACT,
+    ExtractType.RLCK_DECOUPLED_TO_SUBSTRATE: INDUCTOR_CONTRACT,
+}
+
+
+def offered_extract_types() -> tuple[ExtractType, ...]:
+    """The six members a form may draw and a rule may hold, in enum order."""
+
+    return tuple(t for t in ExtractType if t not in NOT_OFFERED_EXTRACT_TYPES)
 
 
 logger = logging.getLogger(__name__)
@@ -435,6 +495,16 @@ class ExtractRule(Base):
             raise ValueError(
                 f"selection {self.selection.value!r} needs a {kind}; "
                 "selection_arg is empty"
+            )
+        missing = NOT_OFFERED_EXTRACT_TYPES.get(self.type)
+        if missing is not None:
+            raise ValueError(
+                f"{self.type.value!r} is not offered here: it needs {missing}. "
+                "The owner ruled these nine types out on 2026-09-04 -- a deck "
+                "that runs, reports success and omits the one thing the type "
+                "was chosen for is worse than not offering the type at all. "
+                f"Use one of {', '.join(t.value for t in offered_extract_types())} "
+                "instead."
             )
         return self
 
