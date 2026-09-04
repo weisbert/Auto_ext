@@ -575,8 +575,17 @@ class RunsScreen(QWidget):
         self._stack.addWidget(card_holder)
         self._stack.addWidget(self._empty)
         self._stack.addWidget(self._build_log_pane())
+        # Whatever takes the user off the viewer -- the Back button, picking
+        # another run, a filter that empties the list -- stops the tail. A
+        # QFileSystemWatcher left on a file nobody is looking at is a watcher
+        # on a file that may be deleted next.
+        self._stack.currentChanged.connect(self._on_stack_changed)
         layout.addWidget(self._stack, stretch=1)
         return panel
+
+    def _on_stack_changed(self, _index: int) -> None:
+        if self._stack.currentWidget() is not self._log_pane():
+            self._log_view.set_active_log(None)
 
     def _build_log_pane(self) -> QWidget:
         """The in-app fallback for a file this host cannot hand to a viewer.
@@ -1171,7 +1180,6 @@ class RunsScreen(QWidget):
     def close_in_app_view(self) -> None:
         """Leave the built-in viewer and go back to the run's card."""
 
-        self._log_view.set_active_log(None)
         self._stack.setCurrentWidget(
             self._stack.widget(0) if self._visible else self._empty
         )
