@@ -384,13 +384,11 @@ def _checkbox(widget, label: str) -> QCheckBox:
 # ============================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M-22: Tool.with_artifacts diverts a declared-but-absent output into "
-    "diagnostics and leaves success alone, and no widget reads "
-    "details['missing_artifacts'] -- so the stage is a plain pass and the "
-    "absent DSPF is blamed on the host",
-)
+# M-22 is FIXED: result_card reads details['missing_artifacts'] (its
+# ``missing_artifacts`` helper), so a stage that exited 0 without writing its
+# declared output is no longer drawn as a plain pass and the absent DSPF is no
+# longer blamed on the host. The test stays exactly as written -- it is now the
+# regression guard rather than the ledger entry.
 def test_a_stage_that_wrote_nothing_is_not_presented_as_a_plain_pass(
     qtbot, window: MainWindow, runs_root: Path, make_run_record, launches
 ) -> None:
@@ -621,12 +619,9 @@ def test_show_the_discrepancies_shows_the_user_something(
 # ============================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M-27: _index_entry has five silent skip paths, list_runs drops "
-    "them, nothing counts them, and status_text reports the survivors with "
-    "'nothing is ever overwritten' attached",
-)
+# M-27 is FIXED: list_runs_detailed carries what it could not read, RunsScreen
+# keeps it in ``_unreadable``, and status_text counts it. The survivors are no
+# longer presented as the whole history.
 def test_the_runs_screen_says_how_many_directories_it_could_not_read(
     qtbot, window: MainWindow, runs_root: Path, make_run_record, frozen_clock
 ) -> None:
@@ -717,11 +712,9 @@ def test_a_cell_that_just_failed_can_be_followed_to_its_result(
 # ============================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M-28: set_run resets five fields and not _delta, and _fill_lvs's "
-    "lvs-is-None branch leaves it holding the previous selection's count",
-)
+# M-28 is FIXED: set_run now clears ``_delta`` too, and says in a comment that
+# the public ``discrepancy_delta`` property is what that clearing is for -- so
+# no card can carry the previous selection's count.
 def test_a_run_that_never_reached_lvs_shows_no_discrepancy_count(
     qtbot, window: MainWindow, runs_root: Path, make_run_record, frozen_clock
 ) -> None:
@@ -788,12 +781,9 @@ def test_a_run_that_never_reached_lvs_shows_no_discrepancy_count(
 # ============================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M-34: three messages pick 'no log' from path.is_file() alone and "
-    "never distinguish 'none recorded' from 'recorded, now gone'; M-35: "
-    "_on_stage_double_click returns in silence when the file is not there",
-)
+# M-34 and M-35 are FIXED: LogTarget separates "recorded no log" from
+# "recorded X, and X is not there now", and the double-click reports rather
+# than returning in silence.
 def test_a_recorded_log_that_is_gone_says_so_rather_than_saying_there_was_none(
     qtbot, window: MainWindow, runs_root: Path, make_run_record, launches
 ) -> None:
@@ -1067,12 +1057,9 @@ def test_the_log_pane_stays_with_the_cell_the_user_is_watching(
 # ============================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M-43: the pending skeleton indexes and lists, prune-runs refuses "
-    "it, the GUI offers no delete, and the card prints a pending chip over an "
-    "empty stage table -- indistinguishable from a run in flight",
-)
+# M-43 is FIXED: the card says "no stage recorded - this run was still in
+# flight when the record was written", and the row menu carries "Delete this
+# unfinished run..." for the skeleton prune-runs refuses.
 def test_an_abandoned_pending_run_explains_itself_and_can_be_removed(
     qtbot, window: MainWindow, runs_root: Path, make_run_record
 ) -> None:

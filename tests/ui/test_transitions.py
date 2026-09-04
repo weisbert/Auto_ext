@@ -591,10 +591,14 @@ class MatrixCell:
     """One (edit site, transition) pair, with what should happen and what does.
 
     ``expected`` is the outcome the design owes the user -- ``preserved`` or
-    ``prompted``. ``today`` is what the read-only review found: ``discarded``
-    silently, ``desynchronised`` (screen != controller != disk), or ``used``
-    (the unsaved state reaches disk or the EDA tool unannounced). A cell whose
-    ``today`` differs from its ``expected`` is marked ``xfail(strict=True)``.
+    ``prompted``. ``today`` is what the app does now, seeded from the read-only
+    review: ``discarded`` silently, ``desynchronised`` (screen != controller !=
+    disk), or ``used`` (the unsaved state reaches disk or the EDA tool
+    unannounced). A cell whose ``today`` differs from its ``expected`` is
+    marked ``xfail(strict=True)``; when a row is fixed, ``today`` moves to
+    match ``expected`` and the cell becomes a plain regression test. It keeps
+    its ``master`` id either way, so the coverage assertion below still holds
+    the row and nobody can drop it quietly.
     """
 
     cell_id: str
@@ -642,14 +646,17 @@ MATRIX: tuple[MatrixCell, ...] = (
         check=cell_r1r3_c8_revert_repaints,
     ),
     MatrixCell(
+        # M-04 is FIXED: a Project QLineEdit stages on ``textEdited`` now, so
+        # the value in the box no longer waits for focus to leave before it
+        # counts as an edit. ``today`` follows the app, so the strict xfail
+        # this row used to carry is gone and the cell is a regression guard.
         cell_id="R5xSave",
         site="Project field",
         transition="File -> Save without leaving the box",
         expected="preserved",
-        today="discarded",
+        today="preserved",
         master="M-04",
-        symptom="every Project control commits on editingFinished, and a "
-        "QAction shortcut does not move focus",
+        symptom="",
         check=cell_r5_ctrl_s,
     ),
     MatrixCell(
