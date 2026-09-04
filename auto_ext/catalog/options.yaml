@@ -4331,8 +4331,19 @@ options:
     currently: config_field
     observed: true
     source_ref: auto_ext/cli.py:99
-    notes: How many runs execute at once (CLI --jobs). Recorded per run in RunRecord.max_workers.
-    why: A machine property. Belongs with the other resource settings, not in a Recipe.
+    notes: >-
+      How many runs execute at once. Recorded per run in RunRecord.max_workers.
+      RETIRED FROM ResourceProfile 2026-09-04, and this row is what is left of
+      it. `ResourceProfile.max_workers` was persisted in config/resources.yaml
+      and read by NOTHING -- grep proved no code resolved it, and its own
+      comment conceded that --jobs overrode it. A copy with zero owners is the
+      degenerate case of ONE CONCEPT, ONE OWNER, so the field was deleted
+      rather than wired in as a fourth input to the same decision. The run
+      bar's jobs spin box and the CLI --jobs own parallelism; this row is the
+      run fact they produce (context_path run.max_workers), not a setting.
+      auto_ext.model.recipe.upgrade_retired_resource_fields drops the old key
+      from resources.yaml on load, because every deployed copy carries it.
+    why: A property of one invocation. Set on the run bar or with --jobs, never stored.
 
   - key: requested_stages
     template_var: requested_stages

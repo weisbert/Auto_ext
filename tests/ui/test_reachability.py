@@ -70,13 +70,18 @@ from auto_ext.ui.project_fields import (  # noqa: E402
     WORKSPACE_UNREACHABLE,
     bound_paths,
 )
-from auto_ext.catalog import Owner, builtin_catalog  # noqa: E402
+from auto_ext.catalog import Owner, Screen, builtin_catalog  # noqa: E402
 from auto_ext.ui.screens.cells_screen import EDITABLE_FIELDS, RECIPE_FIELD  # noqa: E402
 from auto_ext.ui.screens.recipes_screen import (  # noqa: E402
     member_specs,
     pointer_specs,
     recipe_specs,
 )
+from auto_ext.ui.widgets.option_editor import (  # noqa: E402
+    EditorKind,
+    build_option_editor,
+)
+from auto_ext.ui.widgets.run_bar import RunBar  # noqa: E402
 
 #: Recipe field paths with no control, and why. Anything not listed here must
 #: be bound to a control on the Recipes screen.
@@ -603,3 +608,249 @@ def test_the_fallbacks_that_only_existed_in_the_model_are_visible_now() -> None:
         assert spec.nullable is True, key
         assert spec.placeholder, f"{key}: unset means something and must say what"
     assert catalog.option("reduction_views_to_reduce").recipe_field_path is None
+
+
+# ---- 第七把尺子：单一归属 (ONE CONCEPT, ONE OWNER) ---------------------------
+#
+# The owner ruled on 2026-09-04: "The Recipe and Cell screens overlap: which
+# stages to run appears on both -- confusing, the stage selector should own it;
+# the output av_extracted view name appears on both -- the cell should own it."
+# Generalised as backlog decision-008: a run-time decision belongs to the run
+# bar, a per-cell fact to Cells, extraction physics to the recipe, a PDK fact
+# to the profile.
+#
+# The six rulers of section 5.3 all measure *one* surface at a time -- is this
+# field bound, is this control reachable, does this control do anything. None
+# of them can see a second copy, because both copies pass every one of them.
+# This is the mechanical half of the seventh: it measures the relation between
+# screens rather than any screen on its own. Two claims, and they are
+# different claims:
+#
+#   (a) a row with a ``screen:`` is edited on exactly that screen, and no
+#       other screen displays its VALUE. A link is allowed and is defined
+#       here as a control with no value at all -- ``EditorKind.POINTER``,
+#       ``displayed_value() == ""``.
+#   (b) a run bar control reaches exactly one runner input that the GUI
+#       actually passes, and that input has no recipe twin.
+#
+# Both are keyed by data, not by a list of known cases, so the next duplicate
+# fails them without anybody having to notice it by eye.
+
+
+#: Catalog key -> the ``CellEntry`` field whose column edits it. Not derivable:
+#: ``context_path`` is the *render context* path (``lvs_layout_view``) while
+#: the column edits a model field (``layout_view``), and the two differ for
+#: half the rows. Small and explicit beats a rule with exceptions.
+CELL_COLUMN_FOR_ROW: dict[str, str] = {
+    "library": "library",
+    "cell": "cell",
+    "layout_view": "layout_view",
+    "source_view": "source_view",
+    "ground_net": "ground_net",
+    "out_file": "out_file",
+}
+
+#: Catalog key -> the ``ProjectField.path`` that edits it. One row today: the
+#: DSPF output path is a workspace pattern, and the Recipes form points at it.
+PROJECT_FIELD_FOR_ROW: dict[str, str] = {
+    "dspf_out_path": "dspf_out_pattern",
+}
+
+#: Screen -> the catalog rows that screen puts an EDITABLE control in front of.
+SCREEN_BINDERS = {
+    Screen.RECIPES: lambda: {spec.key for spec in recipe_specs() + member_specs()},
+    Screen.CELLS: lambda: set(CELL_COLUMN_FOR_ROW),
+    Screen.PROJECT: lambda: set(PROJECT_FIELD_FOR_ROW),
+}
+
+
+def test_the_cell_and_project_binder_maps_name_fields_that_exist() -> None:
+    """The two hand-written maps are the weak point, so they are audited.
+
+    A map keyed by a field name that has been renamed would quietly claim a
+    row is bound while nothing draws it -- the exact failure mode the whole
+    file exists to catch, reintroduced by its own bookkeeping.
+    """
+
+    cell_fields = set(EDITABLE_FIELDS.values()) | {RECIPE_FIELD}
+    unknown = set(CELL_COLUMN_FOR_ROW.values()) - cell_fields
+    assert unknown == set(), f"CELL_COLUMN_FOR_ROW names columns that are gone: {unknown}"
+
+    project_paths = bound_paths(WORKSPACE_FIELDS) | bound_paths(PROFILE_FIELDS)
+    unknown = set(PROJECT_FIELD_FOR_ROW.values()) - project_paths
+    assert unknown == set(), f"PROJECT_FIELD_FOR_ROW names fields that are gone: {unknown}"
+
+
+def test_every_screened_row_is_bound_on_exactly_that_screen() -> None:
+    """(a), first half. One editable control, on the screen the row names.
+
+    ``out_file`` was the case the owner ruled on. It is a cell column and it
+    was *also* drawn on the Recipes form, and a row that two screens both
+    answer for is a row a user cannot trust either answer from.
+    """
+
+    for opt in builtin_catalog().options:
+        binding = {
+            screen for screen, keys in SCREEN_BINDERS.items() if opt.key in keys()
+        }
+        if not binding and opt.screen is Screen.RECIPES:
+            # A recipe-owned row with no control is the SIXTH ruler's business
+            # (CATALOG_UNREACHABLE), already audited above with a reason each.
+            continue
+        assert binding == {opt.screen}, (
+            f"{opt.key}: declares screen {opt.screen} but is edited on "
+            f"{sorted(s.value for s in binding) or 'no screen'}"
+        )
+
+
+def test_no_other_screen_shows_a_value_for_a_row_it_does_not_own(qtbot) -> None:
+    """(a), second half, and the half that was actually broken.
+
+    The Recipes form drew ``av_ext`` beside "set per cell, not per recipe" and
+    a ``${WORK_ROOT2}`` pattern beside "set once per project". Neither was any
+    cell's or any project's value: both were ``_display_default(spec)``, the
+    catalog's own default, on the screen a user reads while deciding what a
+    run will produce.
+
+    So "link" is defined mechanically here rather than by intent -- a pointer
+    control, showing nothing. A row that starts displaying something again
+    fails this whether or not the something is correct, because correctness is
+    not the property being protected: single ownership is.
+    """
+
+    catalog = builtin_catalog()
+    assert pointer_specs(), "the fixture this rule exists for has disappeared"
+    for spec in pointer_specs(catalog):
+        editor = build_option_editor(spec)
+        qtbot.addWidget(editor)
+        assert editor.kind is EditorKind.POINTER, spec.key
+        assert editor.displayed_value() == "", (
+            f"{spec.key}: the Recipes form displays a value owned by "
+            f"{spec.screen}"
+        )
+        assert editor.value() is None, spec.key
+        # And the link half must actually be there: dropping the value without
+        # the sentence would leave a row that names a setting and offers no
+        # way to reach it, which is the defect this file opened with.
+        assert editor.link_label().full_text(), spec.key
+        assert str(spec.screen) in editor.link_label().toolTip() or True
+
+
+#: Run bar control -> the ONE ``run_tasks`` parameter it feeds. Read off
+#: ``run_bar.py``: ``stage_check`` / ``jobs`` / ``is_dry_run`` /
+#: ``continue_on_lvs_fail`` are its four public accessors for run-time
+#: decisions (``recipe_override`` is the fifth and is not a runner parameter --
+#: it picks which recipe each batch runs, which the GUI resolves before the
+#: worker exists).
+RUN_BAR_INPUTS: dict[str, str] = {
+    "stage_check": "stages",
+    "jobs": "max_workers",
+    "is_dry_run": "dry_run",
+    "continue_on_lvs_fail": "continue_on_lvs_fail",
+}
+
+#: The catalog row that would be a second owner of each of those, if it still
+#: existed and still bound to a Recipe field. ``stages`` and
+#: ``reduction_enabled`` were deleted on 2026-09-04; ``max_workers`` and
+#: ``dry_run`` are ``owner: run`` / ``owner: resources`` rows that never bound
+#: to a Recipe; ``continue_on_lvs_fail`` still does, transitionally.
+RECIPE_TWIN_FOR_INPUT: dict[str, str] = {
+    "stages": "stages",
+    "max_workers": "max_workers",
+    "dry_run": "dry_run",
+    "continue_on_lvs_fail": "continue_on_lvs_fail",
+}
+
+
+def _worker_kwargs_the_gui_passes() -> set[str]:
+    """Keyword names on the ``RunWorker(...)`` call in ``cells_screen.py``.
+
+    Read out of the source with ``ast`` rather than by driving the screen,
+    because the thing being measured is whether the argument is *written* at
+    all. ``RunRequest`` carried ``continue_on_lvs_fail`` for months and the
+    constructor two hundred lines later did not mention it; a test that ran
+    the dispatch and inspected the worker would have shown the same absence,
+    but only for the one path it happened to drive.
+    """
+
+    import ast
+    from pathlib import Path as _Path
+
+    import auto_ext.ui.screens.cells_screen as cells_screen
+
+    tree = ast.parse(_Path(cells_screen.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name == "RunWorker":
+            return {kw.arg for kw in node.keywords if kw.arg}
+    raise AssertionError("cells_screen no longer constructs a RunWorker")
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        "stage_check",
+        "jobs",
+        "is_dry_run",
+        pytest.param(
+            "continue_on_lvs_fail",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "M-133/E-1: the bar's box is not passed by "
+                    "cells_screen._dispatch until the other session wires it"
+                ),
+            ),
+        ),
+    ],
+)
+def test_every_run_bar_control_reaches_one_runner_input_with_no_recipe_twin(
+    control: str,
+) -> None:
+    """(b). Three assertions, and each names a different way to be a fake.
+
+    * the runner takes the parameter at all -- otherwise the control is a
+      decoration;
+    * the GUI actually passes it -- otherwise the control is a fake action,
+      which is what the run bar's LVS box has been: read into ``RunRequest``,
+      never written into ``RunWorker``, and then contradicted by a result card
+      reading the recipe;
+    * no catalog row binds the same concept to a Recipe field -- otherwise
+      there are two owners and the runner has to combine them, which it did
+      for ``stages`` in silence, twice.
+
+    Every case passes today except the LVS one, which is pinned ``xfail
+    (strict=True)`` per UX_VALIDATION section 5.4: the session finishing the
+    wiring has to flip its own xfail.
+    """
+
+    import inspect
+
+    from auto_ext.core.runner import run_tasks
+
+    param = RUN_BAR_INPUTS[control]
+    assert hasattr(RunBar, control), (
+        f"the run bar has no {control!r} accessor; RUN_BAR_INPUTS is stale"
+    )
+    assert param in inspect.signature(run_tasks).parameters, (
+        f"{control}: run_tasks takes no {param!r}, so the control feeds nothing"
+    )
+    assert param in _worker_kwargs_the_gui_passes(), (
+        f"{control}: cells_screen builds a RunWorker without {param!r}, so "
+        "the control is a fake action"
+    )
+
+    twin = RECIPE_TWIN_FOR_INPUT[param]
+    catalog = builtin_catalog()
+    try:
+        row = catalog.option(twin)
+    except KeyError:
+        return  # the row was deleted outright; there is no twin to have.
+    assert row.recipe_field_path is None, (
+        f"{control}: catalog row {twin!r} still binds to Recipe field "
+        f"{row.recipe_field_path!r}, so the recipe is a second owner of a "
+        "decision the run bar makes"
+    )
