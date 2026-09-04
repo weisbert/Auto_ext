@@ -698,7 +698,20 @@ def stop_reason_text(record: RunRecord) -> str:
 
     Only produced when a stage failed *and* something after it did not run:
     a run whose last stage failed simply ended, which the tally already says.
+
+    The other case this answers is the skeleton ``run.json`` the runner writes
+    at task start: ``pending``, no stage, no end time. It is what a run that is
+    going right now looks like, and also what a run killed by a lost ssh
+    session leaves behind for ever -- the CLI explains it, the card used to
+    draw an empty stage table under a pending chip and say nothing.
     """
+
+    if str(record.overall) == str(TaskStatus.PENDING) and not record.stages:
+        return (
+            "no stage recorded - this run was still in flight when the record "
+            "was written. Either it is running now, or it was interrupted "
+            "before its first stage."
+        )
 
     failed: StageRecord | None = None
     for stage in record.stages:

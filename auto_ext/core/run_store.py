@@ -57,10 +57,13 @@ __all__ = [
     "BATCHES_DIRNAME",
     "LATEST_LINK_NAME",
     "RunIndexEntry",
+    "RunListing",
     "RunStoreError",
     "append_event",
+    "delete_run",
     "find_previous_run",
     "list_runs",
+    "list_runs_detailed",
     "prune_runs",
     "read_annotations",
     "read_batch",
@@ -267,8 +270,22 @@ def write_annotations(run_dir: Path, annotations: RunAnnotations) -> Path:
     """Write ``annotations.json`` atomically. ``run.json`` is never touched.
 
     Stamps :attr:`RunAnnotations.updated_at` with the current time.
+
+    Refuses a ``run_dir`` that is not already a directory. :func:`_atomic_write_text`
+    creates parents, which is right for a run being written and wrong here: a
+    rename applied to a run whose directory had been deleted rebuilt that
+    directory holding nothing but ``annotations.json``, which
+    :func:`list_runs` then skips -- so the rename "worked" and the run left
+    the history for good, leaving a ghost directory :func:`prune_runs` will
+    never remove.
     """
 
+    run_dir = Path(run_dir)
+    if not run_dir.is_dir():
+        raise RunStoreError(
+            f"{run_dir} is not a run directory; annotations are only ever "
+            "written next to an existing run"
+        )
     stamped = annotations.model_copy(update={"updated_at": utcnow()})
     return _atomic_write_text(
         run_paths(run_dir).annots, stamped.model_dump_json(indent=2) + "\n"
@@ -355,20 +372,51 @@ def _parse_dt(value: Any) -> datetime | None:
         return None
 
 
-def _index_entry(run_dir: Path) -> RunIndexEntry | None:
-    """Build an index row, or return ``None`` if this directory is not a run."""
+@dataclass(frozen=True, slots=True)
+class RunListing:
+    """What one pass over ``runs/`` found -- including what it could not read.
+
+    :func:`list_runs` returns the entries alone, which is all a script needs.
+    A GUI needs the rest: a run directory that is skipped disappears from the
+    history with no trace, because the warnings below go to a logger that
+    nothing in ``auto_ext/`` ever attaches a handler to. Ten runs vanished
+    that way on the first launch against a real ``runs/`` directory, under a
+    status line promising that nothing is ever overwritten.
+    """
+
+    #: The runs that could be indexed, newest first.
+    entries: list[RunIndexEntry]
+    #: ``(directory, why)`` for every directory that looked like a run and
+    #: could not be read.
+    unreadable: list[tuple[Path, str]]
+    #: Set when the directory itself could not be enumerated, in which case
+    #: ``entries`` holds whatever was gathered before that happened.
+    error: str | None = None
+
+
+def _index_entry(run_dir: Path, skipped: list[tuple[Path, str]] | None = None) -> RunIndexEntry | None:
+    """Build an index row, or return ``None`` if this directory is not a run.
+
+    Every ``None`` is also appended to ``skipped`` with its reason, so a caller
+    can report what it dropped instead of silently listing the survivors.
+    """
+
+    def _skip(reason: str) -> None:
+        logger.warning("%s: %s", run_dir, reason)
+        if skipped is not None:
+            skipped.append((run_dir, reason))
 
     record_path = run_paths(run_dir).record
     if not record_path.is_file():
-        logger.warning("%s: no run.json, skipping", run_dir)
+        _skip("no run.json, skipping")
         return None
     try:
         data = _read_json(record_path)
     except RunStoreError as exc:
-        logger.warning("%s: skipping unreadable run record (%s)", run_dir, exc)
+        _skip(f"skipping unreadable run record ({exc})")
         return None
     if not isinstance(data, dict):
-        logger.warning("%s: run.json is not a JSON object, skipping", run_dir)
+        _skip("run.json is not a JSON object, skipping")
         return None
 
     created_at = _parse_dt(data.get("created_at"))
@@ -378,12 +426,12 @@ def _index_entry(run_dir: Path) -> RunIndexEntry | None:
         try:
             created_at, _ = parse_run_id(run_dir.name)
         except AutoExtError:
-            logger.warning("%s: run.json has no usable created_at, skipping", run_dir)
+            _skip("run.json has no usable created_at, skipping")
             return None
 
     dut = data.get("dut")
     if not isinstance(dut, dict) or not dut.get("cell"):
-        logger.warning("%s: run.json has no dut section, skipping", run_dir)
+        _skip("run.json has no dut section, skipping")
         return None
     recipe = data.get("recipe") if isinstance(data.get("recipe"), dict) else {}
     results = data.get("results") if isinstance(data.get("results"), dict) else {}
@@ -419,32 +467,59 @@ def _index_entry(run_dir: Path) -> RunIndexEntry | None:
     )
 
 
-def list_runs(runs_root: Path, limit: int | None = None) -> list[RunIndexEntry]:
-    """Return the run history, newest first.
+def list_runs_detailed(runs_root: Path, limit: int | None = None) -> RunListing:
+    """One pass over ``runs/``: the runs, the ones skipped, and why.
 
-    Skips (with a warning) anything that is not a readable run: a hand-made
-    directory, a run whose ``run.json`` is missing, truncated, or not valid
-    JSON, and the ``batches/`` / ``latest`` layout entries. A missing
-    ``runs_root`` is an empty history, not an error.
+    Skips anything that is not a readable run: a hand-made directory, a run
+    whose ``run.json`` is missing, truncated, or not valid JSON, and the
+    ``batches/`` / ``latest`` layout entries. A missing ``runs_root`` is an
+    empty history, not an error.
+
+    Enumerating the directory can itself fail -- EACCES after a permission
+    change, ESTALE on an NFS mount, ENOENT when the project directory is
+    renamed under a running GUI. That is reported on
+    :attr:`RunListing.error` rather than raised: this call sits behind a
+    *Refresh* button, and an exception escaping a Qt slot ends the process.
 
     ``limit`` caps the number of rows returned, after sorting.
     """
 
     runs_root = Path(runs_root)
     if not runs_root.is_dir():
-        return []
+        return RunListing(entries=[], unreadable=[])
     entries: list[RunIndexEntry] = []
-    for child in sorted(runs_root.iterdir()):
-        if child.name in _SKIP_DIRNAMES or not child.is_dir():
+    skipped: list[tuple[Path, str]] = []
+    error: str | None = None
+    try:
+        children = sorted(runs_root.iterdir())
+    except OSError as exc:
+        logger.warning("%s: cannot list the run history (%s)", runs_root, exc)
+        return RunListing(entries=[], unreadable=[], error=f"{runs_root}: {exc}")
+    for child in children:
+        try:
+            if child.name in _SKIP_DIRNAMES or not child.is_dir():
+                continue
+        except OSError as exc:  # a broken symlink, a vanished mount point
+            skipped.append((child, str(exc)))
             continue
-        entry = _index_entry(child)
+        entry = _index_entry(child, skipped)
         if entry is not None:
             entries.append(entry)
     # Newest first; run_id breaks ties so same-second runs keep a stable order.
     entries.sort(key=lambda e: (e.created_at, e.run_id), reverse=True)
     if limit is not None:
-        return entries[: max(limit, 0)]
-    return entries
+        entries = entries[: max(limit, 0)]
+    return RunListing(entries=entries, unreadable=skipped, error=error)
+
+
+def list_runs(runs_root: Path, limit: int | None = None) -> list[RunIndexEntry]:
+    """Return the run history, newest first.
+
+    The entries of :func:`list_runs_detailed`, for the callers that only want
+    the runs that could be read. Never raises.
+    """
+
+    return list_runs_detailed(runs_root, limit).entries
 
 
 def find_previous_run(
@@ -493,6 +568,49 @@ def find_previous_run(
             continue
         return entry
     return None
+
+
+def delete_run(run_dir: Path) -> str:
+    """Delete one *unfinished* run directory. Returns the run id.
+
+    The one hole :func:`prune_runs` leaves on purpose. A run killed between
+    the skeleton write and the first stage stays ``pending`` for ever: prune
+    refuses it because a ``pending`` run may be running right now, and
+    deleting a live run's log directory is a data-loss bug. That is right for
+    an automatic sweep and useless for the user looking at a run that has been
+    stuck since March.
+
+    So this removes exactly what the sweep cannot judge, and nothing else:
+
+    * the directory must hold a readable ``run.json`` -- never ``rmtree`` a
+      directory we cannot identify as a run;
+    * that record must be ``pending`` with no stage recorded. A finished run
+      is history and stays; a run with stages produced output somebody may
+      still want.
+
+    Whether the skeleton belongs to a run that is *still going* is the
+    caller's judgement: the store cannot tell, and the GUI knows what it has
+    dispatched.
+    """
+
+    run_dir = Path(run_dir)
+    if not run_paths(run_dir).record.is_file():
+        raise RunStoreError(
+            f"{run_dir} holds no run.json; refusing to delete a directory that "
+            "is not a run"
+        )
+    record = read_record(run_dir)
+    if str(record.overall) != "pending" or record.stages:
+        raise RunStoreError(
+            f"{run_dir} is a finished run ({record.overall}, "
+            f"{len(record.stages)} stage(s)); run history is not deletable "
+            "from here"
+        )
+    try:
+        shutil.rmtree(run_dir)
+    except OSError as exc:
+        raise RunStoreError(f"cannot delete {run_dir}: {exc}") from exc
+    return record.run_id
 
 
 def prune_runs(runs_root: Path, keep: int, *, dry_run: bool = False) -> list[str]:

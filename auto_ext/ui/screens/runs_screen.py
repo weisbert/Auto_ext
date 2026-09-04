@@ -61,6 +61,7 @@ Assumptions
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -94,8 +95,9 @@ from auto_ext.core.errors import AutoExtError
 from auto_ext.core.handoff import launch_calibre_interactive
 from auto_ext.core.run_store import (
     RunIndexEntry,
+    delete_run,
     find_previous_run,
-    list_runs,
+    list_runs_detailed,
     read_annotations,
     read_record,
     write_annotations,
@@ -273,6 +275,12 @@ class RunsScreen(QWidget):
         self._visible: list[RunIndexEntry] = []
         self._selected_run_id: str | None = None
         self._loading = False
+        #: Directories the last listing could not read, and why. Never hidden:
+        #: a run that silently leaves the history is a run the user believes
+        #: was never made.
+        self._unreadable: list[tuple[Path, str]] = []
+        #: Set when ``runs/`` itself could not be enumerated at all.
+        self._listing_error: str | None = None
 
         self._build_ui()
         self.refresh()
@@ -324,19 +332,46 @@ class RunsScreen(QWidget):
 
         Keeps the current selection when that run is still present; otherwise
         selects the newest run so the screen is never opened on a blank card.
+
+        Ends with an acknowledgement on :attr:`status_message` carrying the
+        wall-clock time. Without it a *Refresh* against an unchanged directory
+        -- the common case -- left every pixel exactly as it was, including
+        the status line, and the button was indistinguishable from a dead one.
         """
 
         root = self._runs_root
-        self.set_entries(list_runs(root) if root is not None else [])
+        listing = list_runs_detailed(root) if root is not None else None
+        if listing is None:
+            self.set_entries([])
+        else:
+            self.set_entries(
+                listing.entries,
+                unreadable=listing.unreadable,
+                error=listing.error,
+            )
+        stamp = datetime.now().strftime("%H:%M:%S")
+        where = str(root) if root is not None else "no project"
+        self.status_message.emit(f"re-read {where} at {stamp} - {self.status_text()}")
 
-    def set_entries(self, entries: Sequence[RunIndexEntry]) -> None:
+    def set_entries(
+        self,
+        entries: Sequence[RunIndexEntry],
+        *,
+        unreadable: Sequence[tuple[Path, str]] = (),
+        error: str | None = None,
+    ) -> None:
         """Display ``entries`` without touching disk.
 
         The injection point for a host that has already listed the history,
-        and for tests.
+        and for tests. ``unreadable`` and ``error`` carry what
+        :func:`~auto_ext.core.run_store.list_runs_detailed` could not read, so
+        the screen can say so instead of presenting the survivors as the whole
+        history.
         """
 
         self._entries = list(entries)
+        self._unreadable = list(unreadable)
+        self._listing_error = error
         self._sync_cell_filter()
         self._repopulate()
 
@@ -351,12 +386,39 @@ class RunsScreen(QWidget):
         return False
 
     def status_text(self) -> str:
-        """The status-bar line for this screen (canvas 1c)."""
+        """The status-bar line for this screen (canvas 1c).
 
+        "Nothing is ever overwritten" is a promise, so the count of
+        directories that could not be read is part of the same sentence: the
+        survivors on their own are not the whole history, and the warnings the
+        store logs reach nobody in a GUI.
+        """
+
+        if self._listing_error is not None:
+            return f"the run history could not be listed - {self._listing_error}"
         total = len(self._entries)
+        skipped = self._unreadable_text()
         if total == 0:
-            return "no runs recorded yet"
-        return f"{total} run{'s' if total != 1 else ''} kept - nothing is ever overwritten"
+            return skipped or "no runs recorded yet"
+        line = f"{total} run{'s' if total != 1 else ''} kept - nothing is ever overwritten"
+        return f"{line} - {skipped}" if skipped else line
+
+    def _unreadable_text(self) -> str:
+        """``"2 directories in runs/ could not be read"``, or ``""``."""
+
+        count = len(self._unreadable)
+        if not count:
+            return ""
+        return (
+            f"{count} director{'y' if count == 1 else 'ies'} in "
+            f"{self._runs_root} could not be read"
+        )
+
+    @property
+    def unreadable(self) -> list[tuple[Path, str]]:
+        """``(directory, why)`` for everything the last listing skipped."""
+
+        return list(self._unreadable)
 
     def set_cell_filter(self, cell: str) -> None:
         """Restrict the list to one cell, or to :data:`ALL_CELLS`."""
@@ -586,8 +648,24 @@ class RunsScreen(QWidget):
                 "No project loaded. Run history is kept in the project's runs/ "
                 "directory."
             )
+        if self._listing_error is not None:
+            return (
+                f"The run history could not be listed.\n\n{self._listing_error}\n\n"
+                "Check that the directory still exists and that you can read it, "
+                "then press Refresh."
+            )
         if self._entries:
             return "No run matches the current filter."
+        skipped = self._unreadable_text()
+        if skipped:
+            # Never "no runs recorded yet" over a directory full of runs: the
+            # first launch against a real runs/ directory skipped ten of them.
+            names = "\n".join(f"{path.name}: {why}" for path, why in self._unreadable[:5])
+            more = len(self._unreadable) - 5
+            return (
+                f"No run could be read. {skipped[0].upper()}{skipped[1:]}:\n\n{names}"
+                + (f"\n+{more} more" if more > 0 else "")
+            )
         return (
             f"No runs recorded yet. Each run is archived under {self._runs_root} "
             "with its logs, rendered inputs and results."
@@ -712,7 +790,19 @@ class RunsScreen(QWidget):
                 "cancelled": CHIP_TONE_WARNING,
             }.get(str(record.overall), CHIP_TONE_MUTED)
             self._tally_chip.set_chip_text(tally_text(record.stages), tone)
-        self._rerun_btn.setEnabled(True)
+
+        # A run whose directory has gone still has a row -- the screen re-lists
+        # only on Refresh -- and Re-run stayed lit over it, which is the one
+        # button that cannot possibly work: the recipe and the DUT are read
+        # back from the record that is no longer there. The context menu
+        # already got this right for "Open run directory".
+        gone = record is None and not entry.run_dir.is_dir()
+        self._rerun_btn.setEnabled(not gone)
+        self._rerun_btn.setToolTip(
+            f"Gone: {entry.run_dir}\nPress Refresh to re-read the history."
+            if gone
+            else "Queue this cell again with the same recipe."
+        )
 
     # ---- context menu ---------------------------------------------------
 
@@ -723,6 +813,11 @@ class RunsScreen(QWidget):
         synchronous ``exec_()`` is dismissed by the following release and the
         user has to right-click twice. The popup is deferred one event-loop
         tick, which is the rule everywhere in this codebase.
+
+        The row under the cursor becomes the selected row before the menu is
+        built: Rename / Delete / Re-run acted on it while the card on the
+        right went on showing another run, so the user was reading one run and
+        acting on a different one. :class:`CellsScreen` already selects first.
         """
 
         item = self._list.itemAt(pos)
@@ -732,6 +827,8 @@ class RunsScreen(QWidget):
         entry = self._entry_by_id(run_id)
         if entry is None:
             return
+        if item is not self._list.currentItem():
+            self._list.setCurrentItem(item)
 
         menu = QMenu(self._list)
 
@@ -770,6 +867,21 @@ class RunsScreen(QWidget):
             lambda _c=False, e=entry: self.rerun_requested.emit(e)
         )
         menu.addAction(act_rerun)
+
+        # The only run this screen may delete: a skeleton the runner wrote at
+        # task start and nothing ever finished. prune-runs refuses a pending
+        # run on purpose (it may be running right now), so without this one
+        # action an abandoned run is in the history for ever.
+        act_delete = QAction("Delete this unfinished run...", menu)
+        removable = entry.overall == "pending" and entry.ended_at is None
+        act_delete.setEnabled(removable)
+        act_delete.setToolTip(
+            "Remove the directory of a run that never got started."
+            if removable
+            else "Only an unfinished run can be removed; run history is kept."
+        )
+        act_delete.triggered.connect(lambda _c=False, e=entry: self._delete(e))
+        menu.addAction(act_delete)
 
         global_pos = self._list.viewport().mapToGlobal(pos)
         QTimer.singleShot(0, lambda: menu.exec_(global_pos))
@@ -817,6 +929,34 @@ class RunsScreen(QWidget):
 
     def _toggle_star(self, entry: RunIndexEntry) -> None:
         self._write_annotations(entry, starred=not entry.starred)
+
+    def _delete(self, entry: RunIndexEntry) -> None:
+        """Remove an unfinished run's directory, after asking.
+
+        The store decides what may go (:func:`~auto_ext.core.run_store.delete_run`
+        refuses anything that is not a ``pending`` record with no stage); this
+        only asks, because the one case the store cannot judge is a run that
+        is still going right now.
+        """
+
+        answer = QMessageBox.question(
+            self,
+            "Delete this unfinished run?",
+            f"{entry.run_id} never recorded a stage.\n\n{entry.run_dir}\n\n"
+            "If this cell is running right now, let it finish instead - "
+            "deleting the directory takes its logs with it.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            delete_run(entry.run_dir)
+        except AutoExtError as exc:
+            QMessageBox.warning(self, "Could not delete", str(exc))
+            return
+        self.status_message.emit(f"deleted {entry.run_id}")
+        self.refresh()
 
     # ---- card actions ----------------------------------------------------
 
