@@ -215,6 +215,17 @@ OBJ_OPTIONS_SUMMARY = "recipeOptionsSummary"
 OBJ_TOOL_HEADER = "recipeToolHeader"
 OBJ_DENSITY_BAR = "recipeDensityBar"
 
+#: The import entry, in two pieces. ``Import...`` on its own named no object:
+#: import *what*, and what becomes of the options in my file this form has no
+#: row for? The dialog behind it answers the second question at length -- it
+#: has a "Not modelled -- left at the catalog default" section written for
+#: exactly that fear -- and none of it was reachable from a button that named
+#: nothing. The kinds go beside the button rather than inside it because the
+#: list panel's floor is :data:`RECIPE_LIST_MIN_WIDTH`, and a label elides
+#: there where a button of the same words clips mid-word.
+IMPORT_LABEL = "Import files…"
+IMPORT_KINDS = ".cmd · .qci · si.env"
+
 #: Width of the search field. Wide enough for a model path fragment
 #: (``output.dspf.busbit``), narrow enough to leave the counts on screen.
 _SEARCH_WIDTH = 190
@@ -860,15 +871,29 @@ class RecipesScreen(QWidget):
         second = QHBoxLayout()
         second.setContentsMargins(0, 0, 0, 0)
         second.setSpacing(theme.SPACE_XXS)
-        self._import_button = QPushButton("Import…", toolbar)
+        self._import_button = QPushButton(IMPORT_LABEL, toolbar)
         self._import_button.setToolTip(
             "Turn EDA files you already have -- a Quantus command file, a "
             "Calibre deck setup, an si.env -- into a recipe"
         )
         self._import_button.clicked.connect(self._on_import_clicked)
         _let_shrink(self._import_button)
-        second.addWidget(self._import_button)
-        second.addStretch(1)
+        second.addWidget(self._import_button, 0)
+
+        # The kinds, on screen rather than in the tooltip. "Import..." named
+        # no object at all, and the one question a person has before handing
+        # this tool their own file is what it will accept and what it will do
+        # with the parts it has no row for -- which the dialog answers well
+        # and the button could not hint at. A label rather than a longer
+        # button because the panel's floor is 180px: this elides, where a
+        # button of the same words would clip mid-word.
+        self._import_hint = ElidedLabel(IMPORT_KINDS, parent=toolbar)
+        self._import_hint.setStyleSheet(
+            f"color: {theme.TEXT_DISABLED}; font-family: {theme.FONT_MONO};"
+            f" font-size: {theme.FONT_SIZE_META}px;"
+        )
+        self._import_hint.setToolTip(self._import_button.toolTip())
+        second.addWidget(self._import_hint, 1)
         rows.addLayout(second)
 
         column.addWidget(toolbar)
@@ -1875,6 +1900,11 @@ class RecipesScreen(QWidget):
     def import_button(self) -> QPushButton:
         return self._import_button
 
+    def import_hint(self) -> ElidedLabel:
+        """The grey line naming the file kinds Import accepts."""
+
+        return self._import_hint
+
     def import_dialog(self) -> RecipeImportDialog | None:
         """The dialog the Import button opened, or ``None`` before it has been.
 
@@ -1935,10 +1965,23 @@ class RecipesScreen(QWidget):
         return _DOT.join(parts)
 
     def header_meta_text(self) -> str:
+        """``recipe_id``, then usage, then the edit date. Id first, and always.
+
+        The title beside this is ``name``, which the user may edit per
+        keystroke and which the migrator writes as four settings spelled into
+        a sentence ("rc_coupled, corner typical, 55C, extracted_view"). So the
+        only identity the form showed was one that both changes and looks like
+        a setting. ``recipe_id`` is the file stem, the string every cell
+        binding points at and every error message quotes, and it does not
+        move when the title does -- which is exactly why it has to be visible
+        while the title is being edited. The header's own tooltip promised as
+        much long before anything showed it.
+        """
+
         if self._working is None:
             return ""
+        parts = [self._working.recipe_id]
         used = self._usage.get(self._working.recipe_id)
-        parts = []
         if used is not None:
             parts.append(f"used by {used} cell" + ("" if used == 1 else "s"))
         parts.append(f"last edited {self._working.updated_at.strftime('%m-%d')}")
@@ -2237,6 +2280,15 @@ class RecipesScreen(QWidget):
         item = self._list.itemAt(pos)
         if item is None:
             return
+        # Select first, then build the menu. Duplicate and Delete name the
+        # row under the CURSOR, and the form on the right is the only thing
+        # on screen naming a recipe -- so right-clicking B while A is
+        # selected offered to delete B under a header still reading A, and
+        # the user had no way to notice before the recipe was gone. The Cells
+        # table already moves the selection on right-click; two of the three
+        # lists in the application disagreeing about what a right-click means
+        # is worse than either convention.
+        self._list.setCurrentItem(item)
         recipe_id = str(item.data(0, Qt.UserRole))
         menu = QMenu(self._list)
         duplicate = menu.addAction("Duplicate")

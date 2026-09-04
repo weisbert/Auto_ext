@@ -53,6 +53,7 @@ from auto_ext.ui.screens.recipes_screen import (
     DENSITY_ALL,
     DENSITY_COMMON,
     FLOW_TOOL,
+    RECIPE_LIST_MIN_WIDTH,
     RECIPE_LIST_WIDTH,
     RecipesScreen,
     frozen_specs,
@@ -812,6 +813,32 @@ def test_the_header_says_how_many_cells_use_the_recipe(qtbot) -> None:
     assert "used by 1 cell" in screen.header_meta_text()
 
 
+def test_the_header_shows_the_recipe_id_beside_the_editable_name(qtbot) -> None:
+    """The only identity on screen was a title the migrator wrote *and* encodes.
+
+    The name reads "rc_coupled, corner typical, 55C, extracted_view" -- four
+    settings spelled into a string the user is invited to edit per keystroke
+    -- while the thing that actually names this recipe, ``recipe_id``, was
+    nowhere on the form. It is the file stem (``rc-typical-55c``, a third
+    spelling), it is what every cell binding points at, and it is the string
+    every error message quotes; the header's own tooltip already promised it
+    "does not change" without ever showing it.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe("rc-typical-55c", "RC typical 55C")])
+
+    assert "rc-typical-55c" in screen.header_meta_text(), (
+        "the header shows the editable name and nothing that identifies the "
+        "recipe to the rest of the tool"
+    )
+    # And renaming does not move it: that is what makes it worth showing.
+    screen.name_edit().setText("Something else entirely")
+    screen.name_edit().textEdited.emit("Something else entirely")
+    assert "rc-typical-55c" in screen.header_meta_text()
+    assert screen.current_recipe().recipe_id == "rc-typical-55c"
+
+
 def test_the_status_line_reports_the_selection(qtbot) -> None:
     screen = _screen(qtbot)
     with qtbot.waitSignal(screen.status_changed, timeout=1000):
@@ -841,6 +868,47 @@ def test_the_recipe_list_context_menu_is_deferred_one_tick(qtbot, monkeypatch) -
 
     qtbot.wait(10)
     assert len(calls) == 1
+
+
+def test_right_clicking_a_recipe_selects_it_before_acting_on_it(
+    qtbot, monkeypatch
+) -> None:
+    """The menu acted on the row under the cursor and left the form showing A.
+
+    Right-click B while A is selected and choose Delete, and the recipe that
+    goes is B while the form -- the only thing on screen naming a recipe --
+    still reads A. The Cells table already does the opposite and moves the
+    selection first; this list did not, so two of the three lists in the
+    application disagreed about what a right-click means.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe("a", "A"), make_recipe("b", "B")])
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    screen.recipe_list.setCurrentItem(screen.recipe_list.topLevelItem(0))
+    assert screen.current_recipe_id() == "a"
+
+    menus: list[QMenu] = []
+    monkeypatch.setattr(QMenu, "exec_", lambda self, *a, **k: menus.append(self))
+
+    second = screen.recipe_list.topLevelItem(1)
+    screen.recipe_list.customContextMenuRequested.emit(
+        screen.recipe_list.visualItemRect(second).center()
+    )
+
+    assert screen.current_recipe_id() == "b", (
+        "the menu opened on B while the form still showed A"
+    )
+    assert screen.name_edit().text() == "B"
+
+    qtbot.wait(10)
+    assert len(menus) == 1
+    delete = [a for a in menus[0].actions() if a.text() == "Delete"][0]
+    with qtbot.waitSignal(screen.delete_requested, timeout=1000) as blocker:
+        delete.trigger()
+    assert blocker.args == ["b"]
 
 
 def test_the_context_menu_ignores_empty_space(qtbot, monkeypatch) -> None:
@@ -886,11 +954,35 @@ def _import_dialog(qtbot, screen, monkeypatch) -> RecipeImportDialog:
 def test_the_recipe_toolbar_offers_an_import_entry(qtbot) -> None:
     screen = _screen(qtbot)
     button = screen.import_button()
-    assert button.text() == "Import…"
+    assert button.text() == "Import files…"
     assert button.isEnabled() is True, "importing needs no selection"
 
     screen.set_recipes([])
     assert screen.import_button().isEnabled() is True
+
+
+def test_the_import_entry_names_the_files_it_accepts(qtbot) -> None:
+    """"Import..." with no object. Import *what*?
+
+    The dialog behind it answers the question beautifully -- it has a whole
+    "Not modelled -- left at the catalog default" section written for exactly
+    the fear a user has about handing over their own file -- and none of that
+    is discoverable from a button that names nothing. The kinds go on the
+    toolbar, not in a tooltip: a hint you have to hover to find is a hint
+    most people never read.
+    """
+
+    screen = _screen(qtbot)
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    on_screen = f"{screen.import_button().text()} {screen.import_hint().full_text()}"
+    for kind in (".cmd", ".qci", "si.env"):
+        assert kind in on_screen, f"nothing on the toolbar mentions {kind}"
+
+    # The hint is a label, so it gives way by eliding when the splitter is
+    # dragged in; the button keeps its own words at any width.
+    assert screen.import_button().sizeHint().width() <= RECIPE_LIST_MIN_WIDTH
 
 
 def test_the_import_entry_does_not_squeeze_the_artboard_row(qtbot) -> None:
