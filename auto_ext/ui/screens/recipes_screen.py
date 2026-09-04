@@ -266,11 +266,11 @@ def recipe_specs(catalog: Catalog | None = None) -> list[OptionSpec]:
     Rows without a ``recipe_field_path`` are dropped, because there is no
     field for a control to write to. That is correct and it is not free: the
     21 rows it drops are real vendor options this catalog records, and
-    dropping them *silently* is what let "we decided not to" and "we forgot"
-    look identical for four months. Each one is now named with its own reason
-    in ``CATALOG_UNREACHABLE`` (``tests/ui/test_reachability.py``), and that
-    audit fails the day this function starts dropping one nobody has written a
-    reason for.
+    dropping them *silently* is what made "we decided not to" and "we forgot"
+    indistinguishable -- in the code and on the screen alike. Each one is now
+    named with its own reason in ``CATALOG_UNREACHABLE``
+    (``tests/ui/test_reachability.py``), and that audit fails the day this
+    function starts dropping one nobody has written a reason for.
 
     The order is the field path rather than the catalog's own order, because
     the catalog is sorted by emission line -- correct for the renderer,
