@@ -318,11 +318,99 @@ def test_setup_drawer_pin_row_is_dead_until_a_host_connects(
     assert row is not None
     pin = next(b for b in row.findChildren(QPushButton) if b.text() == "Set")
     edit = next(iter(row.findChildren(QLineEdit)))
-    assert pin.isEnabled()
+    assert edit.isEnabled(), "with a host connected the row takes a value"
     edit.setText("  /abs/path/to/layers.map  ")
+    assert pin.isEnabled()
     with qtbot.waitSignal(drawer.override_requested, timeout=1000) as blocker:
         pin.click()
     assert blocker.args == ["PDK_LAYER_MAP_FILE", "/abs/path/to/layers.map"]
+
+
+def _pin_widgets(drawer: SetupDrawer, check_id: str):
+    """``(line edit, Set button)`` of one check's pin row, as rendered."""
+
+    from PyQt5.QtWidgets import QLineEdit, QPushButton
+
+    row = drawer.row_widget(check_id)
+    assert row is not None, check_id
+    edit = next(iter(row.findChildren(QLineEdit)))
+    pin = next(b for b in row.findChildren(QPushButton) if b.text() == "Set")
+    return edit, pin
+
+
+def test_setup_drawer_keeps_what_was_typed_across_a_recheck(
+    qtbot, mixed_report
+) -> None:
+    """"在 Setup 里填了路径，按 Re-check 想看看好没好，框又空了."
+
+    Re-check is the natural next move after typing a path, and it arrives as
+    a whole new report -- as does every load, project switch and save. The
+    drawer rebuilds its body for each of them, so the box has to be refilled
+    from what the user typed rather than from nothing.
+    """
+
+    drawer = SetupDrawer()
+    qtbot.addWidget(drawer)
+    drawer.override_requested.connect(lambda *_a: None)
+    drawer.set_report(mixed_report)
+
+    edit, _pin = _pin_widgets(drawer, "env.pdk_layer_map_file")
+    qtbot.keyClicks(edit, "/pdk/layers.map")
+
+    # what the host does when Re-check comes back
+    drawer.set_report(mixed_report)
+
+    edit, _pin = _pin_widgets(drawer, "env.pdk_layer_map_file")
+    assert edit.text() == "/pdk/layers.map"
+
+
+def test_setup_drawer_forgets_the_typed_pins_when_the_profile_changes(
+    qtbot, mixed_report
+) -> None:
+    """A path typed for one PDK is not an answer for the next one."""
+
+    drawer = SetupDrawer()
+    qtbot.addWidget(drawer)
+    drawer.override_requested.connect(lambda *_a: None)
+    drawer.set_report(mixed_report)
+    edit, _pin = _pin_widgets(drawer, "env.pdk_layer_map_file")
+    qtbot.keyClicks(edit, "/pdk/layers.map")
+
+    other = mixed_report.model_copy(update={"profile_id": "hn001"})
+    drawer.set_report(other)
+
+    edit, _pin = _pin_widgets(drawer, "env.pdk_layer_map_file")
+    assert edit.text() == ""
+
+
+def test_setup_drawer_set_is_dead_while_the_box_is_empty(
+    qtbot, mixed_report
+) -> None:
+    """"按了 Set 什么都没发生，也没说框是空的."
+
+    The button was enabled from the state the row is *born* in -- a host is
+    connected and the check names a variable -- and the one thing it actually
+    needs, a value, was checked only inside the click handler, which returned
+    without a word.
+    """
+
+    drawer = SetupDrawer()
+    qtbot.addWidget(drawer)
+    drawer.override_requested.connect(lambda *_a: None)
+    drawer.set_report(mixed_report)
+
+    edit, pin = _pin_widgets(drawer, "env.pdk_layer_map_file")
+    assert edit.text() == ""
+    assert pin.isEnabled() is False
+    assert "value" in pin.toolTip().lower()
+
+    qtbot.keyClicks(edit, "/pdk/layers.map")
+    assert pin.isEnabled() is True
+
+    # whitespace is not a value either
+    edit.clear()
+    qtbot.keyClicks(edit, "   ")
+    assert pin.isEnabled() is False
 
 
 def test_setup_drawer_offers_the_pin_row_for_env_checks_only(
