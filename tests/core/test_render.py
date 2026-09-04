@@ -958,6 +958,102 @@ def test_both_quantus_forms_render_to_different_files(
     assert f'-file_name "{WORK}/inv.dspf"' in files["quantus.dspf"].text
 
 
+def _rules(*selections: str) -> Recipe:
+    """A recipe whose extract list is the given selections, in order."""
+
+    return Recipe(
+        recipe_id="rules",
+        name="rules",
+        extraction={
+            "extract": [
+                {"selection": s, "type": "rc_coupled"}
+                if s == "all"
+                else {"selection": "nets_file", "selection_arg": s, "type": "rc_coupled"}
+                for s in selections
+            ]
+        },
+    )
+
+
+def test_a_later_selection_all_is_reported_as_overriding_the_rules_above_it() -> None:
+    """Extract statements accumulate and the LAST one wins for any net.
+
+    So a rule list that ends in ``-selection all`` silently discards every
+    rule above it: the user adds a second rule for the clock nets, puts it
+    second, and the whole chip comes back with the first rule's type. It is
+    legal -- the manual documents the accumulation -- so this warns rather
+    than refuses, and the manual's own worked pair, which puts ``all`` FIRST
+    on purpose, must stay silent.
+    """
+
+    manual_ordering = _rules("all", "clk_nets")
+    assert render.shadowed_extract_rules(manual_ordering) == []
+
+    reversed_ordering = _rules("clk_nets", "all")
+    shadowed = render.shadowed_extract_rules(reversed_ordering)
+    assert len(shadowed) == 1
+    assert shadowed[0].position == 2
+    assert shadowed[0].shadows == 1
+    assert "2" in shadowed[0].describe()
+    assert "all" in shadowed[0].describe()
+
+    three = _rules("clk_nets", "vco_nets", "all")
+    assert [s.shadows for s in render.shadowed_extract_rules(three)] == [2]
+
+    assert render.shadowed_extract_rules(Recipe(recipe_id="d", name="d")) == []
+
+
+def test_the_shadowed_rule_warning_reaches_the_run_log(
+    tmp_path: Path, profile: PdkProfile, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A warning nobody emits is a warning nobody reads.
+
+    The editor grows a chip for this too, but the deck is what the tool runs
+    and the run log is what a user reads afterwards, so the render says it as
+    well -- once per quantus deck, at WARNING, naming the position.
+    """
+
+    recipe = _rules("clk_nets", "all")
+    ctx = render.build_context(
+        dut=make_dut(),
+        recipe=recipe,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    plan = next(p for p in render.plan_targets(recipe) if p.stage is Stage.QUANTUS)
+    with caplog.at_level("WARNING", logger="auto_ext.core.render"):
+        render.render_one(
+            plan,
+            context=ctx,
+            recipe=recipe,
+            profile=profile,
+            resolved_env=ENV,
+            out_dir=tmp_path / "rendered",
+        )
+    assert any("-selection all" in record.getMessage() for record in caplog.records)
+
+    caplog.clear()
+    fine = _rules("all", "clk_nets")
+    fine_ctx = render.build_context(
+        dut=make_dut(),
+        recipe=fine,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    with caplog.at_level("WARNING", logger="auto_ext.core.render"):
+        render.render_one(
+            next(p for p in render.plan_targets(fine) if p.stage is Stage.QUANTUS),
+            context=fine_ctx,
+            recipe=fine,
+            profile=profile,
+            resolved_env=ENV,
+            out_dir=tmp_path / "fine",
+        )
+    assert caplog.records == []
+
+
 def _both_quantus_decks(
     tmp_path: Path, profile: PdkProfile
 ) -> dict[str, render.RenderedFile]:
@@ -1009,6 +1105,47 @@ def test_no_assura_only_option_reaches_the_calibre_input_statement(
         assert not offenders, (
             f"{key} writes {offenders} inside input_db -type calibre; -format "
             "belongs to the Assura input table"
+        )
+
+
+def test_the_two_quantus_decks_cannot_collide_in_one_rcx_temp(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    """A recipe emitting both forms runs Quantus twice out of one directory.
+
+    Quantus builds its scratch tree at
+    ``<output_setup -directory_name>/<-temporary_directory_name>/rcx_temp``,
+    and the manual is blunt: "you cannot launch two Quantus jobs from the same
+    directory" unless the temporary directory name points somewhere different
+    per run. Both templates hardcode the same pair, so both invocations
+    resolve to the same path. Two ways out and the test accepts either: give
+    the two decks different temp directories, or take the vendor's own
+    uniqueness option, which costs nothing.
+    """
+
+    decks = _both_quantus_decks(tmp_path, profile)
+    assert len(decks) == 2, "this test needs both quantus forms"
+
+    def _setup(text: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for line in _statement(text, "output_setup"):
+            body = line.strip().removesuffix("\\").strip()
+            if body.startswith("-"):
+                name, _, value = body.partition(" ")
+                out[name] = value.strip()
+        return out
+
+    setups = {key: _setup(deck.text) for key, deck in decks.items()}
+    scratch = {
+        key: (s.get("-directory_name"), s.get("-temporary_directory_name"))
+        for key, s in setups.items()
+    }
+    if len(set(scratch.values())) == len(scratch):
+        return  # the two decks already name different temp directories
+    for key, s in setups.items():
+        assert s.get("-unique_qrctemp_name") == "true", (
+            f"{key} shares {scratch[key]} with the other quantus deck and does "
+            "not ask Quantus for a unique rcx_temp"
         )
 
 

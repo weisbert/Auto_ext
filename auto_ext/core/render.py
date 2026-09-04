@@ -96,7 +96,7 @@ from auto_ext.core.template import (
 )
 from auto_ext.model.common import STAGE_ORDER, RenderTarget, Stage
 from auto_ext.model.pdk import PdkProfile
-from auto_ext.model.recipe import OutputKind, Recipe, ResourceProfile
+from auto_ext.model.recipe import ExtractSelection, OutputKind, Recipe, ResourceProfile
 from auto_ext.model.run import DutSnapshot, JsonScalar
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,7 @@ __all__ = [
     "RenderedFile",
     "ResolvedCorner",
     "RunFacts",
+    "ShadowedRule",
     "SiteFacts",
     "TargetPlan",
     "Unrepresentable",
@@ -121,6 +122,7 @@ __all__ = [
     "render_one",
     "required_env_vars",
     "resolve_corner",
+    "shadowed_extract_rules",
     "template_path_for",
 ]
 
@@ -879,6 +881,61 @@ def check_representable(
     return found
 
 
+@dataclass(frozen=True)
+class ShadowedRule:
+    """One ``extract`` rule that discards every rule above it.
+
+    Not an error: the vendor documents the accumulation and the override, and
+    a deliberate ``all`` at the END is a legal way to say "and everything else
+    like this". It is reported because it is almost never what was meant, and
+    because nothing else in the pipeline can tell the difference between a
+    rule that was overridden and a rule that was never written.
+    """
+
+    #: 1-based position of the offending rule in ``extraction.extract``.
+    position: int
+    #: How many earlier rules it discards.
+    shadows: int
+    #: The ``-type`` the whole design ends up extracted with.
+    extract_type: str
+
+    def describe(self) -> str:
+        earlier = "rule" if self.shadows == 1 else "rules"
+        return (
+            f"extract rule {self.position} uses -selection all, which overrides "
+            f"the {self.shadows} {earlier} above it: every net is extracted as "
+            f"{self.extract_type!r}. Quantus accumulates extract statements and "
+            f"the LAST one wins, so a catch-all belongs FIRST."
+        )
+
+
+def shadowed_extract_rules(recipe: Recipe) -> list[ShadowedRule]:
+    """Rules made dead by a later ``-selection all``.
+
+    ``extract`` statements accumulate first to last and the last one wins for
+    any net it covers, so an ``all`` rule anywhere but the first position
+    discards everything before it. The manual's own worked pair puts ``all``
+    first for exactly this reason -- whole chip cheap, the nets that matter
+    expensive -- and reversing the two lines gives the whole chip the cheap
+    treatment with no complaint from anywhere.
+
+    Returns a list rather than raising: :func:`render_one` logs it, and the
+    Recipes form draws the same finding as a chip beside the rule.
+    """
+
+    found: list[ShadowedRule] = []
+    for index, rule in enumerate(recipe.extraction.extract):
+        if index and rule.selection is ExtractSelection.ALL:
+            found.append(
+                ShadowedRule(
+                    position=index + 1,
+                    shadows=index,
+                    extract_type=rule.type.value,
+                )
+            )
+    return found
+
+
 def _raise_unrepresentable(items: Sequence[Unrepresentable], recipe: Recipe) -> None:
     lines = "\n  ".join(item.describe() for item in items)
     raise RenderError(
@@ -1086,6 +1143,14 @@ def render_one(
     )
     if blocked:
         _raise_unrepresentable(blocked, recipe)
+
+    # Non-fatal, and only for the files that carry the extract statements: the
+    # ordering is legal, so the run proceeds -- but the run log is where a
+    # user looks after an extraction came back with the wrong type on every
+    # net, and until now it said nothing at all.
+    if plan.stage is Stage.QUANTUS:
+        for shadowed in shadowed_extract_rules(recipe):
+            logger.warning("%s: %s", plan.target.value, shadowed.describe())
 
     template_path = template_path_for(plan.spec, templates_root=templates_root)
     try:

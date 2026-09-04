@@ -53,6 +53,7 @@ output_db -type extracted_view \
               -view_name "av_ext"
 output_setup \
               -directory_name "/w/cds/verify/QCI_PATH_inv/query_output" \
+              -unique_qrctemp_name true \
               -temporary_directory_name "Design"
 process_technology \
               -technology_corner \

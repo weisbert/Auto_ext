@@ -3348,7 +3348,7 @@ options:
     default: "#"
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/dspf.cmd.j2:63
+    source_ref: templates/quantus/dspf.cmd.j2:64
     lands_in:
       - {target: quantus.dspf.cmd, section: output_db, option: -sub_node_char, line: 56}
     why: Character introducing subnodes of a split net. Must match the simulator.
@@ -3488,7 +3488,7 @@ options:
     default: SCHEMATIC
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/dspf.cmd.j2:67
+    source_ref: templates/quantus/dspf.cmd.j2:68
     notes: >-
       DSPF only. Separate from the extraction_setup one, which both files
       carry -- and the two must be edited together, since they have identical
@@ -3519,11 +3519,68 @@ options:
     currently: hardcoded_literal
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:57
-    notes: The fourth appearance of the query_cmd basename; see input_db_run_name.
+    notes: >-
+      The fourth appearance of the query_cmd basename; see input_db_run_name.
+      Quantus builds its scratch tree at
+      <output_setup -directory_name>/<this>/rcx_temp, so this literal plus
+      output_dir is what decides whether two Quantus invocations can share a
+      working directory. See output_unique_qrctemp_name, which is why they
+      can.
     lands_in:
-      - {target: quantus.ext.cmd, section: output_setup, option: -temporary_directory_name, line: 57}
-      - {target: quantus.dspf.cmd, section: output_setup, option: -temporary_directory_name, line: 61}
+      - {target: quantus.ext.cmd, section: output_setup, option: -temporary_directory_name, line: 58}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -temporary_directory_name, line: 62}
     why: Determined by the PDK query_cmd, like the other three "Design" rows.
+
+  - key: output_unique_qrctemp_name
+    template_var: output_unique_qrctemp_name
+    context_path: null
+    owner: fixed
+    type: bool
+    choices_confidence: certain
+    default: true
+    currently: hardcoded_literal
+    observed: false
+    notes: >-
+      ADDED 2026-09-04, and it is the vendor's own answer to a hazard this
+      tool created for itself. recipe.output.emit is a list, so one recipe
+      now renders BOTH quantus decks and the runner invokes Quantus twice from
+      the same output_dir with the same -temporary_directory_name -- i.e. the
+      same .../query_output/Design/rcx_temp. The manual states the rule
+      plainly: "you cannot launch two Quantus jobs from the same directory" if
+      -temporary_directory_name does not point somewhere different for each
+      run, and names this option as the remedy Quantus grew in EXT 10.1 to
+      create a UNIQUE temporary directory instead.
+      Today's two invocations run sequentially inside one task, so the
+      collision is latent rather than live; --jobs and the parallel path make
+      it live. The option costs nothing, so it is taken rather than reasoned
+      about, and it is `fixed` because there is no version of this where a
+      user wants two runs fighting over one scratch directory.
+      Not `observed`: no export we hold carries the line. It is one we add,
+      and it is placed BEFORE -temporary_directory_name rather than after so
+      that -temporary_directory_name keeps its position as the last line of
+      the statement, exactly as every real export writes it. Appending
+      instead would put a continuation backslash on a line the catalog
+      already models, and a real deck imported afterwards would carry a
+      formatting-only hunk on top of the genuine one -- the patch-baseline
+      noise this catalog transcribes quoting and line breaks to avoid.
+      Unconditional, not "only when two forms are emitted": a deck whose
+      content depended on a fact not recoverable from the deck could not
+      round-trip through the importer, which is a worse property than one
+      extra line.
+      The manual also recommends the temporary directory be LOCAL to the
+      execution host, with room to spare; the files are removed when the run
+      finishes.
+      NOT a defence against two RUNS of the same cell: the default
+      output_dir pattern keys on {cell} alone, so two concurrent runs of one
+      cell share a workspace by construction. That is the output_dir
+      pattern's business (see runner._resolve_output_dir, which tells the
+      user to add {run_slug}), not this option's.
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_setup, option: -unique_qrctemp_name, line: 57, quoting: bare}
+      - {target: quantus.dspf.cmd, section: output_setup, option: -unique_qrctemp_name, line: 61, quoting: bare}
+    why: >-
+      Keeps two Quantus runs out of one scratch directory. Free insurance
+      against a corruption that only shows up under parallelism.
 
   - key: extraction_corner
     groups_with: technology_corner
@@ -3572,7 +3629,7 @@ options:
     default: TYPICAL
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:60
+    source_ref: templates/quantus/ext.cmd.j2:61
     notes: >-
       The tool literal lives here, on the profile; the Recipe only names a
       semantic corner (recipe.extraction.corner) and the profile maps it. That
@@ -3597,8 +3654,8 @@ options:
       corner table, not this catalog row, is what a second PDK overrides.
       Rendered with the option and the value on SEPARATE lines.
     lands_in:
-      - {target: quantus.ext.cmd, section: process_technology, option: -technology_corner, line: 59, layout: value_on_next_line}
-      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_corner, line: 63, layout: value_on_next_line}
+      - {target: quantus.ext.cmd, section: process_technology, option: -technology_corner, line: 60, layout: value_on_next_line}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_corner, line: 64, layout: value_on_next_line}
     why: The process corner. Its literal spelling is a PDK fact; choosing one is a recipe act.
 
   - key: technology_library_file
@@ -3610,15 +3667,15 @@ options:
     default: $env(SETUP_ROOT)/assura_tech.lib
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:61
+    source_ref: templates/quantus/ext.cmd.j2:62
     notes: >-
       The profile keeps the expression; pdk.tech_library_file is already
       env-substituted by the time the render context is built, because si
       and jivaro do not expand env vars inside string values. A var this run
       cannot resolve is refused by the final rescan in render_one.
     lands_in:
-      - {target: quantus.ext.cmd, section: process_technology, option: -technology_library_file, line: 61}
-      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_library_file, line: 65}
+      - {target: quantus.ext.cmd, section: process_technology, option: -technology_library_file, line: 62}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_library_file, line: 66}
     why: The PDK technology library. Pure process fact.
 
   - key: tech_name
@@ -3635,8 +3692,8 @@ options:
       null means "derive it", by taking the parent directory name of whichever
       of tech_name_env_vars resolves first.
     lands_in:
-      - {target: quantus.ext.cmd, section: process_technology, option: -technology_name, line: 62}
-      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_name, line: 66}
+      - {target: quantus.ext.cmd, section: process_technology, option: -technology_name, line: 63}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -technology_name, line: 67}
     why: Which technology QRC loads. Pure process fact.
 
   - key: temperature_c
@@ -3664,8 +3721,8 @@ options:
       is the manifest value, which reproduces today behaviour exactly.
       Rendered with the option and the value on separate lines.
     lands_in:
-      - {target: quantus.ext.cmd, section: process_technology, option: -temperature, line: 63, layout: value_on_next_line, quoting: bare}
-      - {target: quantus.dspf.cmd, section: process_technology, option: -temperature, line: 67, layout: value_on_next_line, quoting: bare}
+      - {target: quantus.ext.cmd, section: process_technology, option: -temperature, line: 64, layout: value_on_next_line, quoting: bare}
+      - {target: quantus.dspf.cmd, section: process_technology, option: -temperature, line: 68, layout: value_on_next_line, quoting: bare}
     why: Extraction temperature. Already a knob; stays tunable.
 
   - key: quantus_cpu_count
