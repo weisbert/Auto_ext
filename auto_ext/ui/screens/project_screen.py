@@ -41,6 +41,13 @@ screen follows against the catalog, for the same reason.
 
 Assumptions
 -----------
+* **A keystroke is an edit; focus-out is only when a mistake is reported.**
+  Every control announces itself as it is typed into, because everything
+  downstream of an edit -- the staged document, the star in the title,
+  ``File -> Save`` writing the new value instead of the old one, the window
+  asking before it closes -- hangs off that announcement, and neither the
+  Save shortcut nor the title-bar X moves focus. This is the same rule the
+  Recipes screen follows, and for the same reason it had to learn it.
 * **A validation failure is shown at the control, not at save time.**
   ``set_path`` assigns through the attribute and the models use
   ``validate_assignment=True``, so a bad pattern key or an out-of-range
@@ -140,13 +147,12 @@ def field_editors() -> tuple[ProjectField, ...]:
 
 
 class _MultiLineEdit(QPlainTextEdit):
-    """A plain-text box that commits on focus-out, like ``QLineEdit`` does.
+    """A plain-text box that also reports focus-out, like ``QLineEdit`` does.
 
-    ``textChanged`` would fire on every keystroke, and half a typed
-    ``name = value`` line is not a mistake worth an error message under the
-    control -- it is a user who has not finished the line. Focus-out is the
-    same moment ``QLineEdit.editingFinished`` picks, so the whole screen
-    commits at one kind of moment rather than two.
+    Focus-out is the moment a *mistake* is worth reporting: half a typed
+    ``name = value`` line is not an error message under the control, it is a
+    user who has not finished the line. It is emphatically **not** the moment
+    an edit becomes real -- see :meth:`FieldRow._on_typed`.
     """
 
     editingFinished = pyqtSignal()
@@ -246,6 +252,7 @@ class FieldRow(QWidget):
                 )
             )
             edit.setStyleSheet(f"font-family: {theme.FONT_MONO};")
+            edit.textChanged.connect(self._on_typed)
             edit.editingFinished.connect(self._on_edited)
             return edit
         if kind is FieldKind.TABLE:
@@ -255,6 +262,11 @@ class FieldRow(QWidget):
             return table
         edit = QLineEdit(self)
         edit.setPlaceholderText(self.spec.placeholder)
+        # ``textEdited``, not ``textChanged``: it fires for typing and pasting
+        # and stays silent for ``setText``, which is how the host loads a
+        # value in. See :meth:`_on_typed` for why a keystroke has to announce
+        # itself at all.
+        edit.textEdited.connect(self._on_edited)
         edit.editingFinished.connect(self._on_edited)
         return edit
 
@@ -371,6 +383,25 @@ class FieldRow(QWidget):
         """
 
         self._on_edited()
+
+    def _on_typed(self, *_args: Any) -> None:
+        """Announce what is in the control now, saying nothing about a bad line.
+
+        The quiet half of :meth:`_on_edited`, for the signals that fire on
+        every keystroke. A line the parser cannot read yet is skipped rather
+        than reported: ``SETUP_ROOT`` is the first eleven characters of
+        ``SETUP_ROOT = /pdk/setup``, not a mistake. Focus-out still runs the
+        loud version, so an unfinished line is reported the moment the user
+        looks away from it.
+        """
+
+        if self._loading:
+            return
+        try:
+            value = self.value()
+        except ValueError:
+            return
+        self.changed.emit(self.spec.path, value)
 
     def _on_edited(self, *_args: Any) -> None:
         if self._loading:

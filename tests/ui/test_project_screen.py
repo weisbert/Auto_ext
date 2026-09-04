@@ -139,6 +139,47 @@ def test_editing_back_to_the_loaded_value_is_not_dirty(screen: ProjectScreen) ->
     assert screen.is_dirty() is False
 
 
+def test_typing_is_an_edit_before_the_box_is_left(
+    screen: ProjectScreen, qtbot
+) -> None:
+    """"输入 DSPF 路径后按 Ctrl+S，写进去的是旧值."
+
+    Focus-out was the only moment a control announced itself, and neither
+    ``Ctrl+S`` nor closing the window moves focus. Everything downstream --
+    the staged document, the star in the title, the "you have unsaved edits"
+    question -- hangs off this signal, so a keystroke has to reach it.
+    """
+
+    row = screen.row("dspf_out_pattern")
+    control = row.control()
+    control.selectAll()
+    with qtbot.waitSignal(screen.edited, timeout=1000):
+        qtbot.keyClicks(control, "${WORK_ROOT2}/{cell}_typed.dspf")
+
+    assert screen.workspace().dspf_out_pattern == "${WORK_ROOT2}/{cell}_typed.dspf"
+    assert screen.is_dirty() is True
+
+
+def test_typing_a_half_finished_mapping_line_is_not_yet_an_error(
+    screen: ProjectScreen, qtbot
+) -> None:
+    """The multi-line boxes still hold their promise while a line is half typed.
+
+    Live staging must not turn ``SETUP_ROOT`` -- the first eleven keystrokes
+    of ``SETUP_ROOT = /pdk/setup`` -- into an error message under the control.
+    """
+
+    row = screen.row("env_overrides")
+    qtbot.keyClicks(row.control(), "SETUP_ROOT")
+    assert row.error() == ""
+    assert screen.profile().env_overrides == {}
+
+    qtbot.keyClicks(row.control(), " = /pdk/setup")
+    assert row.error() == ""
+    assert screen.profile().env_overrides == {"SETUP_ROOT": "/pdk/setup"}
+    assert screen.is_dirty() is True
+
+
 def test_a_list_field_is_one_entry_per_line(screen: ProjectScreen) -> None:
     row = screen.row("power_names")
     row.control().setPlainText("VDD\nVDDA\n\n  VDDIO  \n")
