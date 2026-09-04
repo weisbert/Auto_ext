@@ -846,16 +846,28 @@ def test_the_optional_connect_by_name_line_keeps_the_hugging_form(
     assert lines[i + 2] == "*cmnSpecifyLicenseWaitTime: 1"
 
 
-def _extraction_setup(text: str) -> list[str]:
-    """The extraction_setup statement, from its head to its last line."""
+def _statement(text: str, head: str) -> list[str]:
+    """One Quantus command statement, from its head line to its last line.
+
+    A Quantus command file is a sequence of backslash-continued statements, so
+    "is this option in the deck" is almost never the question worth asking --
+    the question is which STATEMENT carries it, because the vendor documents a
+    different option set under each one.
+    """
 
     lines = text.splitlines()
-    i = lines.index("extraction_setup \\")
+    i = next(n for n, line in enumerate(lines) if line.startswith(head))
     out = [lines[i]]
     while out[-1].rstrip().endswith("\\"):
         i += 1
         out.append(lines[i])
     return out
+
+
+def _extraction_setup(text: str) -> list[str]:
+    """The extraction_setup statement, from its head to its last line."""
+
+    return _statement(text, "extraction_setup")
 
 
 def test_the_inductor_blocking_type_is_omitted_until_it_is_asked_for(
@@ -944,6 +956,60 @@ def test_both_quantus_forms_render_to_different_files(
     assert "-type extracted_view" in files["quantus.ext"].text
     assert "-type dspf" in files["quantus.dspf"].text
     assert f'-file_name "{WORK}/inv.dspf"' in files["quantus.dspf"].text
+
+
+def _both_quantus_decks(
+    tmp_path: Path, profile: PdkProfile
+) -> dict[str, render.RenderedFile]:
+    """Both quantus decks from one recipe that emits both output forms."""
+
+    both = Recipe(
+        recipe_id="both",
+        name="both",
+        output={"emit": [OutputKind.EXTRACTED_VIEW, OutputKind.DSPF]},
+    )
+    ctx = render.build_context(
+        dut=make_dut(),
+        recipe=both,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    return {
+        plan.stage_key: render.render_one(
+            plan,
+            context=ctx,
+            recipe=both,
+            profile=profile,
+            resolved_env=ENV,
+            out_dir=tmp_path / "rendered",
+        )
+        for plan in render.plan_targets(both)
+        if plan.stage is Stage.QUANTUS
+    }
+
+
+def test_no_assura_only_option_reaches_the_calibre_input_statement(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    """``input_db -format`` is documented for Assura input, not for Calibre.
+
+    The vendor prints a separate option table per ``input_db -type``, and the
+    Calibre one has twelve entries with ``-format`` not among them; the option
+    is defined one page later as "the input data format for Assura". Our
+    ``ext.cmd`` wrote it anyway and ``dspf.cmd`` never did, which had been read
+    as a difference between the two output forms rather than as one file being
+    wrong. If QRC ever validates its option names, every extracted-view run
+    dies at the last stage, hours in.
+    """
+
+    for key, deck in _both_quantus_decks(tmp_path, profile).items():
+        statement = _statement(deck.text, "input_db -type calibre")
+        offenders = [line for line in statement if "-format" in line]
+        assert not offenders, (
+            f"{key} writes {offenders} inside input_db -type calibre; -format "
+            "belongs to the Assura input table"
+        )
 
 
 def test_rendering_refuses_a_setting_the_template_hardcodes(

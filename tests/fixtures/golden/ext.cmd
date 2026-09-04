@@ -33,7 +33,6 @@ input_db -type calibre \
               -device_property_value 7 \
               -run_name "Design" \
               -directory_name "/w/cds/verify/QCI_PATH_inv/query_output" \
-              -format "DFII" \
               -instance_property_value 6 \
               -layer_map_file "/w/cds/verify/QCI_PATH_inv/query_output/Design.gds.map" \
               -net_property_value 5 \

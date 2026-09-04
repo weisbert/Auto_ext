@@ -385,7 +385,7 @@ options:
     observed: true
     source_ref: examples/legacy/config/tasks.yaml:26
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -view_name, line: 55}
+      - {target: quantus.ext.cmd, section: output_db, option: -view_name, line: 54}
       - {target: jivaro.xml, section: general, option: inputView, line: 2}
       - {target: jivaro.xml, section: general, option: outputView, line: 3}
     notes: >-
@@ -2628,18 +2628,34 @@ options:
     context_path: null
     owner: fixed
     type: enum
-    choices: [DFII]
-    choices_confidence: guess
-    default: DFII
-    currently: hardcoded_literal
+    choices: [DFII, GDS]
+    choices_confidence: certain
+    default: null
+    nullable: true
+    placeholder: not written; this option is not part of the Calibre input type
+    currently: absent
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:37
-    notes: ext.cmd only; the DSPF flow has no such row.
-    lands_in:
-      - {target: quantus.ext.cmd, section: input_db, option: -format, line: 37}
+    source_ref: examples/legacy/templates/quantus/ext.cmd.j2:36
+    notes: >-
+      REMOVED FROM ext.cmd ON 2026-09-04, and the row is kept to say why so
+      nobody restores it. -format is documented under the ASSURA input type:
+      the manual prints one option table per `input_db -type`, the Calibre
+      table lists twelve options and -format is not among them, and the
+      option's own description reads "the input data format for Assura". The
+      Calibre table is additionally tagged as restricted to Calibre input.
+      The asymmetry between the two command files was therefore never a
+      difference between the two output forms -- dspf.cmd was right and
+      ext.cmd was writing an option that does not belong to the statement it
+      sat in. Whether QRC 18.12 rejects an unknown option or ignores it is
+      unverified, and a deck that only works because the tool is lenient is
+      not a deck worth shipping.
+      Two members, not three: GDSII / OASIS were never legal spellings here;
+      the alternative to DFII is GDS.
+    lands_in: []
     why: >-
-      Says the layout database is DFII. Follows from writing an extracted view
-      back into the Cadence library, so it is not an independent choice.
+      Assura's layout database format. Recorded so the option cannot come
+      back into a Calibre-input deck by way of the "the other file has it"
+      argument.
 
   - key: instance_property_value
     template_var: instance_property_value
@@ -2650,9 +2666,9 @@ options:
     default: 6
     currently: hardcoded_literal
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:38
+    source_ref: templates/quantus/ext.cmd.j2:37
     lands_in:
-      - {target: quantus.ext.cmd, section: input_db, option: -instance_property_value, line: 38, quoting: bare}
+      - {target: quantus.ext.cmd, section: input_db, option: -instance_property_value, line: 37, quoting: bare}
       - {target: quantus.dspf.cmd, section: input_db, option: -instance_property_value, line: 37, quoting: bare}
     why: As device_property_value. Meaning unknown; value transcribed.
 
@@ -2665,9 +2681,9 @@ options:
     default: 5
     currently: hardcoded_literal
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:40
+    source_ref: templates/quantus/ext.cmd.j2:39
     lands_in:
-      - {target: quantus.ext.cmd, section: input_db, option: -net_property_value, line: 40, quoting: bare}
+      - {target: quantus.ext.cmd, section: input_db, option: -net_property_value, line: 39, quoting: bare}
       - {target: quantus.dspf.cmd, section: input_db, option: -net_property_value, line: 39, quoting: bare}
     why: As device_property_value. Meaning unknown; value transcribed.
 
@@ -2764,7 +2780,7 @@ options:
       Satisfied vacuously while input_db_type is fixed to calibre; it becomes
       a live constraint the moment that stops being true.
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -type, line: 42, layout: own_line, indent: 0}
+      - {target: quantus.ext.cmd, section: output_db, option: -type, line: 41, layout: own_line, indent: 0}
       - {target: quantus.dspf.cmd, section: output_db, option: -type, line: 42, layout: own_line, indent: 0}
     why: Which artifacts the extraction produces. The defining choice of a recipe.
 
@@ -2778,7 +2794,7 @@ options:
     default: pcapacitor
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:43
+    source_ref: templates/quantus/ext.cmd.j2:42
     question: Are these the device names in your PDK? Must both tools agree?
     notes: >-
       Belongs to one parasitic-device contract together with res_component and
@@ -2795,7 +2811,7 @@ options:
       value, so marking it certain while that question stands would be the
       catalog contradicting itself. It stays likely on purpose.
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -cap_component, line: 43}
+      - {target: quantus.ext.cmd, section: output_db, option: -cap_component, line: 42}
     why: Which analogLib device parasitic caps are instantiated as. A PDK/library fact.
 
   - key: cap_property_name
@@ -2811,9 +2827,9 @@ options:
       as cap_component's `pcapacitor`.
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:44
+    source_ref: templates/quantus/ext.cmd.j2:43
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -cap_property_name, line: 44}
+      - {target: quantus.ext.cmd, section: output_db, option: -cap_property_name, line: 43}
     why: Property name the capacitance value is written under in the extracted view.
 
   - key: enable_cellview_check
@@ -2826,9 +2842,9 @@ options:
     default: false
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:45
+    source_ref: templates/quantus/ext.cmd.j2:44
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -enable_cellview_check, line: 45, quoting: bare}
+      - {target: quantus.ext.cmd, section: output_db, option: -enable_cellview_check, line: 44, quoting: bare}
     why: Whether QRC validates the target cellview before writing it.
 
   - key: device_finger_delimiter
@@ -2840,9 +2856,9 @@ options:
     default: "@"
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:46
+    source_ref: templates/quantus/ext.cmd.j2:45
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -device_finger_delimiter, line: 46}
+      - {target: quantus.ext.cmd, section: output_db, option: -device_finger_delimiter, line: 45}
       - {target: quantus.dspf.cmd, section: output_db, option: -device_finger_delimiter, line: 44}
     notes: >-
       Same value in both output forms, so it is ONE parameter with two landing
@@ -2867,14 +2883,14 @@ options:
     default: "{output_dir}/"
     currently: hardcoded_literal
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:47
+    source_ref: templates/quantus/ext.cmd.j2:46
     notes: >-
       The one place where the option and its value are on SEPARATE lines while
       everything around them is inline; and note the trailing slash. In real
       exports this path carries the employee directory, which is how the
       absolute-path-leaks-your-employee-id constraint got into this project.
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -cdl_out_map_directory, line: 47, layout: value_on_next_line}
+      - {target: quantus.ext.cmd, section: output_db, option: -cdl_out_map_directory, line: 46, layout: value_on_next_line}
     why: A run-derived workspace path, not a user setting.
 
   - key: include_cap_model
@@ -2887,9 +2903,9 @@ options:
     default: "false"
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:49
+    source_ref: templates/quantus/ext.cmd.j2:48
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -include_cap_model, line: 49}
+      - {target: quantus.ext.cmd, section: output_db, option: -include_cap_model, line: 48}
       - {target: quantus.dspf.cmd, section: output_db, option: -include_cap_model, line: 48}
     notes: Quoted "false", unlike the bare true/false in filter_cap. Transcribed as found.
     why: Whether model statements accompany the extracted caps. A netlist-shape choice.
@@ -2897,6 +2913,38 @@ options:
   - key: include_parasitic_cap_model
     template_var: include_parasitic_cap_model
     context_path: recipe.output.common.include_parasitic_cap_model
+    owner: recipe
+    type: enum
+    choices: ["true", "false", "comment"]
+    choices_confidence: certain
+    default: "false"
+    currently: jinja_var
+    observed: true
+    source_ref: templates/quantus/ext.cmd.j2:49
+    notes: >-
+      Three-valued, not boolean: the tool accepts true | false |
+      comment, exactly like its sibling include_parasitic_res_model,
+      which has been an enum all along and works.
+      This was a REAL BUG, not a data nit. The row said bool and both
+      templates rendered it as [[ 'true' if x else 'false' ]], so
+      `comment` was unreachable -- a third of the option was
+      unspellable from the GUI, which is the exact failure this
+      project exists to end.
+      Fixing it took four coordinated changes, and fewer would have
+      broken the golden decks: the render context comes from the
+      Recipe model, and the Jinja environment is StrictUndefined with
+      no finalize hook, so a Python False reaching the bare variable
+      renders as "False" with a capital F. Hence recipe.py holds a
+      str, not a bool.
+    lands_in:
+      - {target: quantus.ext.cmd, section: output_db, option: -include_parasitic_cap_model, line: 49}
+      - {target: quantus.dspf.cmd, section: output_db, option: -include_parasitic_cap_model, line: 49}
+    why: As include_cap_model, for parasitic caps.
+
+  - key: include_res_model
+    tier: common
+    template_var: include_res_model
+    context_path: recipe.output.common.include_res_model
     owner: recipe
     type: enum
     choices: ["true", "false", "comment"]
@@ -2921,39 +2969,7 @@ options:
       renders as "False" with a capital F. Hence recipe.py holds a
       str, not a bool.
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -include_parasitic_cap_model, line: 50}
-      - {target: quantus.dspf.cmd, section: output_db, option: -include_parasitic_cap_model, line: 49}
-    why: As include_cap_model, for parasitic caps.
-
-  - key: include_res_model
-    tier: common
-    template_var: include_res_model
-    context_path: recipe.output.common.include_res_model
-    owner: recipe
-    type: enum
-    choices: ["true", "false", "comment"]
-    choices_confidence: certain
-    default: "false"
-    currently: jinja_var
-    observed: true
-    source_ref: templates/quantus/ext.cmd.j2:51
-    notes: >-
-      Three-valued, not boolean: the tool accepts true | false |
-      comment, exactly like its sibling include_parasitic_res_model,
-      which has been an enum all along and works.
-      This was a REAL BUG, not a data nit. The row said bool and both
-      templates rendered it as [[ 'true' if x else 'false' ]], so
-      `comment` was unreachable -- a third of the option was
-      unspellable from the GUI, which is the exact failure this
-      project exists to end.
-      Fixing it took four coordinated changes, and fewer would have
-      broken the golden decks: the render context comes from the
-      Recipe model, and the Jinja environment is StrictUndefined with
-      no finalize hook, so a Python False reaching the bare variable
-      renders as "False" with a capital F. Hence recipe.py holds a
-      str, not a bool.
-    lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -include_res_model, line: 51}
+      - {target: quantus.ext.cmd, section: output_db, option: -include_res_model, line: 50}
       - {target: quantus.dspf.cmd, section: output_db, option: -include_res_model, line: 50}
     why: As include_cap_model, for resistors.
 
@@ -2967,14 +2983,14 @@ options:
     default: comment
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:52
+    source_ref: templates/quantus/ext.cmd.j2:51
     question: What does "comment" mean in your post-layout sim, and when is each of the three used?
     notes: >-
       That it is three-valued rather than boolean is certain (the file says
       "comment", which is neither true nor false); what the three values do is
       a guess.
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -include_parasitic_res_model, line: 52}
+      - {target: quantus.ext.cmd, section: output_db, option: -include_parasitic_res_model, line: 51}
       - {target: quantus.dspf.cmd, section: output_db, option: -include_parasitic_res_model, line: 51}
     why: Emits, suppresses, or comments out parasitic resistor model statements.
 
@@ -2988,12 +3004,12 @@ options:
     default: presistor
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:53
+    source_ref: templates/quantus/ext.cmd.j2:52
     notes: >-
       Half of the parasitic-device contract; see cap_component, including why
       the confidence stays likely rather than following the vendor default.
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -res_component, line: 53}
+      - {target: quantus.ext.cmd, section: output_db, option: -res_component, line: 52}
     why: Which analogLib device parasitic resistors are instantiated as. A PDK/library fact.
 
   - key: res_property_name
@@ -3009,9 +3025,9 @@ options:
       `presistor`.
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:54
+    source_ref: templates/quantus/ext.cmd.j2:53
     lands_in:
-      - {target: quantus.ext.cmd, section: output_db, option: -res_property_name, line: 54}
+      - {target: quantus.ext.cmd, section: output_db, option: -res_property_name, line: 53}
     why: Property name the resistance value is written under in the extracted view.
 
   - key: extracted_view_artifact
@@ -3023,7 +3039,7 @@ options:
     default: null
     currently: absent
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:56
+    source_ref: templates/quantus/ext.cmd.j2:55
     notes: >-
       output_setup in ext.cmd has NO -file_name, because the extracted-view
       artifact is a DFII library/cell/view triple rather than a file. The run
@@ -3231,7 +3247,7 @@ options:
       opposite of -file_name -- see dspf_out_path.
     lands_in:
       - {target: quantus.ext.cmd, section: input_db, option: -directory_name, line: 36}
-      - {target: quantus.ext.cmd, section: output_setup, option: -directory_name, line: 57}
+      - {target: quantus.ext.cmd, section: output_setup, option: -directory_name, line: 56}
       - {target: quantus.dspf.cmd, section: input_db, option: -directory_name, line: 35}
       - {target: quantus.dspf.cmd, section: output_setup, option: -directory_name, line: 58}
     why: Where LVS drops what QRC reads. A derived run path.
@@ -3245,10 +3261,10 @@ options:
     default: "{output_dir}/query_output/Design.gds.map"
     currently: hardcoded_literal
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:39
+    source_ref: templates/quantus/ext.cmd.j2:38
     notes: Basename comes from input_db_run_name, i.e. from the PDK query_cmd.
     lands_in:
-      - {target: quantus.ext.cmd, section: input_db, option: -layer_map_file, line: 39}
+      - {target: quantus.ext.cmd, section: input_db, option: -layer_map_file, line: 38}
       - {target: quantus.dspf.cmd, section: input_db, option: -layer_map_file, line: 38}
     why: A derived run path. Distinct from pdk.layer_map, which strmout uses.
 
@@ -3261,10 +3277,10 @@ options:
     default: "{output_dir}/query_output/Design.props"
     currently: hardcoded_literal
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:41
+    source_ref: templates/quantus/ext.cmd.j2:40
     notes: ext.cmd only; basename again from the PDK query_cmd.
     lands_in:
-      - {target: quantus.ext.cmd, section: input_db, option: -device_properties_file, line: 41}
+      - {target: quantus.ext.cmd, section: input_db, option: -device_properties_file, line: 40}
     why: A derived run path.
 
   - key: dspf_out_path
@@ -3347,10 +3363,10 @@ options:
     default: Design
     currently: hardcoded_literal
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:58
+    source_ref: templates/quantus/ext.cmd.j2:57
     notes: The fourth appearance of the query_cmd basename; see input_db_run_name.
     lands_in:
-      - {target: quantus.ext.cmd, section: output_setup, option: -temporary_directory_name, line: 58}
+      - {target: quantus.ext.cmd, section: output_setup, option: -temporary_directory_name, line: 57}
       - {target: quantus.dspf.cmd, section: output_setup, option: -temporary_directory_name, line: 61}
     why: Determined by the PDK query_cmd, like the other three "Design" rows.
 
@@ -3401,7 +3417,7 @@ options:
     default: TYPICAL
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:61
+    source_ref: templates/quantus/ext.cmd.j2:60
     notes: >-
       The tool literal lives here, on the profile; the Recipe only names a
       semantic corner (recipe.extraction.corner) and the profile maps it. That
@@ -3426,7 +3442,7 @@ options:
       corner table, not this catalog row, is what a second PDK overrides.
       Rendered with the option and the value on SEPARATE lines.
     lands_in:
-      - {target: quantus.ext.cmd, section: process_technology, option: -technology_corner, line: 60, layout: value_on_next_line}
+      - {target: quantus.ext.cmd, section: process_technology, option: -technology_corner, line: 59, layout: value_on_next_line}
       - {target: quantus.dspf.cmd, section: process_technology, option: -technology_corner, line: 63, layout: value_on_next_line}
     why: The process corner. Its literal spelling is a PDK fact; choosing one is a recipe act.
 
@@ -3439,14 +3455,14 @@ options:
     default: $env(SETUP_ROOT)/assura_tech.lib
     currently: jinja_var
     observed: true
-    source_ref: templates/quantus/ext.cmd.j2:62
+    source_ref: templates/quantus/ext.cmd.j2:61
     notes: >-
       The profile keeps the expression; pdk.tech_library_file is already
       env-substituted by the time the render context is built, because si
       and jivaro do not expand env vars inside string values. A var this run
       cannot resolve is refused by the final rescan in render_one.
     lands_in:
-      - {target: quantus.ext.cmd, section: process_technology, option: -technology_library_file, line: 62}
+      - {target: quantus.ext.cmd, section: process_technology, option: -technology_library_file, line: 61}
       - {target: quantus.dspf.cmd, section: process_technology, option: -technology_library_file, line: 65}
     why: The PDK technology library. Pure process fact.
 
@@ -3464,7 +3480,7 @@ options:
       null means "derive it", by taking the parent directory name of whichever
       of tech_name_env_vars resolves first.
     lands_in:
-      - {target: quantus.ext.cmd, section: process_technology, option: -technology_name, line: 63}
+      - {target: quantus.ext.cmd, section: process_technology, option: -technology_name, line: 62}
       - {target: quantus.dspf.cmd, section: process_technology, option: -technology_name, line: 66}
     why: Which technology QRC loads. Pure process fact.
 
@@ -3493,7 +3509,7 @@ options:
       is the manifest value, which reproduces today behaviour exactly.
       Rendered with the option and the value on separate lines.
     lands_in:
-      - {target: quantus.ext.cmd, section: process_technology, option: -temperature, line: 64, layout: value_on_next_line, quoting: bare}
+      - {target: quantus.ext.cmd, section: process_technology, option: -temperature, line: 63, layout: value_on_next_line, quoting: bare}
       - {target: quantus.dspf.cmd, section: process_technology, option: -temperature, line: 67, layout: value_on_next_line, quoting: bare}
     why: Extraction temperature. Already a knob; stays tunable.
 
@@ -3945,10 +3961,10 @@ options:
       - {target: lvs.qci, section: lvs_rules, option: "*lvsRunDir", line: 2}
       - {target: lvs.qci, section: cmn_options, option: "*cmnTemplate_RN", line: 38}
       - {target: quantus.ext.cmd, section: input_db, option: -directory_name, line: 36}
-      - {target: quantus.ext.cmd, section: input_db, option: -layer_map_file, line: 39}
-      - {target: quantus.ext.cmd, section: input_db, option: -device_properties_file, line: 41}
-      - {target: quantus.ext.cmd, section: output_db, option: -cdl_out_map_directory, line: 47, layout: value_on_next_line}
-      - {target: quantus.ext.cmd, section: output_setup, option: -directory_name, line: 57}
+      - {target: quantus.ext.cmd, section: input_db, option: -layer_map_file, line: 38}
+      - {target: quantus.ext.cmd, section: input_db, option: -device_properties_file, line: 40}
+      - {target: quantus.ext.cmd, section: output_db, option: -cdl_out_map_directory, line: 46, layout: value_on_next_line}
+      - {target: quantus.ext.cmd, section: output_setup, option: -directory_name, line: 56}
       - {target: quantus.dspf.cmd, section: input_db, option: -directory_name, line: 35}
       - {target: quantus.dspf.cmd, section: input_db, option: -layer_map_file, line: 38}
       - {target: quantus.dspf.cmd, section: output_setup, option: -directory_name, line: 58}
