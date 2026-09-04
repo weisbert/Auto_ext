@@ -69,7 +69,10 @@ import difflib
 import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from copy import deepcopy
+from dataclasses import dataclass
+from dataclasses import field as dc_field
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -77,6 +80,7 @@ from pydantic import ValidationError
 
 from auto_ext.catalog import (
     Catalog,
+    Confidence,
     Currently,
     OptionSpec,
     OptionType,
@@ -89,6 +93,7 @@ from auto_ext.core.errors import AutoExtError
 from auto_ext.core.patch import capture_patch, mask_values, render_masked, sha256_text
 from auto_ext.core.patch_models import TemplatePatch
 from auto_ext.core.readback import (
+    SPECIAL_READBACK,
     ReadBackError,
     ReadSite,
     SiteKey,
@@ -402,6 +407,23 @@ class RecipeImportResult:
     derived_profile: bool
     catalog_version: str
     warn_ratio: float = DEFAULT_WARN_RATIO
+    #: The caller's :class:`~auto_ext.model.recipe.ResourceProfile` with every
+    #: resource-owned value these files state written into it -- eight turbo
+    #: cores, a licence wait, a jivaro cpu count. Separate from :attr:`recipe`
+    #: because it is deliberately not part of one: those are facts about a
+    #: machine, not about an extraction, and they must not travel with a
+    #: shared recipe (DECISIONS #21).
+    #:
+    #: **A report, not a render input.** Every one of these rows is a
+    #: ``hardcoded_literal`` in the shipped templates, so
+    #: :func:`auto_ext.core.render.check_representable` refuses a profile that
+    #: disagrees with the literal -- the same refusal that keeps a dead field
+    #: off the form. The rendered file gets the user's number from the patch
+    #: instead, which is why these rows still report that they did not land,
+    #: and why :meth:`rerender` does not default to this profile. What this
+    #: field changes is narrower and was worse: the value used to be read,
+    #: printed once in the report, and then have nowhere at all to go.
+    resources: ResourceProfile = dc_field(default_factory=ResourceProfile)
 
     @property
     def targets(self) -> tuple[RenderTarget, ...]:
@@ -424,6 +446,26 @@ class RecipeImportResult:
     @property
     def clean_roundtrip(self) -> bool:
         return all(trip.identical for trip in self.roundtrip.values())
+
+    @property
+    def left_at_default(self) -> dict[str, str]:
+        """:attr:`unread` minus every key that reached an object anyway.
+
+        "The literal reader could not read this" and "this stayed at the
+        catalog default" are not the same statement, and the difference is a
+        whole class of key: ``*lvsRulesFile`` carries four modelled values on
+        one line, so the reader refuses it whole and the variable solver then
+        recovers each share and lands it. Reporting such a key as left at the
+        default contradicts, three lines further down the same report, the
+        section that says where it went.
+
+        One property because there is one answer. The CLI grew this filter
+        first and the import dialog never got it, so the same import told a
+        terminal and a window two different stories about the same file.
+        """
+
+        landed = {row.key for row in self.mapped if row.applied_to}
+        return {key: why for key, why in self.unread.items() if key not in landed}
 
     def summary(self) -> str:
         files = ", ".join(f"{f.label} -> {f.target.value}" for f in self.sources)
@@ -453,6 +495,9 @@ class RecipeImportResult:
         cat = catalog if catalog is not None else builtin_catalog()
         use_dut = dut if dut is not None else self.dut
         use_profile = profile if profile is not None else self.profile
+        # NOT :attr:`resources`: see its own docstring. A profile carrying a
+        # value the template hardcodes is refused by
+        # :func:`auto_ext.core.render.check_representable`, and rightly.
         res = resources if resources is not None else ResourceProfile()
         context = build_context(
             dut=use_dut,
@@ -522,6 +567,30 @@ def score_targets(text: str, *, catalog: Catalog | None = None) -> list[TargetSc
     return sorted(scores, key=lambda score: (-score.hits, score.target.value))
 
 
+#: A Quantus option written where a statement name belongs.
+_COLUMN_ZERO_OPTION = re.compile(r"^-[A-Za-z_][A-Za-z0-9_]*", re.MULTILINE)
+
+#: Below this many, a stray line is a stray line and not a layout.
+_COLUMN_ZERO_MIN = 3
+
+
+def _column_zero_options(text: str) -> list[str]:
+    """Options written at column 0, which is where a section header goes.
+
+    A pre-2026 export -- and anything a script wrote by stripping
+    continuations -- puts every ``-option value`` flush left.
+    :func:`auto_ext.core.readback.parse_quantus` decides section boundaries by
+    indentation, so each of those becomes a section carrying no option and its
+    value is discarded; the file then matches two landing sites and is refused
+    as "not a file this tool generates". True, and useless: the user's next
+    question is which of the two hundred lines was wrong, and the answer is
+    all of them, for one reason.
+    """
+
+    found = _COLUMN_ZERO_OPTION.findall(text)
+    return found if len(found) >= _COLUMN_ZERO_MIN else []
+
+
 def _quantus_kind(text: str) -> RenderTarget | None:
     """``output_db -type`` decides, because it is what the stage actually emits.
 
@@ -558,6 +627,19 @@ def detect_target(
     scores = score_targets(text, catalog=cat)
     best = scores[0]
     if best.hits < MIN_SITE_HITS or best.coverage < MIN_SITE_COVERAGE:
+        flat = _column_zero_options(text)
+        if flat:
+            raise RecipeImportError(
+                f"{label} is a Quantus command file whose option lines are all "
+                f"at column 0 ({len(flat)} of them: {', '.join(flat[:4])}...). "
+                "Indentation is what separates a statement from its options "
+                "here, so at column 0 every option becomes a section of its "
+                f"own and its value is dropped -- only {best.hits} landing "
+                f"site(s) survived, and {MIN_SITE_HITS} are needed. Indent the "
+                "option lines under their statement (this tool writes them "
+                "indented, each continued with a trailing backslash) and "
+                "import again."
+            )
         detail = ", ".join(f"{s.target.value}={s.hits}/{s.sites}" for s in scores)
         raise RecipeImportError(
             f"{label} does not look like any file this tool generates "
@@ -772,28 +854,79 @@ def _unassignable_reason(option: OptionSpec) -> str:
             "the recipe has no field for it, so a difference is kept as a "
             "manual edit instead"
         )
-    return (  # pragma: no cover - a recipe row without a recipe.* path cannot load
-        "the catalog gives this row no recipe field to write into"
+    # The only recipe row with no ``recipe.*`` path is a ``describes_member``
+    # row, and those never get here: the reader that owns their collection
+    # takes them first, and reports the whole ordered list as one row. The
+    # comment this replaces claimed the branch could not be reached at all,
+    # which stopped being true the day ``extract`` became a list -- it was
+    # then reached on every quantus import, and printed a sentence saying the
+    # catalog was missing something when it was not.
+    return (  # pragma: no cover - describes_member rows are taken earlier
+        f"{option.key} describes one member of {option.context_path}, which "
+        "the recipe holds as an ordered list; the whole list is reported as "
+        "one row instead of this one"
     )
 
 
-def _implausible(option: OptionSpec, value: Any) -> str:
-    """Empty when the value may be used, else the reason it may not be."""
+@dataclass(frozen=True)
+class _Verdict:
+    """Whether a recovered value may be written into the Recipe, and why.
+
+    Three outcomes, not two. ``refused`` means the value stays out of the
+    Recipe and the difference becomes a patch hunk. An empty ``refused`` with
+    a ``note`` means the value is used *and* something about it is worth
+    saying -- which is the whole of DECISIONS #19 as revised: a value set the
+    catalog admits it invented cannot be the authority that rejects a legal
+    value, but the user is still entitled to know their spelling is not one
+    this tool has ever seen.
+    """
+
+    refused: str = ""
+    note: str = ""
+
+
+def _implausible(option: OptionSpec, value: Any) -> _Verdict:
+    """Whether ``value`` may be written into the Recipe under ``option``.
+
+    A closed value set refuses; an admitted guess only advises. Eight shipped
+    rows carry ``choices_confidence: guess`` or ``likely`` and say so in their
+    own notes -- ``extraction_net_name_space`` records that even the *case* of
+    its two members is unverified. Rejecting a value against a set like that
+    demotes a legal setting to a patch hunk, which pins the literal and kills
+    the field the form offers. The form already treats such a set as a hint
+    (:attr:`~auto_ext.catalog.OptionSpec.free_input`); the importer answering
+    differently is the two-answers-to-one-question this catalog exists to end.
+
+    A value the *model* then refuses is not lost either: see
+    :func:`_validate_degrading`.
+    """
 
     if option.type is OptionType.ENUM and option.choices and value not in option.choices:
-        return f"{value!r} is not one of the catalog's choices {option.choices}"
+        mismatch = f"{value!r} is not one of the catalog's choices {option.choices}"
+        if option.choices_confidence is Confidence.CERTAIN:
+            return _Verdict(refused=mismatch)
+        return _Verdict(
+            note=(
+                f"{mismatch}, but that set is a "
+                f"{option.choices_confidence.value} -- the value is kept as "
+                "written; check it against the tool's manual"
+            )
+        )
     if option.type in (OptionType.STR, OptionType.ENUM, OptionType.PATH) and not isinstance(
         value, str
     ):
-        return f"{value!r} is not a string"
-    return ""
+        return _Verdict(refused=f"{value!r} is not a string")
+    return _Verdict()
 
 
-#: One ``extract`` statement and its continuations. Quantus command files
-#: put the statement name on its own line and every option on a continued
-#: line ending in a backslash, so a statement is "extract" plus everything up
-#: to the first line that does not continue.
-_EXTRACT_HEAD = re.compile(r"^\s*extract\s*\\?\s*$")
+#: The head of one ``extract`` statement. Two layouts, one rule: a Quantus
+#: statement head may carry its first option on the same line -- ``input_db
+#: -type calibre`` is that shape, and
+#: :func:`auto_ext.core.readback.parse_quantus` has always read it -- so
+#: ``extract`` alone on a line and ``extract -selection all -type rc_coupled``
+#: are both statement heads, and the manual's own examples use the second.
+#: The word boundary is what keeps ``extraction_setup`` out.
+_EXTRACT_HEAD = re.compile(r"^\s*extract\b")
 _SELECTION_RE = re.compile(
     r"-selection\s+\"?([A-Za-z_][A-Za-z0-9_]*)\"?(?:\s+\"([^\"]*)\")?"
 )
@@ -845,6 +978,42 @@ def extract_rules_from_text(text: str) -> list[dict[str, Any]]:
     return rules
 
 
+#: Which catalog row describes which key of one dict :func:`extract_rules_from_text`
+#: returns. The two ``describes_member`` rows, and the reason the collection is
+#: held to the same plausibility gate every scalar row goes through.
+_EXTRACT_MEMBER_ROWS: tuple[tuple[str, str], ...] = (
+    ("selection", "extract_selection"),
+    ("type", "extract_type"),
+)
+
+
+def _extract_verdicts(
+    rules: Sequence[Mapping[str, Any]], *, catalog: Catalog
+) -> tuple[list[str], list[str]]:
+    """``(refusals, advisories)`` for one file's ordered extract statements.
+
+    The collection used to be assigned without passing :func:`_implausible` at
+    all, so an unknown ``-type`` went straight to the model and took the whole
+    import down with it -- while ``metal_fill -type actual``, one section
+    further down the same file, degraded to a note and a hunk. Same gate,
+    same outcome, and the statement number is named because a deck with four
+    of them needs to say which one.
+    """
+
+    refusals: list[str] = []
+    advisories: list[str] = []
+    for index, rule in enumerate(rules, start=1):
+        for member, key in _EXTRACT_MEMBER_ROWS:
+            if member not in rule:
+                continue
+            verdict = _implausible(catalog.option(key), rule[member])
+            if verdict.refused:
+                refusals.append(f"extract statement {index}: {verdict.refused}")
+            elif verdict.note:
+                advisories.append(f"extract statement {index}: {verdict.note}")
+    return refusals, advisories
+
+
 def _assign(tree: dict[str, Any], path: str, value: Any) -> None:
     parts = path.split(".")
     node = tree
@@ -866,6 +1035,88 @@ def _validate(tree: Mapping[str, Any]) -> Recipe:
         raise RecipeImportError(
             f"the values read out of these files do not fit the Recipe model ({where})"
         ) from exc
+
+
+def _validate_degrading(
+    tree: dict[str, Any], defaults: Mapping[str, Any]
+) -> tuple[Recipe, dict[str, str]]:
+    """Build the Recipe, putting back the default for any value it refuses.
+
+    One unknown spelling used to end the import. ``extract -type rcc`` is a
+    real deck that ran last week -- the spelling this project itself once
+    shipped -- and ``-exclude_floating_nets_limit 50`` sits outside a bound
+    the catalog marks ``range_verified: false``, i.e. one we invented. Neither
+    is a reason to refuse the whole file when every other unusable value in
+    this importer degrades to a note plus a patch hunk that keeps the user's
+    own text.
+
+    So a value the model refuses is put back to the catalog default, its
+    field path is reported, and the difference between the default and the
+    user's file survives where every other unmodelled difference does: in the
+    patch. Returns the Recipe and ``{field path: why it was put back}``.
+
+    A refusal that names no field, or one whose field carries the default
+    already, is a real structural error and is raised: quietly returning a
+    Recipe nobody's file describes would be worse than failing.
+    """
+
+    degraded: dict[str, str] = {}
+    # One pass per field that could conceivably be put back, and each pass
+    # handles every error pydantic reported, so the bound is generous.
+    for _ in range(len(tree) + 1):
+        try:
+            return Recipe.model_validate(dict(tree)), degraded
+        except ValidationError as exc:
+            put_back = False
+            for err in exc.errors():
+                path = _field_path(err["loc"])
+                if path is None or not _restore_default(tree, defaults, path):
+                    continue
+                degraded[path] = str(err["msg"])
+                put_back = True
+            if not put_back:
+                break
+    # Whatever is left is not attributable to one recovered value. Hand it to
+    # the plain builder, whose message names every field the model refused.
+    return _validate(tree), degraded
+
+
+def _field_path(loc: Sequence[Any]) -> str | None:
+    """``('extraction','extract',0,'type')`` -> ``extraction.extract``.
+
+    A collection is restored whole. Half a list is not a value the user's file
+    describes: the statements accumulate and the last one wins, so keeping the
+    readable ones would render a deck that extracts something nobody asked for.
+    """
+
+    parts: list[str] = []
+    for part in loc:
+        if isinstance(part, int):
+            break
+        parts.append(str(part))
+    return ".".join(parts) if parts else None
+
+
+def _restore_default(
+    tree: dict[str, Any], defaults: Mapping[str, Any], path: str
+) -> bool:
+    """Put the catalog default back at ``path``. False when it is there already."""
+
+    parts = path.split(".")
+    node: Any = tree
+    source: Any = defaults
+    for part in parts[:-1]:
+        if not isinstance(node, dict) or not isinstance(source, dict):
+            return False
+        node = node.get(part)
+        source = source.get(part)
+    if not isinstance(node, dict) or not isinstance(source, dict):
+        return False
+    leaf = parts[-1]
+    if leaf not in source or node.get(leaf) == source[leaf]:
+        return False
+    node[leaf] = deepcopy(source[leaf])
+    return True
 
 
 # --- baseline objects -------------------------------------------------------
@@ -1401,6 +1652,15 @@ def _invert_env(expression: str, ref: re.Match[str], value: str) -> dict[str, st
     ``/pdk/hn001/setup/assura_tech.lib`` gives ``SETUP_ROOT=/pdk/hn001/setup``.
     A value that does not fit the expression yields nothing, which leaves the
     var unbound and therefore reported -- reporting beats inventing.
+
+    A recovered value that is *itself* an env reference is refused for the
+    same reason. Matching the expression against a file that spells the same
+    expression out gives ``SETUP_ROOT = "$env(SETUP_ROOT)"``: not an answer,
+    the question again. :func:`auto_ext.core.env.substitute_env` does not
+    re-scan its own replacement, so the reference survived into the rendered
+    baseline and the render refused it -- one file's honest ``$env(...)``
+    turning into "this cannot be rendered", several layers away from the
+    binding that caused it.
     """
 
     pattern = (
@@ -1411,7 +1671,10 @@ def _invert_env(expression: str, ref: re.Match[str], value: str) -> dict[str, st
     match = re.fullmatch(pattern, value)
     if match is None:
         return {}
-    return {_env_name(ref): match.group(_ENV_GROUP)}
+    bound = match.group(_ENV_GROUP)
+    if discover_required_vars([bound]):
+        return {}
+    return {_env_name(ref): bound}
 
 
 def _env_from_profile(
@@ -1746,6 +2009,106 @@ def _landing_site(
     return solved if solved is not None else readback.sites.get(key)
 
 
+def _derive_resources(
+    base: ResourceProfile, readback: TemplateReadBack, *, catalog: Catalog
+) -> tuple[ResourceProfile, dict[str, str]]:
+    """The caller's resource profile with what these files state written in.
+
+    ``*cmnNumTurbo: 8`` is read by the literal reader like everything else and
+    was then refused by :func:`_assignable` (a Recipe has no field for it) and
+    by the result object (which had no slot for it either), so the eight the
+    user's runset asks for was printed once and forgotten. It belongs to the
+    machine, not the recipe, which is why it goes to a separate object rather
+    than into :class:`~auto_ext.model.recipe.Recipe`.
+
+    Returns the profile and ``{catalog key: field name}`` for what moved, so
+    the report can say where each value went.
+    """
+
+    values: dict[str, Any] = {}
+    landed: dict[str, str] = {}
+    for key, value in readback.values.items():
+        option = catalog.option(key)
+        path = option.context_path
+        if option.owner is not Owner.RESOURCES or path is None:
+            continue
+        if not path.startswith("resources."):
+            continue
+        field_name = path[len("resources.") :]
+        if field_name not in type(base).model_fields:
+            # ``employee_id`` carries the resources owner only because the
+            # owner enum has no ``site`` member; it lives in site.yaml.
+            continue
+        values[field_name] = value
+        landed[key] = field_name
+    if not values:
+        return base, {}
+    return base.model_copy(update=values), landed
+
+
+def _with_resources(
+    mapped: Sequence[MappedValue], landed: Mapping[str, str]
+) -> list[MappedValue]:
+    """Say, on the row itself, that a resource-owned value was kept.
+
+    ``applied_to`` stays ``None`` on purpose: every one of these rows is a
+    hardcoded literal in the template today, so the rendered file still comes
+    from the patch and claiming the field drives it would be the "you can
+    change it but it does nothing" lie this importer's landing rule exists to
+    prevent.
+    """
+
+    return [
+        replace(
+            row,
+            note="; ".join(
+                part
+                for part in (
+                    row.note,
+                    f"the value is kept on RecipeImportResult.resources"
+                    f".{landed[row.key]}, which is per machine and does not "
+                    "travel with the recipe",
+                )
+                if part
+            ),
+        )
+        if row.key in landed and not row.applied_to
+        else row
+        for row in mapped
+    ]
+
+
+def _with_degraded(
+    mapped: Sequence[MappedValue], degraded: Mapping[str, str]
+) -> list[MappedValue]:
+    """Un-land every row the model refused, saying which value it refused.
+
+    A row that reports ``applied_to`` for a field the Recipe does not actually
+    hold is the worst answer available: the user reads "it went in", edits the
+    field, and the patch that carries their real line renders over it.
+    """
+
+    return [
+        replace(
+            row,
+            applied_to=None,
+            note="; ".join(
+                part
+                for part in (
+                    row.note,
+                    f"the Recipe model refuses this value ({degraded[row.applied_to]}), "
+                    "so the catalog default is rendered and your line is kept as "
+                    "a manual edit",
+                )
+                if part
+            ),
+        )
+        if row.applied_to in degraded
+        else row
+        for row in mapped
+    ]
+
+
 def _with_landing(
     mapped: Sequence[MappedValue],
     *,
@@ -1841,8 +2204,15 @@ def import_recipe(
     texts: dict[RenderTarget, str] = {}
     labels: dict[RenderTarget, str] = {}
     imported: list[ImportedFile] = []
+    supplied_env = dict(resolved_env or {})
     for source in _load(files):
-        text = source.text.replace("\r\n", "\n")
+        # A deck that says ``$env(SETUP_ROOT)/assura_tech.lib`` and one that
+        # says the path it expands to are the same deck, and the caller is the
+        # only one who knows which is which. Expanding here rather than
+        # further in is what lets the rest of the import treat both alike --
+        # the solver reads a path, the profile holds a path, and the baseline
+        # renders the same bytes the user's file carries.
+        text = substitute_env(source.text.replace("\r\n", "\n"), supplied_env)
         target = source.target or detect_target(text, label=source.label, catalog=cat)
         if target in texts:
             raise RecipeImportError(
@@ -1861,6 +2231,22 @@ def import_recipe(
             )
         )
     order = [spec.id for spec in cat.targets if spec.id in texts]
+
+    unbound = sorted(discover_required_vars(texts.values()))
+    if unbound:
+        # Refused here, by name, rather than four steps later in the
+        # renderer's words. Everything downstream -- the profile expression
+        # the value is read into, the baseline it renders, the hunk that
+        # would carry the reference back into the output -- fails on this one
+        # missing fact, and only the user has it.
+        raise RecipeImportError(
+            f"{', '.join(labels[target] for target in order)} spell(s) out "
+            f"environment variable(s) {', '.join(unbound)}, and this tool "
+            "writes decks with every path already resolved, so it cannot "
+            "render the baseline your file is compared against without their "
+            "values. Supply them (--env NAME=VALUE, or resolved_env=) and "
+            "import again."
+        )
 
     # 2. the literals, 3. the variables --------------------------------------
     readback = read_back_from_templates(texts, catalog=cat)
@@ -1900,12 +2286,23 @@ def import_recipe(
     ).model_dump(mode="python")
     tree.pop("patches", None)
     tree.pop("updated_at", None)
+    defaults = deepcopy(tree)
 
     for key in sorted(readback.values):
         option = cat.option(key)
         value = readback.values[key]
         site = readback.sites[key]
         shared = composites.get((site.target, site.section, site.option))
+        if key in SPECIAL_READBACK:
+            # The refusal below exists because the generic rule hands every
+            # row on a shared line the WHOLE line. A row with a special
+            # handler is the exception readback.py documents: it takes only
+            # its own share. ``run_qrc_query`` reads whether the third
+            # post-trigger is there at all, which is a fact about that line
+            # and about nothing else -- refusing it threw away a correct
+            # answer and left the recipe claiming a query run the file does
+            # not ask for, with the box in the form powerless to change it.
+            shared = None
         applied: str | None = None
         if shared is not None:
             note = (
@@ -1913,11 +2310,17 @@ def import_recipe(
                 f"{[other for other in shared if other != key]}, so the value "
                 "read there belongs to the whole line, not to this row"
             )
+        elif option.describes_member:
+            # The collection's own reader owns these; it reports the whole
+            # ordered list as one row below. A second row here would show the
+            # LAST statement's value as if it were the answer -- and did.
+            continue
         elif not _assignable(option):
             note = _unassignable_reason(option)
         else:
-            note = _implausible(option, value)
-            if not note:
+            verdict = _implausible(option, value)
+            note = verdict.refused or verdict.note
+            if not verdict.refused:
                 applied = option.recipe_field_path
                 assert applied is not None  # guaranteed by _assignable
                 _assign(tree, applied, value)
@@ -1957,10 +2360,10 @@ def import_recipe(
                 )
             )
             continue
-        note = _implausible(option, typed)
+        verdict = _implausible(option, typed)
         path = option.recipe_field_path
         assert path is not None  # guaranteed by _assignable
-        if not note:
+        if not verdict.refused:
             _assign(tree, path, typed)
             applied_keys.add(option.key)
         mapped.append(
@@ -1971,8 +2374,8 @@ def import_recipe(
                 source=labels[site.target],
                 site=site,
                 origin="variable",
-                applied_to=None if note else path,
-                note=note,
+                applied_to=None if verdict.refused else path,
+                note=verdict.refused or verdict.note,
             )
         )
 
@@ -1980,21 +2383,41 @@ def import_recipe(
     # row. ``extract_selection`` / ``extract_type`` are describes_member rows
     # and so are deliberately not assignable one at a time -- there is no
     # single value to assign, and picking the first statement would drop the
-    # rest without saying so.
-    for target in (RenderTarget.QUANTUS_EXT, RenderTarget.QUANTUS_DSPF):
-        if target not in texts:
-            continue
+    # rest without saying so. Exactly one row is reported here, whatever
+    # happens, because "the reader found nothing" is the one outcome the
+    # report used to be unable to show: the rules fell back to the catalog
+    # default, the difference was pinned as a hunk, and the hunk then won over
+    # anything the user later edited in the form.
+    extract_targets = [
+        target
+        for target in (RenderTarget.QUANTUS_EXT, RenderTarget.QUANTUS_DSPF)
+        if target in texts
+    ]
+    for target in extract_targets:
         rules = extract_rules_from_text(texts[target])
         if not rules:
             continue
-        _assign(tree, "extraction.extract", rules)
+        site = ReadSite(target=target, section="extract", option="-selection")
+        shown = "; ".join(" ".join(str(v) for v in rule.values()) for rule in rules)
+        refusals, advisories = _extract_verdicts(rules, catalog=cat)
+        if refusals:
+            warnings.append(
+                f"{labels[target]}: the extract statements were left at the "
+                f"catalog default and kept as a manual edit instead ({'; '.join(refusals)})"
+            )
+        else:
+            _assign(tree, "extraction.extract", rules)
         applied_keys.update({"extract_selection", "extract_type"})
+        order_note = (
+            f"{len(rules)} extract statements, kept in file order -- the last "
+            "one wins for any net it covers"
+            if len(rules) > 1
+            else ""
+        )
         mapped.append(
             MappedValue(
                 key="extract_selection",
-                value="; ".join(
-                    " ".join(str(v) for v in rule.values()) for rule in rules
-                ),
+                value=shown,
                 owner=Owner.RECIPE,
                 source=labels[target],
                 # A real ReadSite, not None: the report and the dialog both
@@ -2002,18 +2425,34 @@ def import_recipe(
                 # answer is one the user cannot check. No line number -- the
                 # rules come from every extract statement in the file, not
                 # from one of them.
-                site=ReadSite(target=target, section="extract", option="-selection"),
+                site=site,
                 origin="literal",
-                applied_to="extraction.extract",
-                note=(
-                    None
-                    if len(rules) == 1
-                    else f"{len(rules)} extract statements, kept in file order "
-                    "-- the last one wins for any net it covers"
+                applied_to=None if refusals else "extraction.extract",
+                note="; ".join(
+                    part for part in (*refusals, *advisories, order_note) if part
                 ),
             )
         )
         break
+    else:
+        for target in extract_targets:
+            mapped.append(
+                MappedValue(
+                    key="extract_selection",
+                    value=None,
+                    owner=Owner.RECIPE,
+                    source=labels[target],
+                    site=ReadSite(target=target, section="extract", option="-selection"),
+                    origin="literal",
+                    note=(
+                        "no `extract` statement could be read out of this file, "
+                        "so the recipe keeps the catalog's default extract list; "
+                        "any difference is kept as a manual edit, which then "
+                        "overrides the form"
+                    ),
+                )
+            )
+            break
 
     for key, (target, where) in _PRESENCE_ROWS.items():
         if target not in texts:
@@ -2039,10 +2478,30 @@ def import_recipe(
         )
 
     tree["stages"] = _stages_for(order, cat)
+    if Stage.JIVARO in tree["stages"]:
+        # A stage in the list and a stage that runs are two different facts,
+        # and the runner reads the second one: ``recipe.reduction.enabled`` is
+        # what gates the jivaro stage. Importing the XML and leaving it False
+        # declares a stage the same recipe has also disabled. The migration
+        # path has always set it; this one had not.
+        tree.setdefault("reduction", {})["enabled"] = True
     emit = _emit_for(order)
     if emit is not None:
         tree.setdefault("output", {})["emit"] = emit
-    base_recipe = _validate(tree)
+    # Kept apart from ``res``, which is what the baseline renders with: see
+    # RecipeImportResult.resources.
+    stated_resources, resource_landings = _derive_resources(res, readback, catalog=cat)
+    if resource_landings:
+        mapped = _with_resources(mapped, resource_landings)
+    base_recipe, degraded = _validate_degrading(tree, defaults)
+    if degraded:
+        mapped = _with_degraded(mapped, degraded)
+        warnings.extend(
+            f"{path} was read as a value the Recipe model refuses ({why}); the "
+            "catalog default is used instead and your own line is kept as a "
+            "manual edit"
+            for path, why in sorted(degraded.items())
+        )
 
     # 5. baseline objects, then the render ------------------------------------
     referenced = frozenset(
@@ -2231,6 +2690,7 @@ def import_recipe(
         derived_profile=derived,
         catalog_version=cat.catalog_version,
         warn_ratio=warn_ratio,
+        resources=stated_resources,
     )
 
     # 6. round trip -------------------------------------------------------------

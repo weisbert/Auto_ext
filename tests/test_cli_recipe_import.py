@@ -427,7 +427,10 @@ def test_a_value_that_is_already_the_default_is_counted_not_listed(
         str(ext_root),
         expect=0,
     )
-    assert_in_output("extract_type", loud)
+    # ``output_form`` and not ``extract_type``: the two describes_member rows
+    # are reported once, by the reader that owns the whole ordered list, and
+    # no longer a second time as a scalar showing only the last statement.
+    assert_in_output("output_form", loud)
     assert "further value(s) were read and already match" not in loud.output
 
 
