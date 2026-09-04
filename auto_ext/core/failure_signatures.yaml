@@ -2,8 +2,8 @@
 # Auto_ext failure signatures — log-text patterns that identify a failure class
 # =============================================================================
 #
-# WHY THIS FILE IS EMPTY
-# ----------------------
+# WHY THIS FILE IS NEARLY EMPTY
+# -----------------------------
 # Everything auto_ext can decide from a hard fact is decided in code, in
 # auto_ext/core/failure_class.py:
 #
@@ -20,13 +20,42 @@
 # What is left over needs the tool's own wording in the stage log — above all
 # license failures, which usually exit non-zero with a perfectly ordinary
 # "1" and say nothing else structured. We do not have a single real EDA log
-# in this repository (`grep -r '\.log' .` finds no captured sample), so every
-# pattern below would be invented, and an invented pattern is worse than no
+# in this repository (`grep -r '\.log' .` finds no captured sample), so most
+# patterns would be invented, and an invented pattern is worse than no
 # pattern: it fires on the wrong run and sends the user down the wrong path.
 #
-# So the table ships empty. With no match, classify_failure() returns
-# `unknown` plus a next_action telling the reader to come here and add the
-# line they just read. That is the intended workflow, not a gap.
+# THE RULE: no signature without a citation. Every entry's `note:` says where
+# its exact text came from. A scrubbed sample log is the best citation; the
+# two entries that ship today cite this repository instead, because the text
+# of both is text this codebase itself writes or has already recorded hitting:
+#
+#   * auto_ext_executable_not_found — the line run_subprocess writes into the
+#     stage log itself (auto_ext/tools/base.py). Not vendor text at all.
+#   * quantus_cdl_out_map_directory — Cadence error code LBRCXM-756, already
+#     cited in docs/refactor/01-schema.md and in runner.py, where
+#     _publish_si_env_to_output_dir exists for the sole purpose of avoiding
+#     it. A numeric error code, not manual prose.
+#
+# Anything whose wording we would have to guess at stays out. With no match,
+# classify_failure() returns `unknown` plus a next_action telling the reader
+# to come here and add the line they just read. That is the intended workflow.
+#
+#
+# STILL PENDING: THE REAL SAMPLES  (backlog TASK-010; docs/refactor/OFFICE_TODO.md
+# ------------------------------   first priority, the last open hard blocker)
+# Until a real run on the office server hands us logs, these stay unreachable:
+#
+#   * license_unavailable — assignable ONLY from this table, so today a
+#     licence failure classifies as tool_crash or unknown. This is the single
+#     most valuable entry to add and the one most in need of real wording: a
+#     FlexNet banner, the text Calibre prints when *cmnLicenseWaitTime
+#     expires, whatever qrc says. Guessing at it is exactly the mistake this
+#     file is written to prevent.
+#   * tool_crash with a cause — disk full, segfault, out of memory. Today they
+#     are all "the tool exited N".
+#
+# Capture procedure below. One entry per observed message, each with a
+# scrubbed sample and a test in tests/core/test_failure_class.py.
 #
 #
 # HOW TO CAPTURE A SAMPLE (office Linux server)
@@ -131,6 +160,47 @@
 
 version: 1
 
-# Empty on purpose. See the header before adding anything: one entry per
-# observed message, each backed by a scrubbed sample and a test.
-signatures: []
+# Read the header before adding anything. Ordered: first match wins, so the
+# specific patterns go above the generic ones.
+signatures:
+
+  # The one line in this table that is not vendor text at all: auto_ext writes
+  # it itself. run_subprocess resolves argv[0] through PATH before spawning
+  # and, when that fails, writes this into the stage log and returns 127.
+  # The exit code is the better evidence and rule 3 reaches it first, so this
+  # entry is what still answers when the code did not survive into the record.
+  - id: auto_ext_executable_not_found
+    failure_class: environment
+    any:
+      - "# ERROR: executable not found"
+    next_action: >-
+      The stage's executable is not on PATH. The stage log's first line is the
+      exact argv and the second is the cwd: run that argv by hand in the shell
+      that launched Auto_ext, and if it is missing there too, load the tool's
+      module (or fix PATH) and re-run the stage.
+    note: >-
+      Written verbatim by auto_ext.tools.base.run_subprocess; pinned by
+      tests/core/test_failure_signatures_table.py, which produces the log with
+      run_subprocess itself rather than quoting it.
+
+  # LBRCXM-756: Quantus cannot read si.env out of its -cdl_out_map_directory
+  # (which is output_dir). si writes the netlist, map/ and ihnl/ there but not
+  # a copy of its own control file, which is why the runner stages one over
+  # after a successful si -- see runner._publish_si_env_to_output_dir. A run
+  # that hits this had si fail, or had the workspace cleaned between stages.
+  - id: quantus_cdl_out_map_directory
+    failure_class: environment
+    stages: [quantus]
+    any:
+      - "LBRCXM-756"
+    next_action: >-
+      Quantus could not read si.env from the extraction output directory.
+      Auto_ext copies it there after a successful si stage, so re-run si for
+      this cell (or re-run the whole recipe) rather than editing the workspace
+      by hand; if si is passing, check that nothing cleaned the output
+      directory between the two stages.
+    note: >-
+      Error code cited in docs/refactor/01-schema.md and in
+      auto_ext/core/runner.py, where _publish_si_env_to_output_dir exists to
+      avoid it. No scrubbed log yet -- matched on the code alone, which is
+      exact; the surrounding wording is deliberately not guessed at.
