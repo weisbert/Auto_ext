@@ -259,6 +259,32 @@ def test_every_option_says_why_it_exists(catalog: Catalog) -> None:
     assert [o.key for o in catalog.options if not o.why.strip()] == []
 
 
+def test_a_placeholder_is_a_sentence_and_not_a_leaked_code_comment(
+    catalog: Catalog,
+) -> None:
+    """The form already sets a placeholder off; the text must not do it again.
+
+    ``parasitic_blocking_device_cells_type`` reached a first-time user as
+    ``unset - (omitted -- the tool takes white)``: the form supplies the
+    "unset" and the dash, and the catalog then added its own brackets and a
+    double hyphen, so a parenthesis sat inside a parenthesis and the whole
+    thing read like a comment somebody forgot to delete. Two rules, both
+    mechanical: no wrapping brackets, and no ``--``.
+    """
+
+    bracketed = [
+        o.key
+        for o in catalog.options
+        if o.placeholder and o.placeholder.startswith("(") and o.placeholder.endswith(")")
+    ]
+    assert bracketed == [], (
+        f"{bracketed}: the form writes 'unset - <placeholder>' already, so a "
+        "placeholder in brackets renders as a parenthesis inside a parenthesis"
+    )
+    dashed = [o.key for o in catalog.options if o.placeholder and "--" in o.placeholder]
+    assert dashed == [], f"{dashed}: '--' is comment punctuation, not prose"
+
+
 def test_every_observed_option_points_at_a_real_line(
     catalog: Catalog, repo_root: Path
 ) -> None:
@@ -340,6 +366,30 @@ def test_the_four_rows_the_draft_called_knobs_are_not_knobs(catalog: Catalog) ->
         "reduction_error_max_pct",
     ):
         assert catalog.option(key).currently is not Currently.MANIFEST_KNOB, key
+
+
+def test_the_two_controls_that_gate_jivaro_each_name_the_other(
+    catalog: Catalog,
+) -> None:
+    """One outcome, two independent switches, and the AND between them is
+    stated nowhere the user can see it.
+
+    ``runner`` runs the reduction only when ``reduction.enabled`` is true AND
+    ``jivaro`` is in ``stages``. A first-time user reading the form ticks the
+    stage, leaves the flag alone, and gets no reduction and no complaint. The
+    two rows are far apart in the form and belong to different sections, so
+    the only place the pairing can be said is each row's own ``why`` -- which
+    is what the tooltip shows.
+    """
+
+    enabled = catalog.option("reduction_enabled")
+    stages = catalog.option("stages")
+    assert "stages" in enabled.why, (
+        "reduction_enabled must say that the jivaro stage has to be listed too"
+    )
+    assert "reduction" in stages.why and "jivaro" in stages.why, (
+        "stages must say that listing jivaro is not enough on its own"
+    )
 
 
 def test_lvs_deck_basename_has_no_invented_pdk_default(catalog: Catalog) -> None:

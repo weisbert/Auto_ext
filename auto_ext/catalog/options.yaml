@@ -1850,20 +1850,28 @@ options:
     choices_confidence: certain
     nullable: true
     default: null
-    placeholder: (tool default -- we emit no line)
+    placeholder: not written, so the 3D field solver is off
     currently: absent
     observed: false
-    question: >-
-      Which of the three -use_field_solver levels does an omitted line
-      actually give us, and what does default_accuracy cost in runtime
-      against high_accuracy?
     notes: >-
       Common tier because this is an accuracy knob on the critical path, not
-      a curiosity. Nearly every official example in the manual sets it, all
-      of them to default_accuracy, and our templates omit the line entirely
-      -- so we run whatever the tool defaults to, and nobody here knows what
-      that is. That gap is the reason the row exists at absent rather than
-      not existing.
+      a curiosity. Nearly every official example in the manual sets it, all of
+      them to default_accuracy, and our templates omit the line entirely.
+      ANSWERED 2026-09-04, and the answer is the reason this row matters: the
+      field solver is DISABLED BY DEFAULT, so an omitted line does not mean
+      "whatever the tool thinks best", it means our capacitances come from
+      matching the layout against the technology file's models rather than
+      from solving the actual geometry. high_accuracy runs the solver at its
+      highest accuracy and consumes additional processor time;
+      default_accuracy is documented as sufficient in most cases and reduces
+      run time, which is why every vendor example uses it.
+      The option is PER `extract` STATEMENT, not per run -- the manual's
+      full-chip/selected-nets pattern gives one accuracy to the capacitance
+      pass over all nets and another to the resistance pass over the nets of
+      interest. Promoting this row therefore means a field on ExtractRule,
+      not on ExtractionSettings.
+      Turning it on is a physics choice with a runtime price, so the default
+      stays "not written" until the owner picks one.
     why: The accuracy lever the vendor always sets and we never do.
 
   - key: extract_via_cap
@@ -1872,13 +1880,28 @@ options:
     context_path: null
     owner: recipe
     type: bool
-    choices_confidence: likely
+    choices_confidence: certain
     nullable: true
     default: null
-    placeholder: (tool default)
+    placeholder: not written, so the tool default of true applies
     currently: absent
     observed: false
-    question: What is the default of extract -extract_via_cap, and does it interact with -use_field_solver?
+    notes: >-
+      ANSWERED 2026-09-04. The vendor default is TRUE: both Quantus and the
+      field solver extract via-effect capacitance -- between vias, and between
+      vias and other objects such as gate poly. It also picks up the
+      gate-sidewall-to-contact capacitance when the qrcTechFile carries the
+      via_edge_enlargement table.
+      It does interact with the field solver, and in the direction that makes
+      it worth exposing: the field solver extracts MOS contact capacitance by
+      default, and setting this option false is how that is turned off there
+      too. The manual's own example writes the pair together on one `extract`
+      statement.
+      LVS input only, and it does not support cell-level DSPF or SPEF output
+      -- both true of our flow, so no restriction bites.
+      Not promoted: we emit nothing and therefore already get `true`, and
+      writing the line would only matter in order to turn it OFF, which
+      removes capacitance from the result.
     why: Via and contact capacitance, which is not negligible in dense RF routing.
 
   - key: extract_gate_diffusion_fringing_cap
@@ -1887,19 +1910,27 @@ options:
     context_path: null
     owner: recipe
     type: bool
-    choices_confidence: likely
+    choices_confidence: certain
     nullable: true
     default: null
-    placeholder: (tool default)
+    placeholder: not written, so the tool default of true applies
     currently: absent
     observed: false
-    question: >-
-      What is the default of -extract_gate_diffusion_fringing_cap, and is it
-      superseded when the PDK device model already carries fringing?
     notes: >-
-      Double-counting risk, which is why it is worth asking rather than
-      simply enabling: if the device model already includes gate-diffusion
-      fringing, turning this on adds it twice.
+      ANSWERED 2026-09-04, and the double-counting worry this row was opened
+      for turns out to point the other way. The default changed from false to
+      TRUE in the 11.1 release, and the fringing cap is only extracted when
+      the qrcTechFile actually defines the gate_diffusion_fringing_cap table
+      -- so the PDK, not this option, decides whether there is anything to
+      count. The manual then says outright that using this option is NOT
+      RECOMMENDED, because the Cf values, when the techfile defines them, are
+      necessary for accurate device extraction.
+      Two consequences worth carrying: the techfile table pulls a
+      Virtuoso_QRC_Extraction_XL licence, and `capacitance
+      -partial_cap_blocking` can also produce fringing caps, in which case the
+      device fringing cap is the SUM of what the two mechanisms extracted.
+      Not promoted: the only reason to write the line is to set it false, and
+      the vendor advises against exactly that.
     why: Gate-diffusion fringing capacitance, and the risk of counting it twice.
 
   - key: inductance_nets_file
@@ -1908,19 +1939,27 @@ options:
     context_path: null
     owner: recipe
     type: path
-    choices_confidence: guess
+    choices_confidence: certain
     nullable: true
     default: null
     currently: absent
     observed: false
-    question: >-
-      What is the format of the inductance nets file, and is it mandatory for
-      the rlc and rlck extract types?
     notes: >-
       This is the inductor half of the parasitic device contract that the
-      extract_type notes flag as missing. Choosing an rlc or rlck member
-      almost certainly needs this file, so the fifteen-value extract_type set
-      is not fully usable until this row is.
+      extract_type notes flag as missing.
+      ANSWERED 2026-09-04. Format: one net name per line. It is NOT mandatory,
+      and the consequence of leaving it out is the expensive direction --
+      with an rlc_* or rlck_* type and no file, inductance is extracted for
+      EVERY net in the current `extract -selection`. The manual calls the file
+      "very important to manage the size of the output netlist", and names RF
+      designs, where only certain nets are of interest, as the case it exists
+      for.
+      Names follow `extraction_setup -net_name_space` (layout or schematic,
+      whichever this recipe sets), and the nets must be a subset of the
+      current selection. In the excluded-nets pattern the inductance nets must
+      NOT be among the excluded ones.
+      Contrast substrate_nets_file, whose absence means the opposite: no nets
+      at all.
     why: Gates whether the RLC and RLCK extraction types are usable at all.
 
   - key: substrate_nets_file
@@ -1929,18 +1968,26 @@ options:
     context_path: null
     owner: recipe
     type: path
-    choices_confidence: guess
+    choices_confidence: certain
     nullable: true
     default: null
     currently: absent
     observed: false
-    question: >-
-      Is -substrate_nets_file required for the substrate_only and
-      decoupled_to_substrate extract types?
     notes: >-
       Pairs with the substrate_only and *_decoupled_to_substrate members of
       the extract_type set. Substrate coupling is a first-order RF effect and
       today we cannot express it at all.
+      ANSWERED 2026-09-04, and the answer is YES, REQUIRED. Format is one net
+      name per line, like inductance_nets_file, but the failure mode is the
+      exact opposite: "unlike the inductance_nets_file, the substrate_nets_file
+      must be explicitly defined, or no nets will be extracted as connected to
+      the substrate". So a recipe that picks a *_to_substrate type and omits
+      this file runs happily and produces no substrate network at all -- the
+      silent-success shape this catalog exists to catch.
+      Names follow `extraction_setup -net_name_space` and must be a subset of
+      the current selection. For selected-nets extraction the file must be a
+      subset of the `-selection nets_file`; for excluded-nets extraction it
+      must NOT be given together with that file.
     why: Substrate coupling, which for RF is not a detail.
 
   - key: selection_layers
@@ -1969,7 +2016,7 @@ options:
     choices_confidence: certain
     nullable: true
     default: null
-    placeholder: (not emitted)
+    placeholder: not written; meaningless without selection_layers
     currently: absent
     observed: false
     notes: >-
@@ -1988,9 +2035,9 @@ options:
     currently: absent
     observed: false
     question: >-
-      What are the defaults and interaction rules of the four global_nets
-      options, and how do they relate to the power_names / ground_names
-      tables on the profile?
+      What are the DEFAULTS of -import_from_lvs and -force_global_nets, and
+      how should the four global_nets options relate to the power_names /
+      ground_names tables already on the profile?
     notes: >-
       global_nets is LVS-input only, and it is what DEFINES the power and
       ground nets that `extract -selection all` then excludes. So "all" does
@@ -1999,6 +2046,16 @@ options:
       For RF that is not a detail: whether supply parasitics are extracted
       changes the answer. Siblings global_nets_file,
       global_nets_import_from_lvs and global_nets_force are separate rows.
+      PARTLY ANSWERED 2026-09-04. Syntax and flow confirmed: the command and
+      all four of its options are restricted to LVS input, `-nets` takes a
+      list of net names, and the manual's worked example is
+      `-nets "vdd" "vss" -import_from_lvs true -force_global_nets true`.
+      The same page gives the alternative route -- naming the supplies in an
+      excluded-nets file and covering them with a second `extract` statement
+      -- which is the ordered-rule pattern this catalog already models.
+      STILL OPEN: the two booleans' defaults, which is what the narrowed
+      question above asks. The probe returned the syntax table and the example
+      but not the options prose.
     why: Decides what -selection all actually covers, which nothing else says.
 
   - key: global_nets_file
@@ -2024,7 +2081,7 @@ options:
     choices_confidence: guess
     nullable: true
     default: null
-    placeholder: (tool default)
+    placeholder: not written, and the default is not documented
     currently: absent
     observed: false
     notes: >-
@@ -2042,7 +2099,7 @@ options:
     choices_confidence: guess
     nullable: true
     default: null
-    placeholder: (tool default)
+    placeholder: not written, and the default is not documented
     currently: absent
     observed: false
     notes: Precedence rule against the other three global_nets options not captured.
@@ -2195,7 +2252,7 @@ options:
     choices_confidence: certain
     nullable: true
     default: null
-    placeholder: (omitted -- the tool takes white)
+    placeholder: not written, and the tool then blocks as white
     currently: jinja_var
     observed: false
     notes: >-
@@ -2358,7 +2415,7 @@ options:
     range_verified: false
     nullable: true
     default: null
-    placeholder: (1 when used with exclude_floating_nets)
+    placeholder: not written; the manual suggests 1 alongside exclude_floating_nets
     currently: absent
     observed: false
     notes: >-
@@ -2444,6 +2501,10 @@ options:
       Quantus from a Calibre LVS svdb, so both emissions are inside the LVS
       flow and legal today. If a non-LVS input_db is ever added, this line
       has to become conditional; nothing currently would notice.
+      MUTUALLY EXCLUSIVE WITH filter_res -merge_parallel_via. We emit this
+      line unconditionally, so the via variant is unreachable as long as that
+      is true -- a fact that lives here as well as on merge_parallel_via
+      because this is the row someone reads before promoting the other.
     lands_in:
       - {target: quantus.ext.cmd, section: filter_res, option: -merge_parallel_res, line: 29, quoting: bare}
       - {target: quantus.dspf.cmd, section: filter_res, option: -merge_parallel_res, line: 29, quoting: bare}
@@ -2456,18 +2517,36 @@ options:
     context_path: null
     owner: recipe
     type: bool
-    choices_confidence: guess
+    choices_confidence: certain
     nullable: true
     default: null
-    placeholder: (tool default)
+    placeholder: not written, and it cannot be used with merge_parallel_res
     currently: absent
     observed: false
-    question: What is the documented default of filter_res -merge_parallel_via, and which flow is it?
+    question: >-
+      What is the documented DEFAULT of filter_res -merge_parallel_via? The
+      syntax table gives no default value for it.
     notes: >-
       The via counterpart to -merge_parallel_res. Neither template emits it,
-      so we take the tool default. Flow applicability not captured, which
-      matters here because its neighbour merge_parallel_res turns out to be
-      LVS-only while remove_dangling_res is ALL.
+      so we take the tool default.
+      ANSWERED 2026-09-04 except for the default, and the answer is a
+      CONSTRAINT, not a value: `-merge_parallel_via` and `-merge_parallel_res`
+      ARE MUTUALLY EXCLUSIVE. We emit `-merge_parallel_res true`
+      unconditionally in both command files, so this option is not merely
+      unmodelled -- it is unreachable, and promoting it without also making
+      merge_parallel_res conditional would ship a deck the tool refuses.
+      Flow is LVS, like merge_parallel_res (and unlike remove_dangling_res,
+      which is ALL). Behaviour is identical to merge_parallel_res except that
+      the merging is restricted to vias; the resulting via R follows Ohm's law
+      and the via `A=` parameters are summed. It supports ONLY the one-pair
+      via resistance model.
+      Two further preconditions, which is why this row stays absent rather
+      than becoming a tick box: it must be used together with
+      `extraction_setup -resistance_mesh_automatic_via_layers` (which has no
+      catalog row), and it REQUIRES AN ADDITIONAL AA LICENCE with the Advanced
+      Adaptive Mesh feature -- with `-resistance_mesh_automatic_size` as well,
+      XL plus 2 AA GXL licences are checked out. Enabling it blind costs
+      licences the shop may not have.
     why: Affects the extracted resistor count the way -merge_parallel_res does.
 
   - key: min_res_centering
@@ -2476,20 +2555,27 @@ options:
     context_path: null
     owner: recipe
     type: bool
-    choices_confidence: guess
+    choices_confidence: certain
     nullable: true
     default: null
-    placeholder: (tool default)
+    placeholder: not written, so the tool default of false applies
     currently: absent
     observed: false
-    question: >-
-      Is filter_res -min_res_centering a boolean or an enum, what is its
-      default, and which flow does it apply to?
     notes: >-
       Companion to -min_res (this catalog's min_res_ohm): it governs how a
       resistor dropped by the min_res floor has its node collapsed, so it
-      moves where the remaining parasitics land. type: bool is a GUESS -- the
-      option may well be an enum.
+      moves where the remaining parasitics land.
+      ANSWERED 2026-09-04, all three parts. It is a BOOLEAN, its default is
+      FALSE, and its flow is LVS. What false means concretely: when the
+      min_res floor shorts a group of sub-nodes together, the survivor is
+      chosen ARBITRARILY. With true it is chosen by proximity to the
+      geometric centre of the group -- so on a via group, the parasitics that
+      survive land in the middle rather than wherever the tool happened to
+      pick.
+      Unlike merge_parallel_via it carries no licence cost and no companion
+      option, so this one is a clean promotion candidate; it is left absent
+      only because moving where parasitics attach changes an extraction, and
+      that is the owner's call.
     why: Where parasitics end up when small resistors are dropped.
   - key: min_res_ohm
     tier: common
@@ -2783,6 +2869,20 @@ options:
       the sentence saying what floating and none apply to is cut off in the
       extract we hold. So we do not yet know that floating and none are legal
       for Calibre-LVS input. Default virtual is unaffected either way.
+      RAISED 2026-09-04, and the question gets sharper rather than answered.
+      The manual says of virtual fill: "If virtual metal is specified, any
+      actual metal fill defined in the DEF or OA input will be ignored. This
+      does not affect metal fill defined as SPECIALNETS, and DOES NOT AFFECT
+      METAL FILL IN LVS INPUT (Assura, Calibre, or PVS)." Our input IS
+      Calibre LVS. So the `-type virtual` line we write into dspf.cmd may be
+      doing nothing at all, which would make the difference between the two
+      command files a difference in appearance only.
+      It also records that `-type floating` / `-type grounded` are what you
+      reach for "when the input design does not contain metal fill", and that
+      advanced virtual fill (-enable_advanced_virtual_fill) needs an XL+AA
+      licence and two IVMF rule files we do not model.
+      This is a methodology call about a first-order RF coupling term, not a
+      transcription, so the question stays open and the value stays put.
     lands_in:
       - {target: quantus.dspf.cmd, section: metal_fill, option: -type, line: 41, quoting: bare}
     why: >-
@@ -3021,16 +3121,24 @@ options:
     owner: recipe
     type: enum
     choices: ["true", "false", comment]
-    choices_confidence: guess
+    choices_confidence: certain
     default: comment
     currently: jinja_var
     observed: true
     source_ref: templates/quantus/ext.cmd.j2:51
-    question: What does "comment" mean in your post-layout sim, and when is each of the three used?
     notes: >-
-      That it is three-valued rather than boolean is certain (the file says
-      "comment", which is neither true nor false); what the three values do is
-      a guess.
+      That it is three-valued rather than boolean was always certain (the file
+      says "comment", which is neither true nor false); what the three values
+      DO was a guess until 2026-09-04, and now is not.
+      false - parasitic resistor models are not written to the output file.
+      true  - they are written in-line in the output file.
+      comment - they are written as COMMENTS in the output file. This is the
+      vendor's default setting, so our `comment` is the tool's own answer and
+      not a compromise somebody invented: the model statements are carried
+      into the netlist for a human to read, and the simulator ignores them.
+      One interaction worth carrying: the option is forced to `comment`
+      automatically when `output_db -em_extract` is true. We never emit
+      em_extract, so nothing overrides us today.
     lands_in:
       - {target: quantus.ext.cmd, section: output_db, option: -include_parasitic_res_model, line: 51}
       - {target: quantus.dspf.cmd, section: output_db, option: -include_parasitic_res_model, line: 51}
@@ -3256,7 +3364,7 @@ options:
     choices_confidence: certain
     nullable: true
     default: null
-    placeholder: (tool default -- subnodes are written)
+    placeholder: not written, so subnodes are written
     currently: absent
     observed: false
     notes: >-
@@ -3901,7 +4009,16 @@ options:
       per-cell JivaroOverride on top. The override goes away -- a per-cell
       difference in reduction settings is a second Recipe, not a patch on the
       first.
-    why: Whether the jivaro stage runs at all. Gates the stage; emits nothing itself.
+      TWO SWITCHES, ONE OUTCOME. runner.py runs the reduction only when this
+      flag is true AND `jivaro` is in recipe.stages; either one false skips
+      the stage silently. The two rows sit in different sections of the form,
+      so the AND between them cannot be seen -- ticking the stage and leaving
+      this flag alone gets no reduction and no complaint. Both `why` texts
+      name the other row on purpose, and a catalog test keeps them doing it.
+    why: >-
+      Whether the jivaro stage runs at all. It is not enough on its own --
+      `jivaro` must ALSO be listed in stages, or the reduction is skipped
+      without a word. Gates the stage; emits nothing itself.
 
   # ---- strmout: a whole stage with no template at all ----------------------
   # argv is assembled in auto_ext/tools/strmout.py, which is exactly why a
@@ -3957,6 +4074,13 @@ options:
       Proposed. Not a Recipe field yet: the strmout argv shape has never been
       run against the real binary (a standing office item), so adding flags
       blind risks breaking the only stage that currently works by luck.
+      PROBED AND NOT FOUND, 2026-09-04: this question went to extUser.pdf
+      (Quantus) together with the fifteen Quantus ones and every search term
+      returned zero hits, which is the correct result for the wrong book --
+      strmout is a Virtuoso/DFII utility, not a Quantus command. A "no hits"
+      is a real answer and is recorded so the next probe round does not spend
+      a red-zone trip re-asking the same manual. The question stands; the
+      book to ask is not this one.
     why: strmout defaults are being relied on without anybody having chosen them.
 
   - key: strmout_convert_dot
@@ -4089,7 +4213,13 @@ options:
       The persisted default. A CLI --stage may narrow it for one invocation;
       the narrowed set is what RunRecord.requested_stages records. Listed here
       so nobody re-files the CLI flag into the Recipe by mistake.
-    why: Which steps this recipe intends to run. A recipe-level intent with a per-run override.
+      `jivaro` is the one member that is not sufficient by itself: the runner
+      also requires reduction_enabled. See that row.
+    why: >-
+      Which steps this recipe intends to run. A recipe-level intent with a
+      per-run override. Listing `jivaro` here does NOT switch the reduction
+      on by itself -- reduction.enabled must be true as well, or the stage is
+      skipped in silence.
 
   - key: requested_stages
     template_var: requested_stages
