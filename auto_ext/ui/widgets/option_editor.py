@@ -279,7 +279,7 @@ _ACRONYM_GROUPS = frozenset({"lvs", "dspf", "si", "qrc", "xy"})
 #: "nobody has labelled this one", and the form gave no way to tell which.
 #: ``guess`` keeps the promise that the field still takes anything typed into
 #: it, because that is the half of it a user acts on.
-_LIST_CONFIDENCE: Mapping[Any, str] = {
+_LIST_CONFIDENCE: Mapping[Confidence, str] = {
     Confidence.CERTAIN: "confirmed list",
     Confidence.LIKELY: "list not confirmed",
     Confidence.GUESS: "guessed list - other values accepted",

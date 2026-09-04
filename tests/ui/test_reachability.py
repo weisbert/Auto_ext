@@ -207,8 +207,12 @@ CATALOG_UNREACHABLE: dict[str, str] = {
         "its defaults without anybody having chosen them, and the office "
         "question about the manual flow is unanswered"
     ),
-    "strmout_convert_dot": "as strmout_hier_depth: argv, and the same unanswered question",
-    "strmout_case": "as strmout_hier_depth: argv, and the same unanswered question",
+    "strmout_convert_dot": (
+        "as strmout_hier_depth: argv, and the same unanswered question"
+    ),
+    "strmout_case": (
+        "as strmout_hier_depth: argv, and the same unanswered question"
+    ),
 }
 
 #: Same, for one row of the cell table.
