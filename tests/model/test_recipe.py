@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from auto_ext.catalog.spec import Owner, builtin_catalog
 from auto_ext.core.errors import ConfigError
 from auto_ext.core.patch_models import BaseFingerprint, PatchHunk, TemplatePatch
-from auto_ext.model.common import STAGE_ORDER, Stage
+from auto_ext.model.common import Stage
 from auto_ext.model.recipe import (
     CATALOG_EXEMPT_FIELDS,
     PROFILE_FALLBACK_FIELDS,

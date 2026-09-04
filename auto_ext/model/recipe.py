@@ -92,7 +92,6 @@ from auto_ext.core.patch_models import (
     TemplatePatch,
 )
 from auto_ext.model.common import (
-    STAGE_ORDER,
     AsWritten,
     Base,
     Frozen,

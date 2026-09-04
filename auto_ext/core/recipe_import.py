@@ -114,7 +114,7 @@ from auto_ext.core.render import (
     template_path_for,
 )
 from auto_ext.core.template import referenced_jinja_vars
-from auto_ext.model.common import STAGE_ORDER, RenderTarget, Stage, WrittenFloat, slugify
+from auto_ext.model.common import RenderTarget, WrittenFloat, slugify
 from auto_ext.model.pdk import (
     DEFAULT_TECH_LIBRARY_FILE,
     CornerSpec,
