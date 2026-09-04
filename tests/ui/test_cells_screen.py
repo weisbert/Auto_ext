@@ -25,7 +25,13 @@ pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
 from PyQt5.QtCore import QObject, QPoint, Qt, pyqtSignal  # noqa: E402
-from PyQt5.QtWidgets import QAbstractItemView, QLabel, QTableWidget  # noqa: E402
+from PyQt5.QtWidgets import (  # noqa: E402
+    QAbstractItemView,
+    QLabel,
+    QStyle,
+    QStyleOptionViewItem,
+    QTableWidget,
+)
 
 from auto_ext.model.cells import CellBook, CellEntry  # noqa: E402
 from auto_ext.ui import theme  # noqa: E402
@@ -96,6 +102,51 @@ def _screen(
     if controller is not None and recipe_override is not None:
         screen.run_bar.set_recipe_override(recipe_override)
     return screen
+
+
+def _cell_point(screen: CellsScreen, row: int, column: int = COL_CELL) -> QPoint:
+    """The middle of one cell, in viewport coordinates."""
+
+    return screen.table.visualRect(screen.table.model().index(row, column)).center()
+
+
+def _check_box_point(screen: CellsScreen, row: int) -> QPoint:
+    """Where the check indicator of ``row`` is actually drawn.
+
+    The same rect the delegate hit-tests, rather than a guess at the middle
+    of the column: a click that lands beside the box is an ordinary row
+    click and would pass these tests for the wrong reason.
+    """
+
+    table = screen.table
+    option = QStyleOptionViewItem()
+    option.initFrom(table)
+    option.rect = table.visualRect(table.model().index(row, COL_CHECK))
+    option.features = QStyleOptionViewItem.HasCheckIndicator
+    return table.style().subElementRect(
+        QStyle.SE_ItemViewItemCheckIndicator, option, table
+    ).center()
+
+
+def _click_check_box(qtbot, screen: CellsScreen, row: int) -> None:
+    qtbot.mouseClick(
+        screen.table.viewport(), Qt.LeftButton, Qt.NoModifier, _check_box_point(screen, row)
+    )
+
+
+def _click_header_box(qtbot, screen: CellsScreen) -> None:
+    """Click the header's check-all box, on the header's viewport.
+
+    QHeaderView is a scroll area: it reads mouse events off its viewport,
+    and a click posted to the header widget itself never reaches
+    ``mousePressEvent``.
+    """
+
+    header = screen.table.horizontalHeader()
+    x = header.sectionPosition(COL_CHECK) + header.sectionSize(COL_CHECK) // 2
+    qtbot.mouseClick(
+        header.viewport(), Qt.LeftButton, Qt.NoModifier, QPoint(x, header.height() // 2)
+    )
 
 
 def _visible_titles(screen: CellsScreen) -> list[str]:
@@ -484,23 +535,31 @@ def test_a_disabled_row_never_joins_a_batch(qtbot) -> None:
     screen = _screen(qtbot)
     keys = screen.cells().keys
     screen.set_enabled_for([keys[0]], False)
-    screen.set_selected_keys(keys[:2])
+    screen.set_checked_keys(keys[:2])
 
     assert screen.run_request().keys == (keys[1],)
 
 
-# ---- selection ------------------------------------------------------------
+# ---- the run set, and its independence from the highlight -----------------
+#
+# These are the regression tests for the defect the screen shipped with: the
+# check column was repainted from the selection on every
+# ``itemSelectionChanged``, and clicking a box wrote back into the selection,
+# so one plain left click -- ``ClearAndSelect`` -- emptied the batch. Every
+# assertion below that says "the ticks are still there" fails against that
+# code.
 
 
-def test_checking_the_box_selects_the_row(qtbot) -> None:
+def test_checking_a_box_does_not_move_the_highlight(qtbot) -> None:
     screen = _screen(qtbot)
     seen: list[tuple[str, ...]] = []
-    screen.selection_changed.connect(seen.append)
+    screen.checked_changed.connect(seen.append)
 
     screen.table.item(0, COL_CHECK).setCheckState(Qt.Checked)
 
-    assert screen.selected_keys() == (screen.cells().keys[0],)
+    assert screen.checked_keys() == (screen.cells().keys[0],)
     assert seen[-1] == (screen.cells().keys[0],)
+    assert screen.selected_keys() == (), "ticking a box must not select the row"
 
 
 def test_checking_a_second_box_keeps_the_first(qtbot) -> None:
@@ -509,25 +568,229 @@ def test_checking_a_second_box_keeps_the_first(qtbot) -> None:
     screen.table.item(0, COL_CHECK).setCheckState(Qt.Checked)
     screen.table.item(2, COL_CHECK).setCheckState(Qt.Checked)
 
-    assert len(screen.selected_keys()) == 2
+    assert screen.checked_keys() == (screen.cells().keys[0], screen.cells().keys[2])
 
 
-def test_selecting_the_row_ticks_the_box(qtbot) -> None:
+def test_selecting_rows_does_not_tick_anything(qtbot) -> None:
     screen = _screen(qtbot)
 
     screen.set_selected_keys(screen.cells().keys[:2])
 
-    assert screen.table.item(0, COL_CHECK).checkState() == Qt.Checked
-    assert screen.table.item(1, COL_CHECK).checkState() == Qt.Checked
-    assert screen.table.item(2, COL_CHECK).checkState() == Qt.Unchecked
+    assert screen.checked_keys() == ()
+    assert all(
+        screen.table.item(row, COL_CHECK).checkState() == Qt.Unchecked
+        for row in range(3)
+    )
+    assert screen.run_bar.run_button_text() == "Run"
 
 
-def test_selection_drives_the_run_button(qtbot) -> None:
+def test_clicking_a_row_leaves_the_batch_alone(qtbot) -> None:
+    """The defect, driven with a real mouse.
+
+    Ticking two boxes and then clicking the third row's *cell name* -- to
+    read it, or on the way to retyping it -- used to leave one row ticked:
+    the click cleared the selection and the check column was repainted from
+    it. Both clicks here are ordinary left clicks on the table's viewport.
+    """
+
+    screen = _screen(qtbot)
+    screen.show()
+    qtbot.waitExposed(screen)
+    keys = screen.cells().keys
+
+    _click_check_box(qtbot, screen, 0)
+    _click_check_box(qtbot, screen, 1)
+    assert screen.checked_keys() == tuple(keys[:2])
+
+    qtbot.mouseClick(
+        screen.table.viewport(), Qt.LeftButton, Qt.NoModifier, _cell_point(screen, 2)
+    )
+
+    assert screen.selected_keys() == (keys[2],)
+    assert screen.checked_keys() == tuple(keys[:2]), "a click on a row emptied the batch"
+    # The painted column too, not only the model behind it: this is the
+    # assertion that fails against the old screen for a reason a user can
+    # see -- it used to read [Unchecked, Unchecked, Checked] here.
+    assert [
+        screen.table.item(row, COL_CHECK).checkState() for row in range(3)
+    ] == [Qt.Checked, Qt.Checked, Qt.Unchecked]
+    assert screen.run_bar.run_button_text() == "Run 2 cells"
+
+
+def test_editing_a_cell_name_leaves_the_batch_alone(qtbot) -> None:
+    """Double-click is a click too: the edit path used to clear the batch."""
+
+    screen = _screen(qtbot)
+    screen.show()
+    qtbot.waitExposed(screen)
+    keys = screen.cells().keys
+    screen.set_checked_keys(keys[:2])
+
+    qtbot.mouseDClick(
+        screen.table.viewport(), Qt.LeftButton, Qt.NoModifier, _cell_point(screen, 2)
+    )
+    screen.table.closePersistentEditor(screen.table.item(2, COL_CELL))
+
+    assert screen.checked_keys() == tuple(keys[:2])
+
+
+def test_a_tick_survives_the_rename_of_its_row(qtbot) -> None:
+    screen = _screen(qtbot)
+    keys = screen.cells().keys
+    screen.set_checked_keys([keys[0]])
+
+    screen.table.item(0, COL_CELL).setText("RENAMED_v9")
+
+    renamed = screen.cells().keys[0]
+    assert renamed != keys[0]
+    assert screen.checked_keys() == (renamed,)
+
+
+def test_removing_a_row_takes_its_tick_with_it(qtbot) -> None:
+    screen = _screen(qtbot)
+    keys = screen.cells().keys
+    screen.set_checked_keys(keys[:2])
+    screen.set_selected_keys([keys[0]])
+
+    screen.remove_selected()
+
+    assert screen.checked_keys() == (keys[1],)
+
+
+def test_the_run_button_counts_the_ticks(qtbot) -> None:
     screen = _screen(qtbot)
 
-    screen.set_selected_keys(screen.cells().keys[:3])
+    screen.set_checked_keys(screen.cells().keys[:3])
 
     assert screen.run_bar.run_button_text() == "Run 3 cells"
+    assert screen.run_bar.run_count() == 3
+
+
+def test_the_run_button_never_counts_a_parked_row(qtbot) -> None:
+    """``run_request`` has always dropped disabled rows; the button used to
+    count them anyway, so "Run 2 cells" ran one."""
+
+    screen = _screen(qtbot)
+    keys = screen.cells().keys
+    screen.set_checked_keys(keys[:2])
+    screen.set_enabled_for([keys[0]], False)
+
+    assert screen.run_request().keys == (keys[1],)
+    assert screen.run_bar.run_button_text() == "Run 1 cell"
+
+
+def test_space_ticks_every_highlighted_row_and_clears_them_again(qtbot) -> None:
+    screen = _screen(qtbot)
+    screen.show()
+    qtbot.waitExposed(screen)
+    keys = screen.cells().keys
+    screen.set_selected_keys(keys[:2])
+
+    qtbot.keyClick(screen.table, Qt.Key_Space)
+    assert screen.checked_keys() == tuple(keys[:2])
+
+    qtbot.keyClick(screen.table, Qt.Key_Space)
+    assert screen.checked_keys() == ()
+
+
+def test_the_header_box_checks_and_clears_every_visible_row(qtbot) -> None:
+    screen = _screen(qtbot)
+    screen.show()
+    qtbot.waitExposed(screen)
+    header = screen.table.horizontalHeader()
+
+    _click_header_box(qtbot, screen)
+    assert screen.checked_keys() == tuple(screen.cells().keys)
+    assert header.check_state() == Qt.Checked
+
+    _click_header_box(qtbot, screen)
+    assert screen.checked_keys() == ()
+    assert header.check_state() == Qt.Unchecked
+
+
+def test_the_header_box_shows_partial_and_hides_during_a_run(qtbot) -> None:
+    screen = _screen(qtbot)
+    header = screen.table.horizontalHeader()
+
+    screen.set_checked_keys(screen.cells().keys[:1])
+    assert header.check_state() == Qt.PartiallyChecked
+
+    screen.set_column_mode(MODE_RUNNING)
+    assert header.is_check_shown() is False
+    screen.set_column_mode(MODE_WIDE)
+    assert header.is_check_shown() is True
+
+
+def test_the_header_box_is_actually_painted(qtbot) -> None:
+    """Pixels, not state.
+
+    The box is drawn by hand in ``CheckHeader.paintSection``, and with a
+    stylesheet in force -- this screen sets one -- the painter arrives there
+    with an empty clip region: everything drawn after ``super()`` is thrown
+    away and the header comes out blank while ``check_state()`` happily
+    reports ``Checked``. No assertion about state can see that.
+    """
+
+    screen = _screen(qtbot)
+    screen.show()
+    qtbot.waitExposed(screen)
+    header = screen.table.horizontalHeader()
+
+    screen.set_checked_keys(screen.cells().keys)
+    with_box = header.grab().toImage()
+    header.set_check_shown(False)
+    without_box = header.grab().toImage()
+    header.set_check_shown(True)
+
+    width = header.sectionSize(COL_CHECK)
+    changed = sum(
+        1
+        for x in range(width)
+        for y in range(min(with_box.height(), without_box.height()))
+        if with_box.pixelColor(x, y) != without_box.pixelColor(x, y)
+    )
+    assert changed > 20, "the header check box is not reaching the screen"
+
+
+def test_check_all_and_the_header_state_follow_the_filter(qtbot) -> None:
+    screen = _screen(qtbot)
+    screen.filter_edit().setText("CORE_TOP")
+
+    screen.check_all()
+
+    assert screen.checked_keys() == (screen.cells().keys[1],)
+    assert screen.table.horizontalHeader().check_state() == Qt.Checked
+
+
+def test_a_filtered_out_tick_still_runs_and_says_so(qtbot) -> None:
+    """The other half of the old coupling: ``selectedIndexes()`` skips hidden
+    rows, so filtering used to shrink the run behind the button's back."""
+
+    screen = _screen(qtbot)
+    keys = screen.cells().keys
+    screen.set_checked_keys(keys[:2])
+    said: list[str] = []
+    screen.status_message.connect(said.append)
+
+    screen.filter_edit().setText("TOP_WRAP")
+
+    assert screen.run_request().keys == tuple(keys[:2])
+    assert screen.run_bar.run_button_text() == "Run 2 cells"
+    assert screen.hidden_checked_count() == 2
+    assert said and "2 checked cells" in said[-1]
+
+
+def test_a_run_keeps_the_ticks_for_the_next_one(qtbot) -> None:
+    screen = _screen(qtbot)
+    keys = screen.cells().keys
+    screen.set_checked_keys(keys[:2])
+
+    screen.set_column_mode(MODE_RUNNING)
+    assert screen.table.item(0, COL_CHECK).checkState() == Qt.Unchecked
+    screen.set_column_mode(MODE_WIDE)
+
+    assert screen.checked_keys() == tuple(keys[:2])
+    assert screen.table.item(0, COL_CHECK).checkState() == Qt.Checked
 
 
 def test_duplicate_and_remove_are_dead_without_a_selection(qtbot) -> None:
@@ -592,6 +855,8 @@ def test_context_menu_is_deferred_and_lists_its_actions(qtbot) -> None:
         "Duplicate",
         "Remove",
         "Disable rows",
+        "Check rows",
+        "Clear all checks",
         "Export GDS…",
         "Copy row key",
     ]
@@ -801,7 +1066,7 @@ def test_install_cells_page_builds_its_own_screen_when_given_none(qtbot) -> None
 
 def test_run_request_reads_the_bar(qtbot) -> None:
     screen = _screen(qtbot)
-    screen.set_selected_keys(screen.cells().keys[:2])
+    screen.set_checked_keys(screen.cells().keys[:2])
     screen.run_bar.set_selected_stages(["si", "calibre"])
     screen.run_bar.set_jobs(3)
     screen.run_bar.set_dry_run(True)
@@ -817,7 +1082,7 @@ def test_run_request_reads_the_bar(qtbot) -> None:
 
 def test_without_a_controller_the_screen_only_announces(qtbot, fake_worker) -> None:
     screen = _screen(qtbot)
-    screen.set_selected_keys(screen.cells().keys[:1])
+    screen.set_checked_keys(screen.cells().keys[:1])
     seen: list[object] = []
     screen.run_requested.connect(seen.append)
 
@@ -837,7 +1102,7 @@ def test_rows_wanting_different_recipes_become_different_batches(
     keys = screen.cells().keys[:2]
     screen.set_recipe_binding(keys[0], "rc-default")
     screen.set_recipe_binding(keys[1], "rc-fast")
-    screen.set_selected_keys(keys)
+    screen.set_checked_keys(keys)
 
     screen.start_run()
 
@@ -855,7 +1120,7 @@ def test_rows_sharing_a_recipe_stay_in_one_batch(
     keys = screen.cells().keys[:2]
     for key in keys:
         screen.set_recipe_binding(key, "rc-fast")
-    screen.set_selected_keys(keys)
+    screen.set_checked_keys(keys)
 
     screen.start_run()
 
@@ -873,7 +1138,7 @@ def test_the_run_bar_override_replaces_every_row_recipe(
     keys = screen.cells().keys[:2]
     screen.set_recipe_binding(keys[0], "rc-default")
     screen.set_recipe_binding(keys[1], "rc-fast")
-    screen.set_selected_keys(keys)
+    screen.set_checked_keys(keys)
     screen.run_bar.set_recipe_override("rc-fast")
 
     screen.start_run()
@@ -904,7 +1169,7 @@ def test_a_row_with_no_recipe_names_itself_in_the_refusal(
     screen = _screen(qtbot, controller=controller, recipe_override=None)
     keys = screen.cells().keys[:2]
     screen.set_recipe_binding(keys[0], "rc-default")
-    screen.set_selected_keys(keys)
+    screen.set_checked_keys(keys)
 
     screen.start_run()
 
@@ -936,7 +1201,7 @@ def test_with_two_recipes_and_no_choice_the_dispatch_says_so_and_starts_nothing(
     )
 
     screen = _screen(qtbot, controller=controller, recipe_override=None)
-    screen.set_selected_keys(screen.cells().keys[:1])
+    screen.set_checked_keys(screen.cells().keys[:1])
 
     screen.start_run()
 
@@ -956,7 +1221,7 @@ def test_dispatch_reuses_the_existing_worker(qtbot, controller, fake_worker) -> 
     RunWorker + QtProgressReporter + CancelToken the Run tab always has."""
 
     screen = _screen(qtbot, controller=controller)
-    screen.set_selected_keys(screen.cells().keys[:2])
+    screen.set_checked_keys(screen.cells().keys[:2])
     screen.run_bar.set_selected_stages(["si", "calibre"])
     screen.run_bar.set_jobs(2)
 
@@ -1043,7 +1308,7 @@ def test_a_cancelled_export_dialog_starts_nothing(
 
 def test_an_ordinary_run_requests_no_export(qtbot, controller, fake_worker) -> None:
     screen = _screen(qtbot, controller=controller)
-    screen.set_selected_keys(screen.cells().keys[:1])
+    screen.set_checked_keys(screen.cells().keys[:1])
 
     screen.start_run()
 
@@ -1052,7 +1317,7 @@ def test_an_ordinary_run_requests_no_export(qtbot, controller, fake_worker) -> N
 
 def test_one_job_means_serial_not_a_pool_of_one(qtbot, controller, fake_worker) -> None:
     screen = _screen(qtbot, controller=controller)
-    screen.set_selected_keys(screen.cells().keys[:1])
+    screen.set_checked_keys(screen.cells().keys[:1])
     screen.run_bar.set_jobs(1)
 
     screen.start_run()
@@ -1064,7 +1329,7 @@ def test_a_second_run_cannot_start_while_one_is_in_flight(
     qtbot, controller, fake_worker
 ) -> None:
     screen = _screen(qtbot, controller=controller)
-    screen.set_selected_keys(screen.cells().keys[:1])
+    screen.set_checked_keys(screen.cells().keys[:1])
 
     screen.start_run()
     screen.start_run()
@@ -1074,7 +1339,7 @@ def test_a_second_run_cannot_start_while_one_is_in_flight(
 
 def test_running_locks_edits_and_switches_the_table(qtbot, controller, fake_worker) -> None:
     screen = _screen(qtbot, controller=controller)
-    screen.set_selected_keys(screen.cells().keys[:2])
+    screen.set_checked_keys(screen.cells().keys[:2])
     messages: list[str] = []
     screen.status_message.connect(messages.append)
 
@@ -1093,7 +1358,7 @@ def test_rows_outside_the_batch_are_not_marked_queued(
     qtbot, controller, fake_worker
 ) -> None:
     screen = _screen(qtbot, controller=controller)
-    screen.set_selected_keys(screen.cells().keys[:1])
+    screen.set_checked_keys(screen.cells().keys[:1])
 
     screen.start_run()
 
@@ -1106,7 +1371,7 @@ def test_reporter_events_drive_the_row_and_the_counts(
 ) -> None:
     screen = _screen(qtbot, controller=controller)
     keys = screen.cells().keys
-    screen.set_selected_keys(keys[:2])
+    screen.set_checked_keys(keys[:2])
     screen.run_bar.set_selected_stages(["si", "calibre"])
     screen.start_run()
     reporter = fake_worker.instances[0].kwargs["reporter"]
@@ -1137,7 +1402,7 @@ def test_stage_start_publishes_the_log_path_from_the_run_directory(
 
     screen = _screen(qtbot, controller=controller)
     keys = screen.cells().keys
-    screen.set_selected_keys(keys[:1])
+    screen.set_checked_keys(keys[:1])
     screen.start_run()
     reporter = fake_worker.instances[0].kwargs["reporter"]
     seen: list[object] = []
@@ -1157,7 +1422,7 @@ def test_stage_start_publishes_the_log_path_from_the_run_directory(
 def test_follow_off_leaves_the_log_where_it_was(qtbot, controller, fake_worker) -> None:
     screen = _screen(qtbot, controller=controller)
     keys = screen.cells().keys
-    screen.set_selected_keys(keys[:1])
+    screen.set_checked_keys(keys[:1])
     screen.run_bar.set_follows_current_stage(False)
     screen.start_run()
     reporter = fake_worker.instances[0].kwargs["reporter"]
@@ -1176,7 +1441,7 @@ def test_open_in_editor_is_its_own_signal(qtbot, controller, fake_worker) -> Non
 
     screen = _screen(qtbot, controller=controller)
     keys = screen.cells().keys
-    screen.set_selected_keys(keys[:1])
+    screen.set_checked_keys(keys[:1])
     screen.start_run()
     reporter = fake_worker.instances[0].kwargs["reporter"]
     reporter.on_run_dir(keys[0], Path("/runs/x"))
@@ -1203,7 +1468,7 @@ def test_starting_a_run_opens_the_panel_and_finishing_gives_it_back(
     screen.resize(1200, 700)
     qtbot.wait(10)
     screen.run_bar.set_log_widget(QLabel("log"))
-    screen.set_selected_keys(screen.cells().keys[:1])
+    screen.set_checked_keys(screen.cells().keys[:1])
     idle_before = screen.splitter.sizes()[1]
 
     screen.start_run()
@@ -1218,7 +1483,7 @@ def test_starting_a_run_opens_the_panel_and_finishing_gives_it_back(
 
 def test_cancel_asks_the_worker_once_and_says_so(qtbot, controller, fake_worker) -> None:
     screen = _screen(qtbot, controller=controller)
-    screen.set_selected_keys(screen.cells().keys[:1])
+    screen.set_checked_keys(screen.cells().keys[:1])
     screen.start_run()
 
     screen.cancel_run()
@@ -1230,7 +1495,7 @@ def test_cancel_asks_the_worker_once_and_says_so(qtbot, controller, fake_worker)
 def test_finishing_gives_the_screen_back(qtbot, controller, fake_worker) -> None:
     screen = _screen(qtbot, controller=controller)
     keys = screen.cells().keys
-    screen.set_selected_keys(keys[:1])
+    screen.set_checked_keys(keys[:1])
     screen.start_run()
     worker = fake_worker.instances[0]
     reporter = worker.kwargs["reporter"]
@@ -1259,7 +1524,7 @@ def test_rows_with_no_loaded_task_stop_the_dispatch(
     )
     screen = _screen(qtbot, controller=controller)
     key = screen.add_cell()
-    screen.set_selected_keys([key])
+    screen.set_checked_keys([key])
 
     screen.start_run()
 

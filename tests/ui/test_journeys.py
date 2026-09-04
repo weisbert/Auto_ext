@@ -285,7 +285,7 @@ def test_the_recipe_chosen_for_a_row_is_the_recipe_that_row_runs(
 
     cells = window_multi.shell.page("cells")
     keys = tuple(cells.cells().keys)
-    cells.set_selected_keys(keys)
+    cells.set_checked_keys(keys)
     for key in keys:
         cells.set_recipe_binding(key, chosen)
 

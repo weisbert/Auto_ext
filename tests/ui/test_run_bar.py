@@ -56,11 +56,11 @@ def _theme_colors() -> set[str]:
 # ---- idle state ----------------------------------------------------------
 
 
-def test_idle_is_the_default_and_run_is_dead_without_a_selection(qtbot) -> None:
+def test_idle_is_the_default_and_run_is_dead_with_nothing_checked(qtbot) -> None:
     bar = _bar(qtbot)
 
     assert bar.is_running() is False
-    assert bar.selection_count() == 0
+    assert bar.run_count() == 0
     assert bar.run_button_text() == "Run"
     assert bar.run_button().isEnabled() is False
 
@@ -68,22 +68,22 @@ def test_idle_is_the_default_and_run_is_dead_without_a_selection(qtbot) -> None:
 def test_run_button_counts_what_it_will_run(qtbot) -> None:
     bar = _bar(qtbot)
 
-    bar.set_selection_count(1)
+    bar.set_run_count(1)
     assert bar.run_button_text() == "Run 1 cell"
-    bar.set_selection_count(3)
+    bar.set_run_count(3)
     assert bar.run_button_text() == "Run 3 cells"
     assert bar.run_button().isEnabled() is True
 
 
-def test_run_requested_needs_both_a_selection_and_a_stage(qtbot) -> None:
+def test_run_requested_needs_both_a_checked_row_and_a_stage(qtbot) -> None:
     bar = _bar(qtbot)
     fired: list[int] = []
     bar.run_requested.connect(lambda: fired.append(1))
 
     bar._on_run_clicked()
-    assert fired == [], "no selection must not dispatch"
+    assert fired == [], "nothing checked must not dispatch"
 
-    bar.set_selection_count(2)
+    bar.set_run_count(2)
     bar.set_selected_stages([])
     assert bar.run_button().isEnabled() is False
     bar._on_run_clicked()
@@ -132,13 +132,13 @@ def test_compact_swaps_the_stage_row_for_a_menu_button(qtbot) -> None:
     assert bar.stages_button().text() == "stages 4/5 ▾"
 
 
-def test_compact_shortens_the_selection_wording(qtbot) -> None:
+def test_compact_shortens_the_count_wording(qtbot) -> None:
     bar = _bar(qtbot)
-    bar.set_selection_count(2)
+    bar.set_run_count(2)
 
-    assert "2 cells selected" in bar._selection_label.text()
+    assert "2 cells checked" in bar._count_label.text()
     bar.set_compact(True)
-    assert bar._selection_label.text() == "2 selected"
+    assert bar._count_label.text() == "2 checked"
 
 
 def _hosted_bar(qtbot) -> tuple[QWidget, RunBar]:
@@ -503,7 +503,7 @@ def test_elided_label_keeps_the_whole_string_for_the_tooltip(qtbot) -> None:
 
 def test_bar_never_blocks_the_window_floor(qtbot) -> None:
     bar = _bar(qtbot)
-    bar.set_selection_count(12)
+    bar.set_run_count(12)
     bar.set_recipe_choices([("rc", "A recipe with a fairly long display name")])
 
     assert bar.minimumSizeHint().width() <= 320

@@ -1,4 +1,4 @@
-"""The Cells screen: one row per DUT, select some, run them.
+"""The Cells screen: one row per DUT, tick some, run them.
 
 This is where the user spends most of the session, so it is one table and
 nothing else. Artboards ``1a`` (populated), ``1b`` (a run in flight),
@@ -12,6 +12,33 @@ the expanded rows -- so every line on screen is a literal thing that will
 run, not a template whose output moves when a list elsewhere grows an
 element. The old Tasks tab's generator-plus-preview pair is exactly what
 :mod:`auto_ext.model.cells` was written to delete.
+
+The check column is the run set
+------------------------------
+Two questions get asked of this table and they are not the same question:
+*which rows am I pointing at* (edit, duplicate, remove, park, export) and
+*which rows do I want to run*. The highlight answers the first, the
+checkboxes answer the second, and nothing writes across.
+
+Until 2026-09-04 they were one thing: :meth:`CellsScreen._on_selection_changed`
+repainted the whole check column from the selection, and clicking a box
+selected its row. The column therefore carried no information -- it was the
+highlight drawn twice -- and because a plain left click is
+``ClearAndSelect``, opening a row or double-clicking one to retype its cell
+name silently emptied a batch the user had built one box at a time. That is
+the defect this split fixes; the run set now survives clicks, edits, the
+filter, a rename (the tick travels with the row) and the run itself.
+
+What that costs is that ticking has to be reachable four ways, because a
+26px box is not a batch-building tool: the box itself, **Space** on every
+highlighted row (so ``Ctrl+A`` then ``Space`` is "run everything"), the
+check-all box in the header (:class:`CheckHeader`, visible rows only), and
+the context menu's *Check rows* / *Clear all checks*.
+
+:meth:`CellsScreen.run_keys` -- ticked *and* not parked -- is the one answer
+to "what would Run run": :meth:`~CellsScreen.run_request` builds from it and
+the run bar counts it, so the number on the button is the number of cells
+that will start.
 
 Column modes
 ------------
@@ -92,11 +119,12 @@ from PyQt5.QtCore import (
     QItemSelection,
     QItemSelectionModel,
     QPoint,
+    QRect,
     Qt,
     QTimer,
     pyqtSignal,
 )
-from PyQt5.QtGui import QBrush, QColor, QFont, QPalette
+from PyQt5.QtGui import QBrush, QColor, QFont, QKeySequence, QPalette
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QAction,
@@ -114,6 +142,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QStyle,
     QStyledItemDelegate,
+    QStyleOptionButton,
     QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
@@ -144,6 +173,7 @@ __all__ = [
     "COL_OUT_VIEW",
     "COL_VIEWS",
     "CellsScreen",
+    "CheckHeader",
     "EMPTY_STATE_WIDTH",
     "MODE_COMPACT",
     "MODE_RUNNING",
@@ -428,6 +458,106 @@ class RecipeDelegate(StatusColorDelegate):
             self._screen.set_recipe_binding(key, data if isinstance(data, str) else None)
 
 
+class CheckHeader(QHeaderView):
+    """The header of the check column, with a check-all box in it.
+
+    The check column is the run set (see the module docstring), so it needs
+    the one control every check column has: a box in the header that checks
+    everything, clears everything, and shows ``partial`` in between. Without
+    it "run all 40 rows" is forty clicks, and there is nothing on screen that
+    says the column is a set the user builds rather than a redraw of the
+    selection highlight.
+
+    Qt has no such thing, so it is painted here: ``paintSection`` draws the
+    ordinary section first (the stylesheet still owns the background) and
+    then a check indicator centred in it, and a press inside that section is
+    consumed rather than being passed on as a sort/resize gesture.
+    """
+
+    check_all_requested = pyqtSignal(bool)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(Qt.Horizontal, parent)
+        self._check_state = Qt.Unchecked
+        self._check_shown = True
+
+    def check_state(self) -> int:
+        return self._check_state
+
+    def set_check_state(self, state: int) -> None:
+        if state == self._check_state:
+            return
+        self._check_state = state
+        self.updateSection(COL_CHECK)
+
+    def set_check_shown(self, shown: bool) -> None:
+        """Hide the box while a run is in flight -- the column is glyphs then."""
+
+        if bool(shown) == self._check_shown:
+            return
+        self._check_shown = bool(shown)
+        self.updateSection(COL_CHECK)
+
+    def is_check_shown(self) -> bool:
+        return self._check_shown
+
+    def _indicator_rect(self, rect: QRect) -> QRect:
+        style = self.style()
+        option = QStyleOptionButton()
+        option.initFrom(self)
+        side = min(
+            style.pixelMetric(QStyle.PM_IndicatorWidth, option, self),
+            rect.width() - 2,
+            rect.height() - 2,
+        )
+        side = max(side, 1)
+        return QRect(
+            rect.x() + (rect.width() - side) // 2,
+            rect.y() + (rect.height() - side) // 2,
+            side,
+            side,
+        )
+
+    def paintSection(self, painter, rect, logical_index) -> None:  # noqa: N802
+        super().paintSection(painter, rect, logical_index)
+        if logical_index != COL_CHECK or not self._check_shown:
+            return
+        option = QStyleOptionButton()
+        option.initFrom(self)
+        option.rect = self._indicator_rect(rect)
+        option.state = QStyle.State_Enabled
+        if self._check_state == Qt.Checked:
+            option.state |= QStyle.State_On
+        elif self._check_state == Qt.PartiallyChecked:
+            option.state |= QStyle.State_NoChange
+        else:
+            option.state |= QStyle.State_Off
+        # The clip, or nothing appears. Once any stylesheet is in force --
+        # this screen sets one -- the painter reaches ``paintSection`` with
+        # an *empty* clip region: QStyleSheetStyle installs its own clip
+        # around the section it draws and hands the painter on without one,
+        # so ``super()`` paints and everything after it is clipped away. It
+        # fails silently and only on the styled screen, which is why the
+        # test below asserts pixels rather than state.
+        painter.save()
+        painter.setClipRect(rect)
+        self.style().drawPrimitive(
+            QStyle.PE_IndicatorCheckBox, option, painter, self
+        )
+        painter.restore()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if (
+            self._check_shown
+            and event.button() == Qt.LeftButton
+            and self.logicalIndexAt(event.pos()) == COL_CHECK
+        ):
+            self.check_all_requested.emit(self._check_state != Qt.Checked)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class _EmptyState(QWidget):
     """The guidance panel of artboard ``1i``.
 
@@ -563,6 +693,7 @@ class CellsScreen(QWidget):
 
     cells_changed = pyqtSignal(object)
     selection_changed = pyqtSignal(object)
+    checked_changed = pyqtSignal(object)
     run_requested = pyqtSignal(object)
     run_finished = pyqtSignal(object)
     import_requested = pyqtSignal()
@@ -588,6 +719,10 @@ class CellsScreen(QWidget):
         self._statuses: dict[str, RowStatus] = {}
         self._recipe_choices: list[tuple[str, str]] = []
         self._row_keys: list[str] = []
+        #: The run set. Independent of the selection highlight -- see the
+        #: module docstring. Only the check column, the header box, Space
+        #: and the context menu write to it.
+        self._checked: set[str] = set()
         self._mode = MODE_WIDE
         self._idle_mode = MODE_WIDE
         self._compact_toolbar = False
@@ -698,6 +833,10 @@ class CellsScreen(QWidget):
     def _build_table(self) -> QTableWidget:
         table = QTableWidget(0, len(COLUMN_TITLES), self)
         table.setObjectName(OBJ_TABLE)
+        # Before the labels: setHorizontalHeader keeps the model's header
+        # data, but the section sizes below are set on whichever header the
+        # table ends up owning.
+        table.setHorizontalHeader(CheckHeader(table))
         table.setHorizontalHeaderLabels(list(COLUMN_TITLES))
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -729,9 +868,20 @@ class CellsScreen(QWidget):
         rows.setSectionResizeMode(QHeaderView.Fixed)
         rows.setDefaultSectionSize(theme.ROW_HEIGHT)
 
+        header.check_all_requested.connect(self._on_check_all_requested)
+
         table.itemChanged.connect(self._on_item_changed)
         table.itemSelectionChanged.connect(self._on_selection_changed)
         table.customContextMenuRequested.connect(self._on_context_menu)
+
+        # Space checks (or unchecks) every highlighted row: the bridge
+        # between "the rows I am pointing at" and "the rows I will run",
+        # and the only reason a 40-row batch is not 40 clicks on 26px
+        # boxes. An event filter rather than a QShortcut, because a
+        # shortcut is dispatched through the application's shortcut map
+        # and needs the window to be active -- while a cell editor, being
+        # a child widget, keeps its own spaces either way.
+        table.installEventFilter(self)
         return table
 
     @property
@@ -792,6 +942,7 @@ class CellsScreen(QWidget):
 
     def _reload_table(self) -> None:
         selected = set(self.selected_keys())
+        self._checked &= set(self._book.keys)
         self._syncing = True
         try:
             self._table.clearContents()
@@ -805,6 +956,7 @@ class CellsScreen(QWidget):
         self._apply_filter(self._filter.text())
         if selected:
             self.set_selected_keys([k for k in self._row_keys if k in selected])
+        self._refresh_header_check()
         self._refresh_empty_state()
         self._refresh_run_bar()
 
@@ -821,7 +973,7 @@ class CellsScreen(QWidget):
             check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         else:
             check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-            check.setCheckState(Qt.Unchecked)
+            check.setCheckState(Qt.Checked if key in self._checked else Qt.Unchecked)
         self._table.setItem(row, COL_CHECK, check)
 
         values = {
@@ -924,6 +1076,15 @@ class CellsScreen(QWidget):
         if watched is self._table.viewport() and event.type() == QEvent.Resize:
             if self._empty.isVisible():
                 self._empty.setGeometry(self._table.viewport().rect())
+        if (
+            watched is self._table
+            and event.type() == QEvent.KeyPress
+            and event.key() in (Qt.Key_Space, Qt.Key_Select)
+            and not event.modifiers()
+            and self._table.state() != QAbstractItemView.EditingState
+        ):
+            self.toggle_checks_on_selection()
+            return True
         return super().eventFilter(watched, event)
 
     def focus_column_for(self, option_key: str) -> bool:
@@ -993,7 +1154,6 @@ class CellsScreen(QWidget):
         )
 
     def _repaint_check_column(self) -> None:
-        selected = set(self.selected_keys())
         self._syncing = True
         try:
             for row, key in enumerate(self._row_keys):
@@ -1018,9 +1178,12 @@ class CellsScreen(QWidget):
                     item.setFlags(
                         Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
                     )
-                    item.setCheckState(Qt.Checked if key in selected else Qt.Unchecked)
+                    item.setCheckState(
+                        Qt.Checked if key in self._checked else Qt.Unchecked
+                    )
         finally:
             self._syncing = False
+        self._refresh_header_check()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
@@ -1063,19 +1226,30 @@ class CellsScreen(QWidget):
         )
 
     def _on_selection_changed(self) -> None:
+        """The highlight moved. It says nothing about what will run.
+
+        Repainting the check column from here is exactly the defect this
+        screen shipped with until 2026-09-04: a plain left click is
+        ``ClearAndSelect``, so opening a row -- or double-clicking one to
+        retype its cell name -- threw away a batch the user had spent
+        forty clicks building. The two things are separate now; the only
+        thing the highlight still drives is which rows Duplicate, Remove,
+        Enable/Disable and Export act on.
+        """
+
         if self._syncing:
             return
-        self._repaint_check_column()
         self._refresh_run_bar()
         self.selection_changed.emit(self.selected_keys())
 
     def _refresh_run_bar(self) -> None:
-        keys = self.selected_keys()
-        self.run_bar.set_selection_count(len(keys))
+        run_keys = self.run_keys()
+        self.run_bar.set_run_count(len(run_keys))
         bindings = self.recipe_bindings()
-        distinct = {bindings.get(key) for key in keys}
+        distinct = {bindings.get(key) for key in run_keys}
         distinct.discard(None)
         self.run_bar.set_per_row_summary(len(distinct))
+        keys = self.selected_keys()
         has_rows = bool(self._row_keys)
         self._buttons["duplicate"].setEnabled(bool(keys))
         self._buttons["remove"].setEnabled(bool(keys))
@@ -1084,6 +1258,97 @@ class CellsScreen(QWidget):
         if not has_rows:
             self._buttons["duplicate"].setEnabled(False)
             self._buttons["remove"].setEnabled(False)
+
+    # ---- the run set -----------------------------------------------------
+
+    def checked_keys(self) -> tuple[str, ...]:
+        """Every ticked row, in table order.
+
+        Table order, not click order, because ``_recipe_batches`` groups the
+        dispatch by first appearance and a batch that reordered itself
+        depending on which box was clicked first would make two identical
+        run sets produce two different log orders.
+        """
+
+        return tuple(key for key in self._row_keys if key in self._checked)
+
+    def run_keys(self) -> tuple[str, ...]:
+        """What pressing Run would actually run: ticked *and* not parked.
+
+        The run bar counts these, so ``Run 3 cells`` is three cells. It used
+        to count the highlight, which meant the number on the button
+        included rows that ``run_request`` then dropped for being disabled.
+        """
+
+        return tuple(key for key in self.checked_keys() if self._book.entry(key).enabled)
+
+    def set_checked_keys(self, keys: Iterable[str]) -> None:
+        """Replace the run set with exactly ``keys`` (the ones that exist)."""
+
+        wanted = {key for key in keys if key in set(self._row_keys)}
+        if wanted == self._checked:
+            return
+        self._checked = wanted
+        self._repaint_check_column()
+        self._refresh_run_bar()
+        self.checked_changed.emit(self.checked_keys())
+
+    def set_checked_for(self, keys: Iterable[str], checked: bool) -> None:
+        """Tick or clear ``keys``, leaving every other row alone."""
+
+        wanted = {key for key in keys if key in set(self._row_keys)}
+        if not wanted:
+            return
+        updated = self._checked | wanted if checked else self._checked - wanted
+        self.set_checked_keys(updated)
+
+    def toggle_checks_on_selection(self) -> None:
+        """Space: tick every highlighted row, or clear them if all are ticked."""
+
+        if self._worker is not None:
+            return
+        keys = self.selected_keys()
+        if not keys:
+            return
+        self.set_checked_for(keys, not all(key in self._checked for key in keys))
+
+    def clear_checks(self) -> None:
+        self.set_checked_keys(())
+
+    def check_all(self) -> None:
+        """Tick every row the filter is showing.
+
+        Visible rows only: with a filter typed, "check all" that also ticked
+        the rows it is hiding would build a batch the user cannot see.
+        """
+
+        self.set_checked_for(self.visible_keys(), True)
+
+    def _header_check_state(self) -> int:
+        rows = self.visible_keys()
+        if not rows:
+            return Qt.Unchecked
+        ticked = sum(1 for key in rows if key in self._checked)
+        if ticked == 0:
+            return Qt.Unchecked
+        if ticked == len(rows):
+            return Qt.Checked
+        return Qt.PartiallyChecked
+
+    def _refresh_header_check(self) -> None:
+        header = self._table.horizontalHeader()
+        if not isinstance(header, CheckHeader):
+            return
+        header.set_check_shown(self._mode != MODE_RUNNING)
+        header.set_check_state(self._header_check_state())
+
+    def _on_check_all_requested(self, check: bool) -> None:
+        if self._worker is not None:
+            return
+        if check:
+            self.check_all()
+        else:
+            self.set_checked_for(self.visible_keys(), False)
 
     # ---- editing ---------------------------------------------------------
 
@@ -1100,24 +1365,26 @@ class CellsScreen(QWidget):
         self._commit_edit(item.row(), field_name, item.text().strip())
 
     def _on_check_toggled(self, item: QTableWidgetItem) -> None:
-        row = item.row()
+        """One box clicked. It moves the run set and nothing else.
+
+        In particular it does not touch the selection: clicking a box used
+        to select the row too, so a box was both halves of a coupling that
+        no longer exists.
+        """
+
+        key = self.key_at_row(item.row())
+        if key is None:
+            return
         checked = item.checkState() == Qt.Checked
-        already = row in {index.row() for index in self._table.selectedIndexes()}
-        if checked == already:
+        if (key in self._checked) == checked:
             return
-        model = self._table.selectionModel()
-        if model is None:
-            return
-        flag = QItemSelectionModel.Select if checked else QItemSelectionModel.Deselect
-        self._syncing = True
-        try:
-            model.select(
-                self._table.model().index(row, 0), flag | QItemSelectionModel.Rows
-            )
-        finally:
-            self._syncing = False
+        if checked:
+            self._checked.add(key)
+        else:
+            self._checked.discard(key)
+        self._refresh_header_check()
         self._refresh_run_bar()
-        self.selection_changed.emit(self.selected_keys())
+        self.checked_changed.emit(self.checked_keys())
 
     def _commit_edit(self, row: int, field_name: str, value: str) -> None:
         """Apply one in-place edit, or put the old text back and say why.
@@ -1160,6 +1427,11 @@ class CellsScreen(QWidget):
         if replacement.key != key:
             if key in self._statuses:
                 self._statuses[replacement.key] = self._statuses.pop(key)
+            # The tick belongs to the row, not to the spelling of its key:
+            # retyping a cell name must not quietly drop it out of the batch.
+            if key in self._checked:
+                self._checked.discard(key)
+                self._checked.add(replacement.key)
         self._apply_book(book)
 
     # ---- row commands ----------------------------------------------------
@@ -1234,6 +1506,7 @@ class CellsScreen(QWidget):
         remaining = [entry for entry in self._book if entry.key not in keys]
         for key in keys:
             self._statuses.pop(key, None)
+            self._checked.discard(key)
         self._apply_book(
             CellBook(schema_version=self._book.schema_version, cells=remaining)
         )
@@ -1364,6 +1637,17 @@ class CellsScreen(QWidget):
         self._filter.setText(text)
 
     def _apply_filter(self, text: str) -> None:
+        """Hide the rows that do not match. A view, never a selector.
+
+        The filter does not touch the run set: a ticked row that scrolls out
+        of the filter still runs. That is the honest half of a defect this
+        used to have both halves of -- ``selectedIndexes()`` skips hidden
+        rows, so filtering silently shrank a run the button was still
+        offering to make ("Run 3 cells" dispatching one). Now the button
+        counts the ticks, which the filter cannot move, and the hidden ones
+        are said out loud instead of being dropped.
+        """
+
         needle = text.strip().lower()
         for row, key in enumerate(self._row_keys):
             if not needle:
@@ -1382,6 +1666,22 @@ class CellsScreen(QWidget):
                 )
             ).lower()
             self._table.setRowHidden(row, needle not in haystack)
+        self._refresh_header_check()
+        hidden = self.hidden_checked_count()
+        if hidden:
+            noun = "cell" if hidden == 1 else "cells"
+            self.status_message.emit(
+                f"filter hides {hidden} checked {noun} — they are still in the run"
+            )
+
+    def hidden_checked_count(self) -> int:
+        """Ticked rows the filter is currently hiding. They still run."""
+
+        return sum(
+            1
+            for row, key in enumerate(self._row_keys)
+            if key in self._checked and self._table.isRowHidden(row)
+        )
 
     def visible_keys(self) -> tuple[str, ...]:
         return tuple(
@@ -1437,6 +1737,23 @@ class CellsScreen(QWidget):
         menu.addAction(act_toggle)
 
         menu.addSeparator()
+        all_checked = all(key in self._checked for key in keys) if keys else False
+        act_check = QAction("Uncheck rows" if all_checked else "Check rows", menu)
+        act_check.setEnabled(bool(keys) and not running)
+        act_check.setShortcut(QKeySequence(Qt.Key_Space))
+        act_check.triggered.connect(
+            lambda _checked=False, keys=keys, on=not all_checked: self.set_checked_for(
+                keys, on
+            )
+        )
+        menu.addAction(act_check)
+
+        act_clear = QAction("Clear all checks", menu)
+        act_clear.setEnabled(bool(self._checked) and not running)
+        act_clear.triggered.connect(lambda _checked=False: self.clear_checks())
+        menu.addAction(act_clear)
+
+        menu.addSeparator()
         act_export = QAction("Export GDS…", menu)
         act_export.setEnabled(bool(keys) and not running)
         act_export.setToolTip(
@@ -1465,7 +1782,7 @@ class CellsScreen(QWidget):
     def run_request(self) -> RunRequest:
         """What pressing Run right now would ask for."""
 
-        keys = tuple(k for k in self.selected_keys() if self._book.entry(k).enabled)
+        keys = self.run_keys()
         return RunRequest(
             keys=keys,
             stages=self.run_bar.selected_stages(),

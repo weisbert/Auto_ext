@@ -413,7 +413,9 @@ def test_the_run_bars_follow_checkbox_drives_the_viewer(
     assert window.log_view.follows() is True
 
 
-def test_a_rerun_request_navigates_to_the_cell(loaded_window: MainWindow) -> None:
+def test_a_rerun_request_navigates_to_the_cell_and_arms_it(
+    loaded_window: MainWindow,
+) -> None:
     window = loaded_window
     window.shell.set_current_page("runs")
     key = window.controller.cells.cells[0].key
@@ -425,6 +427,11 @@ def test_a_rerun_request_navigates_to_the_cell(loaded_window: MainWindow) -> Non
 
     assert window.shell.current_page_key() == "cells"
     assert window.cells_screen.selected_keys() == (key,)
+    # Ticked as well as highlighted: since the two came apart, arriving with
+    # only a highlight would leave the Run button dead on the screen the
+    # user was sent to in order to press it.
+    assert window.cells_screen.checked_keys() == (key,)
+    assert window.cells_screen.run_bar.run_button_text() == "Run 1 cell"
 
 
 # ---- the setup drawer -------------------------------------------------------

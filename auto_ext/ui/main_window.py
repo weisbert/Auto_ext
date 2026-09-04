@@ -218,6 +218,7 @@ class MainWindow(QMainWindow):
         cells.open_log_requested.connect(self._open_path)
         cells.run_bar.follow_changed.connect(self._log_view.set_follow)
         cells.selection_changed.connect(self._on_cells_selection_changed)
+        cells.checked_changed.connect(self._on_cells_checked_changed)
 
         recipes = self._recipes
         # Every edit reaches the controller, not only the ones Save is pressed
@@ -414,21 +415,43 @@ class MainWindow(QMainWindow):
         self._shell.set_status(left="idle")
 
     def _on_cells_selection_changed(self, keys: object) -> None:
+        """The highlight. Reported only while nothing is ticked.
+
+        Once there are ticked rows the status line owes the user the number
+        that the Run button is about to act on, not the number of rows the
+        last click happened to land on.
+        """
+
+        if self._cells.checked_keys():
+            self._on_cells_checked_changed(self._cells.checked_keys())
+            return
         count = len(tuple(keys or ()))
         self._shell.set_status(
             left="idle" if count == 0 else f"{count} cell(s) selected"
         )
 
+    def _on_cells_checked_changed(self, keys: object) -> None:
+        count = len(tuple(keys or ()))
+        if count == 0:
+            self._on_cells_selection_changed(self._cells.selected_keys())
+            return
+        self._shell.set_status(left=f"{count} cell(s) checked")
+
     def _on_rerun_requested(self, entry: object) -> None:
-        """Send the user back to Cells with that run's cell selected.
+        """Send the user back to Cells with that run's cell ticked and shown.
 
         The Runs screen owns no queue, so this is a navigation, not a
-        dispatch: the Run button stays the one place a run starts.
+        dispatch: the Run button stays the one place a run starts. But
+        "re-run this" is a statement about what to run, so it lands in the
+        run set -- ticked, and *only* it, so the button reads "Run 1 cell"
+        rather than adding a row to whatever batch was already there. It is
+        highlighted too, which is how the user finds it in the table.
         """
 
         key = getattr(entry, "task_id", None) or getattr(entry, "cell", None)
         if isinstance(key, str) and key:
             self._cells.set_selected_keys([key])
+            self._cells.set_checked_keys([key])
         self._shell.set_current_page("cells")
 
     # ---- recipe slots ----------------------------------------------------

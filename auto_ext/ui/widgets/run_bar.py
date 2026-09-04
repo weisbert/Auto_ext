@@ -384,7 +384,7 @@ class RunBar(QFrame):
         self.setObjectName(OBJ_RUN_BAR)
         self.setFrameShape(QFrame.NoFrame)
 
-        self._selection_count = 0
+        self._run_count = 0
         self._per_row_summary = 0
         self._compact = False
         self._running = False
@@ -432,8 +432,8 @@ class RunBar(QFrame):
         left.addStretch(1)
         root.addLayout(left, 1)
 
-        self._selection_label = QLabel(idle)
-        self._selection_label.setObjectName(OBJ_RUN_SELECTION)
+        self._count_label = QLabel(idle)
+        self._count_label.setObjectName(OBJ_RUN_SELECTION)
         self._dot = QLabel(theme.STATUS_GLYPH["pending"], idle)
         self._dot.setObjectName(OBJ_RUN_HINT)
         self._recipe_caption = QLabel("recipe for this run", idle)
@@ -583,7 +583,7 @@ class RunBar(QFrame):
                 widget.hide()
             self._stages_button.show()
             self._row2_holder.hide()
-            self._row1.addWidget(self._selection_label)
+            self._row1.addWidget(self._count_label)
             self._row1.addWidget(self._recipe_combo)
             self._row1.addWidget(self._sep3)
             self._sep3.show()
@@ -597,7 +597,7 @@ class RunBar(QFrame):
             self._stages_button.hide()
             self._sep3.hide()
             self._row2_holder.show()
-            self._row1.addWidget(self._selection_label)
+            self._row1.addWidget(self._count_label)
             self._row1.addWidget(self._dot)
             self._row1.addWidget(self._recipe_caption)
             self._row1.addWidget(self._recipe_combo)
@@ -629,23 +629,26 @@ class RunBar(QFrame):
         if self.auto_compact:
             self.set_compact(event.size().width() < RUN_BAR_COMPACT_BELOW)
 
-    # ---- selection / run button ----------------------------------------
+    # ---- run set / run button ------------------------------------------
 
-    def set_selection_count(self, count: int) -> None:
-        self._selection_count = max(int(count), 0)
+    def set_run_count(self, count: int) -> None:
+        """How many cells pressing Run would run. Ticked rows, not the
+        highlight -- the two stopped being the same thing on 2026-09-04."""
+
+        self._run_count = max(int(count), 0)
         self._refresh_idle_text()
 
-    def selection_count(self) -> int:
-        return self._selection_count
+    def run_count(self) -> int:
+        return self._run_count
 
     def _refresh_idle_text(self) -> None:
-        count = self._selection_count
+        count = self._run_count
         if self._compact:
-            self._selection_label.setText(f"{count} selected")
+            self._count_label.setText(f"{count} checked")
         else:
             noun = "cell" if count == 1 else "cells"
-            self._selection_label.setText(f"{count} {noun} selected")
-        self._selection_label.setEnabled(count > 0)
+            self._count_label.setText(f"{count} {noun} checked")
+        self._count_label.setEnabled(count > 0)
         if count:
             noun = "cell" if count == 1 else "cells"
             self._run_button.setText(f"Run {count} {noun}")
@@ -660,7 +663,7 @@ class RunBar(QFrame):
         return self._run_button
 
     def _on_run_clicked(self) -> None:
-        if self._selection_count and self.selected_stages():
+        if self._run_count and self.selected_stages():
             self.run_requested.emit()
 
     # ---- recipe override -------------------------------------------------
