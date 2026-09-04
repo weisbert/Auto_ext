@@ -599,6 +599,32 @@ class StageChip(NamedTuple):
     tooltip: str
 
 
+#: ``StageRecord.details`` key holding the outputs a stage declared and did
+#: not write. Same string as
+#: :data:`auto_ext.tools.base.MISSING_ARTIFACTS_KEY`, spelled here rather than
+#: imported because this module reads run records and must not grow an import
+#: edge into the tool plugins.
+DETAILS_MISSING_ARTIFACTS_KEY = "missing_artifacts"
+
+
+def missing_artifacts(stage: StageRecord) -> list[str]:
+    """Outputs ``stage`` declared and never wrote, in the order declared.
+
+    ``Tool.with_artifacts`` files these under
+    ``diagnostics["missing_artifacts"]`` and deliberately leaves
+    ``ToolResult.success`` alone -- the tool really did exit 0, and a record
+    that claimed otherwise would be inventing a failure. So the fact arrives
+    here attached to a *passed* stage, and it is this card's job to stop that
+    reading as a clean run: quantus exiting 0 with no DSPF is not a pass in
+    any sense the user cares about.
+    """
+
+    raw = (stage.details or {}).get(DETAILS_MISSING_ARTIFACTS_KEY)
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if str(item)]
+
+
 _STAGE_TONE: dict[str, str] = {
     str(StageStatus.PASSED): CHIP_TONE_PASSED,
     str(StageStatus.FAILED): CHIP_TONE_FAILED,
@@ -650,6 +676,10 @@ def stage_chips(record: RunRecord) -> list[StageChip]:
     for name in listed:
         stage = worst[name]
         status = str(stage.status)
+        # Every key of this tool, not just the worst one: a recipe emitting
+        # both quantus forms can lose the DSPF while the extracted view lands.
+        absent = [m for s in record.stages if s.stage == name for m in missing_artifacts(s)]
+        tone = _STAGE_TONE.get(status, CHIP_TONE_MUTED)
         if status == str(StageStatus.SKIPPED):
             reason = stage.skip_reason or "skipped"
             text = f"{name} {theme.STATUS_GLYPH['skipped']} {reason}"
@@ -663,17 +693,28 @@ def stage_chips(record: RunRecord) -> list[StageChip]:
             tooltip_bits.append(f"exit code {stage.exit_code}")
         if stage.error:
             tooltip_bits.append(stage.error)
+        if absent and status != str(StageStatus.FAILED):
+            # The glyph stays: the tool did exit 0, and pretending it failed
+            # would be a second wrong answer. The amber and the words carry
+            # the caveat, because "passed" alone is what sends the user away
+            # believing there is a DSPF to hand to the simulator.
+            text = f"{text} output missing"
+            tone = CHIP_TONE_WARNING
+            tooltip_bits.append(
+                f"{name} exited 0 but never wrote {len(absent)} declared "
+                f"output(s): " + ", ".join(absent)
+            )
         chips.append(
             StageChip(
                 stage=name,
                 text=text,
-                tone=_STAGE_TONE.get(status, CHIP_TONE_MUTED),
+                tone=tone,
                 tooltip=" - ".join(tooltip_bits),
             )
         )
 
     if not requested:
-        return chips
+        return chips or [_nothing_ran_chip()]
 
     for name in CANONICAL_STAGES:
         if name in worst:
@@ -685,7 +726,30 @@ def stage_chips(record: RunRecord) -> list[StageChip]:
             text = f"{name} {theme.STATUS_GLYPH['skipped']} off in recipe"
             tip = "The recipe did not include this stage."
         chips.append(StageChip(stage=name, text=text, tone=CHIP_TONE_MUTED, tooltip=tip))
-    return chips
+    return chips or [_nothing_ran_chip()]
+
+
+def _nothing_ran_chip() -> StageChip:
+    """The one chip a run with no stages at all gets.
+
+    A record whose ``stages`` and ``requested_stages`` are both empty drew no
+    chips whatsoever, which under a green PASSED badge reads as a run that
+    went fine. It is the opposite: the requested stages and the recipe's did
+    not intersect, so nothing was attempted and nothing was checked. The
+    runner refuses that dispatch now, but records written before it do not
+    disappear from the history.
+    """
+
+    return StageChip(
+        stage="",
+        text=f"no stage ran {theme.STATUS_GLYPH['skipped']}",
+        tone=CHIP_TONE_WARNING,
+        tooltip=(
+            "This run executed no stage at all, so its verdict says nothing "
+            "about the cell. The stages that were asked for are not in the "
+            "recipe this run used."
+        ),
+    )
 
 
 def stop_reason_text(record: RunRecord) -> str:
@@ -1550,12 +1614,35 @@ class ResultCard(QWidget):
                 tooltip_bits.append(f"exit code {stage.exit_code}")
             if tooltip_bits:
                 item.setToolTip(1, "\n".join(tooltip_bits))
+            absent = missing_artifacts(stage)
+            if absent:
+                # Say it on the stage row too: the strip's chip is a summary,
+                # and this table is where the user looks for which file.
+                item.setToolTip(
+                    1,
+                    "\n".join(
+                        [
+                            *tooltip_bits,
+                            f"declared but never written: {', '.join(absent)}",
+                        ]
+                    ),
+                )
             for artifact in stage.artifacts:
                 child = QTreeWidgetItem([Path(artifact).name, "artifact", "", artifact])
                 child.setData(0, _ROLE_KIND, _KIND_ARTIFACT)
                 child.setData(0, _ROLE_PATH, artifact)
                 child.setForeground(1, QColor(COLOR_MUTED))
                 child.setToolTip(0, artifact)
+                item.addChild(child)
+            for gone in absent:
+                # No ``_ROLE_PATH``: there is nothing to open, and a row that
+                # opened a file-not-found dialog would be a third wrong answer.
+                child = QTreeWidgetItem([Path(gone).name, "never written", "", gone])
+                child.setData(0, _ROLE_KIND, _KIND_ARTIFACT)
+                child.setForeground(1, QColor(COLOR_WARN))
+                child.setToolTip(
+                    0, f"{stage.key} declared this output and did not write it: {gone}"
+                )
                 item.addChild(child)
             tree.addTopLevelItem(item)
 
@@ -2028,15 +2115,88 @@ class ResultCard(QWidget):
 
     # ---- outputs ------------------------------------------------------
 
+    #: The project the session currently has open, as
+    #: ``(config_dir, workarea)``. Class-level so the card works without it:
+    #: a host that never calls :meth:`set_session_project` still gets the
+    #: identity rows, just not the "another project" marking. Set by the host,
+    #: because the card is handed one run at a time and has no other way to
+    #: know which project the window is on.
+    _session_project: tuple[Path | None, Path | None] = (None, None)
+
+    def set_session_project(
+        self,
+        *,
+        config_dir: Path | str | None = None,
+        workarea: Path | str | None = None,
+    ) -> None:
+        """Tell the card which project is open, so it can flag foreign runs.
+
+        One ``runs/`` root serves every project opened against an Auto_ext
+        installation, so the history lists project A's runs next to project
+        B's. Selecting B's while A is open used to offer B's output directory
+        as an ordinary openable row with nothing saying whose it was.
+        """
+
+        self._session_project = (
+            Path(config_dir) if config_dir else None,
+            Path(workarea) if workarea else None,
+        )
+        if self._record is not None:
+            self._fill_artifacts()
+
+    def _run_is_foreign(self) -> bool:
+        """True when this run belongs to a project other than the open one.
+
+        Compared on whichever identity both sides carry -- the config dir
+        first, since that *is* the project, and the workarea as the fallback
+        for records written before ``config_dir`` existed. An unknown session
+        project (no host wiring) or an unknown run project is not evidence of
+        a mismatch, so it reports False: this marking must never cry wolf.
+        """
+
+        record = self._record
+        if record is None:
+            return False
+        session_config, session_workarea = self._session_project
+        for mine, theirs in (
+            (session_config, record.config_dir),
+            (session_workarea, record.workarea),
+        ):
+            if mine is None or not theirs:
+                continue
+            return Path(theirs) != Path(mine)
+        return False
+
     def _fill_artifacts(self) -> None:
         record = self._record
         assert record is not None
         _clear_layout(self._artifacts_layout)
         row = 0
 
+        foreign = self._run_is_foreign()
+        suffix = " (another project)" if foreign else ""
+        foreign_reason = (
+            "This run was launched from a different project than the one open "
+            "now, so every path on this card points into that project's tree."
+        )
+        if record.config_dir:
+            row = self._add_output_row(
+                row,
+                "project" + suffix,
+                record.config_dir,
+                reason=foreign_reason if foreign else "",
+            )
+        if record.workarea:
+            row = self._add_output_row(
+                row,
+                "workarea" + suffix,
+                record.workarea,
+                reason=foreign_reason if foreign else "",
+            )
+
         row = self._add_output_row(
             row,
-            "output dir",
+            "output dir" + suffix,
             record.workspace_dir,
             open_path=Path(record.workspace_dir),
         )
@@ -2076,14 +2236,47 @@ class ResultCard(QWidget):
                     row, label, relative, open_path=path if path.is_file() else None
                 )
 
+        never_written = self._never_written()
         dspf = Path(record.dspf_path) if record.dspf_path else None
         if dspf is not None:
-            row = self._add_output_row(row, "dspf", str(dspf), open_path=dspf)
+            row = self._add_output_row(
+                row,
+                "dspf",
+                str(dspf),
+                open_path=dspf,
+                reason=never_written.get(dspf, ""),
+            )
 
         if self._run_dir is not None:
             row = self._add_output_row(
                 row, "run dir", str(self._run_dir), open_path=self._run_dir
             )
+
+    def _never_written(self) -> dict[Path, str]:
+        """``{path: why}`` for outputs a stage declared and did not write.
+
+        Without this, an absent declared output falls through to the generic
+        "Not on this host" wording of :meth:`_add_output_row` -- which reads
+        as *your machine cannot see this file*, sending the user to look for
+        it on the server. The truth is the opposite and much worse: the tool
+        ran here, exited 0, and never produced it. Same missing file, opposite
+        next step.
+        """
+
+        record = self._record
+        if record is None:
+            return {}
+        out: dict[Path, str] = {}
+        for stage in record.stages:
+            for gone in missing_artifacts(stage):
+                out.setdefault(
+                    Path(gone),
+                    f"{stage.key} exited 0 and never wrote this file. It is "
+                    "declared by the input this run rendered, so the tool did "
+                    "not do what the recipe asked - read the stage log before "
+                    "trusting anything downstream of it.",
+                )
+        return out
 
     def _rendered_paths(self) -> list[tuple[str, Path, str]]:
         """``(label, absolute, run-relative)`` for every archived rendered input."""

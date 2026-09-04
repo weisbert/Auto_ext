@@ -780,6 +780,36 @@ class Recipe(Base):
             )
         return self
 
+    @model_validator(mode="after")
+    def _check_qrc_query_feeds_quantus(self) -> Recipe:
+        """Quantus reads what the LVS query trigger writes, so it must run.
+
+        ``lvs.run_qrc_query`` gates the Calibre post-trigger
+        ``calibre -query_input <deck>/query_cmd -query svdb``, which is the
+        only thing that fills ``<output_dir>/query_output``. Both Quantus
+        decks point at that directory unconditionally -- ``input_db
+        -directory_name``, ``-layer_map_file .../Design.gds.map``,
+        ``-device_properties_file .../Design.props`` -- so turning the trigger
+        off while quantus is staged sends Quantus after three files nobody
+        wrote. It does not fail early either: si and Calibre run first, and
+        the crash lands at the last stage, hours in.
+
+        The knob is refused in this combination rather than removed, because
+        its whole point is an LVS-only pass that does not pay for the
+        query_output dump; that recipe is still legal, it just may not also
+        name quantus.
+        """
+
+        if self.lvs.run_qrc_query or Stage.QUANTUS not in self.stages:
+            return self
+        raise ValueError(
+            "recipe.lvs.run_qrc_query is off while 'quantus' is in recipe.stages. "
+            "The query trigger it disables is what writes <output_dir>/query_output, "
+            "and both Quantus decks read Design.gds.map and Design.props out of "
+            "that directory. Either turn run_qrc_query back on, or drop quantus "
+            "from stages for this LVS-only recipe."
+        )
+
     # -- derived --------------------------------------------------------
 
     @property

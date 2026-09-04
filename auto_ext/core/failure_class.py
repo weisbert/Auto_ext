@@ -42,6 +42,7 @@ the table. The classifier never guesses.
 **Rule order** (first match wins)::
 
     1. render_error set                  -> ENVIRONMENT          (certain)
+    1b. precondition_error set           -> ENVIRONMENT          (certain)
     2. a declared input is missing       -> ENVIRONMENT          (certain)
     3. exit_code == 127                  -> ENVIRONMENT          (certain)
     4. LVS report parsed and not passed  -> LVS_MISMATCH         (certain)
@@ -56,6 +57,16 @@ can parse, the report *is* the answer, and a stray license message earlier
 in the same log (from a retry, say) must not overrule it. Rule 5 sits above
 rules 6 and 7 because "exited non-zero" is the symptom every failure shares
 -- a matched signature is strictly more informative.
+
+**Never send the reader to a log that does not exist.** Rules 1 and 1b fire
+for stages that failed *before* a subprocess was spawned -- a template that
+would not render, an output directory the tool refuses to create -- and rule
+8 fires for a failure nothing could name. All three would otherwise inherit a
+default next action that opens with "read the stage log", and for a stage
+whose ``log_path`` is ``None`` that is an instruction the user cannot follow.
+Those cases get :data:`NEXT_ACTION_NEVER_STARTED` and
+:data:`NEXT_ACTION_UNKNOWN_NO_LOG` instead, which name the thing that *is*
+readable: the message itself.
 """
 
 from __future__ import annotations
@@ -78,6 +89,13 @@ logger = logging.getLogger(__name__)
 
 #: Data table of log-text signatures, shipped next to this module.
 DEFAULT_SIGNATURES_PATH: Path = Path(__file__).with_name("failure_signatures.yaml")
+
+#: ``StageRecord.details`` key under which the runner files
+#: :meth:`FailureVerdict.as_dict`. The GUI reads it back from there
+#: (``auto_ext.ui.widgets.result_card.DETAILS_FAILURE_KEY``, same string) and
+#: prefers it over re-classifying, because the runner had facts -- a live
+#: ``LvsReport``, a render error -- that the record does not keep.
+DETAILS_FAILURE_KEY = "failure"
 
 #: Schema version this loader understands.
 SIGNATURES_SCHEMA_VERSION = 1
@@ -174,6 +192,28 @@ DEFAULT_NEXT_ACTIONS: dict[FailureClass, str] = {
         "next run classifies itself."
     ),
 }
+
+
+#: Next step for a stage that never got as far as spawning a process. There
+#: is no stage log for these, so the default ENVIRONMENT action -- which opens
+#: by telling the reader to read one -- would be an instruction they cannot
+#: follow. The message itself is the whole evidence, and it always names the
+#: setting or the path at fault.
+NEXT_ACTION_NEVER_STARTED = (
+    "The stage stopped before anything was launched, so there is no stage log "
+    "to read. Fix what the reason above names -- a value in the recipe, a "
+    "path in the workspace settings -- and re-run the stage."
+)
+
+#: Next step for an unclassified failure that also left no log behind. The
+#: ordinary UNKNOWN action asks the reader to quote a log line into
+#: ``failure_signatures.yaml``; with no log there is no line to quote.
+NEXT_ACTION_UNKNOWN_NO_LOG = (
+    "Auto_ext could not classify this failure, and the stage archived no log "
+    "to look into. Re-run the stage with the same recipe: if it fails the "
+    "same way, the run record's error message and argv are the whole evidence "
+    "-- attach them to the report."
+)
 
 
 def next_action_for(failure_class: FailureClass) -> str:
@@ -644,6 +684,7 @@ def classify_failure(
     exit_code: int | None = None,
     lvs: LvsReport | None = None,
     render_error: str | None = None,
+    precondition_error: str | None = None,
     missing_inputs: Iterable[Path | str] | None = None,
     missing_outputs: Iterable[Path | str] | None = None,
     unparsable_output: str | None = None,
@@ -665,6 +706,10 @@ def classify_failure(
         lvs: parsed LVS report, when the stage produced one.
         render_error: message from a template render that failed before
             any process started.
+        precondition_error: message from a check the stage refused on before
+            spawning anything -- an output directory the tool will not
+            create, a stale workspace. Like ``render_error`` it means there
+            is no stage log, so the verdict must not ask for one.
         missing_inputs: input files the stage needed and did not find.
         missing_outputs: outputs the rendered input declared that the stage
             did not produce.
@@ -690,6 +735,17 @@ def classify_failure(
             Confidence.CERTAIN,
             f"the stage input could not be rendered: {render_error}",
             evidence=render_error,
+            next_action=NEXT_ACTION_NEVER_STARTED,
+        )
+
+    # 1b. A pre-flight refused before anything was launched.
+    if precondition_error:
+        return _verdict(
+            FailureClass.ENVIRONMENT,
+            Confidence.CERTAIN,
+            precondition_error,
+            evidence=precondition_error,
+            next_action=NEXT_ACTION_NEVER_STARTED,
         )
 
     # 2. A required input was not there.
@@ -770,11 +826,13 @@ def classify_failure(
             f"the tool exited {exit_code}",
         )
 
-    # 8. Out of rules. Say so.
+    # 8. Out of rules. Say so -- and only send the reader to a log we know is
+    #    there. ``text`` is non-empty exactly when one was readable.
     return _verdict(
         FailureClass.UNKNOWN,
         Confidence.NONE,
         "no rule and no log signature matched this failure",
+        next_action=None if text else NEXT_ACTION_UNKNOWN_NO_LOG,
     )
 
 
@@ -835,10 +893,13 @@ __all__ = [
     "ASSIGNABLE_CLASSES",
     "DEFAULT_NEXT_ACTIONS",
     "DEFAULT_SIGNATURES_PATH",
+    "DETAILS_FAILURE_KEY",
     "EMPTY_TABLE",
     "LOG_ELISION_MARKER",
     "MAX_EVIDENCE_CHARS",
     "MAX_LOG_SCAN_BYTES",
+    "NEXT_ACTION_NEVER_STARTED",
+    "NEXT_ACTION_UNKNOWN_NO_LOG",
     "SIGNATURES_SCHEMA_VERSION",
     "Confidence",
     "FailureClass",

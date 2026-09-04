@@ -986,7 +986,7 @@ def test_result_card_exposes_the_ordered_groups_and_computes_them_once(
 def test_result_card_an_unclassified_failure_is_never_blank(
     qtbot, make_run_record
 ) -> None:
-    """``failure_signatures.yaml`` is empty, so this is today's common case."""
+    """Nothing matched, so the row has to say so and still offer a next step."""
 
     record = make_run_record(
         overall=TaskStatus.FAILED,
@@ -1004,7 +1004,10 @@ def test_result_card_an_unclassified_failure_is_never_blank(
 
     texts = _failure_texts(card)
     assert any("Unclassified" in t for t in texts)
-    assert any("failure_signatures.yaml" in t for t in texts)
+    # This stage archived no log, so the next step must not be "read it" and
+    # cannot be "quote its line into failure_signatures.yaml" either.
+    assert not any("failure_signatures.yaml" in t for t in texts)
+    assert any("archived no log" in t for t in texts)
     assert [b.text() for b in _failure_buttons(card)] == [
         "Open quantus.log",
         "Copy the log line",

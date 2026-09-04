@@ -390,12 +390,17 @@ def test_bundled_table_exists_and_parses() -> None:
     assert table.version == 1
 
 
-def test_bundled_table_ships_empty_on_purpose() -> None:
-    # Deliberate: no real EDA log has ever been captured into this repo, so
-    # every pattern would be invented. If you are here because you added a
-    # signature, make sure it came from a scrubbed sample (see the file
-    # header) and then update this test to assert your entry.
-    assert len(load_signatures()) == 0
+def test_bundled_table_ships_only_what_the_repo_can_cite() -> None:
+    # The table used to be empty, and for the right reason: no real EDA log
+    # has ever been captured into this repo, so a pattern for a vendor message
+    # would be invented. What ships now is the subset that needs no guess --
+    # a line auto_ext writes itself, and an error code the repo already cites
+    # -- and every entry has to say so in its note. If you are here because
+    # you added a signature, make sure it came from a scrubbed sample (see the
+    # file header), then name it here. The entries themselves are asserted in
+    # tests/core/test_failure_signatures_table.py.
+    ids = {s.id for s in load_signatures().signatures}
+    assert ids == {"auto_ext_executable_not_found", "quantus_cdl_out_map_directory"}
 
 
 def test_bundled_table_header_explains_how_to_fill_it() -> None:
