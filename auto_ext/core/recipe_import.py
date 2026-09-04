@@ -1061,13 +1061,11 @@ def _validate_degrading(
     """
 
     degraded: dict[str, str] = {}
+    # One pass per field that could conceivably be put back, and each pass
+    # handles every error pydantic reported, so the bound is generous.
     for _ in range(len(tree) + 1):
         try:
-            return _validate(tree), degraded
-        except RecipeImportError:
-            pass
-        try:
-            Recipe.model_validate(dict(tree))
+            return Recipe.model_validate(dict(tree)), degraded
         except ValidationError as exc:
             put_back = False
             for err in exc.errors():
@@ -1077,8 +1075,10 @@ def _validate_degrading(
                 degraded[path] = str(err["msg"])
                 put_back = True
             if not put_back:
-                raise
-    return _validate(tree), degraded  # pragma: no cover - the loop terminates
+                break
+    # Whatever is left is not attributable to one recovered value. Hand it to
+    # the plain builder, whose message names every field the model refused.
+    return _validate(tree), degraded
 
 
 def _field_path(loc: Sequence[Any]) -> str | None:
