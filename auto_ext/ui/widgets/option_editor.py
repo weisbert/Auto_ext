@@ -105,7 +105,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from auto_ext.catalog import Currently, OptionSpec, OptionType
+from auto_ext.catalog import Confidence, Currently, OptionSpec, OptionType
 from auto_ext.catalog.spec import Screen, Tier
 from auto_ext.ui import theme
 
@@ -272,6 +272,19 @@ _ELIDE_SLACK = 2
 #: a name missing from it renders as ``Lvs`` rather than not at all.
 _ACRONYM_GROUPS = frozenset({"lvs", "dspf", "si", "qrc", "xy"})
 
+#: What the grey hint says about a drop-down's value set, per
+#: :class:`~auto_ext.catalog.spec.Confidence`. Three sentences rather than one
+#: sentence and two silences: marking only the guessed lists meant that the
+#: twenty rows carrying no phrase could be read either as "verified" or as
+#: "nobody has labelled this one", and the form gave no way to tell which.
+#: ``guess`` keeps the promise that the field still takes anything typed into
+#: it, because that is the half of it a user acts on.
+_LIST_CONFIDENCE: Mapping[Any, str] = {
+    Confidence.CERTAIN: "confirmed list",
+    Confidence.LIKELY: "list not confirmed",
+    Confidence.GUESS: "guessed list - other values accepted",
+}
+
 #: Decimals a float field accepts. ``coupling_cap_threshold_absolute`` is 0.01
 #: with a unit the catalog itself flags as physically impossible as written,
 #: so the field must not round away a value the user typed deliberately.
@@ -321,6 +334,16 @@ def editor_kind(spec: OptionSpec) -> EditorKind:
     if spec.type is OptionType.BOOL:
         return EditorKind.CHECKBOX
     if spec.type is OptionType.ENUM:
+        if not _has_a_choice_to_make(spec):
+            # A drop-down that opens onto a single line is a text box wearing
+            # a costume: it promises a menu, delivers one entry, and hides
+            # the catalog's own open question about what else the tool takes.
+            # The project already ruled on the identical shape for lists --
+            # "with no members to draw, a text box is the honest control"
+            # (docs/refactor/UX_VALIDATION.md) -- and an enum is that claim
+            # with an arrow drawn on it. The one spelling we do know survives
+            # as the field's value, so this is honest rather than empty.
+            return EditorKind.TEXT
         return EditorKind.COMBO_FREE if spec.free_input else EditorKind.COMBO
     if spec.type in (OptionType.INT, OptionType.FLOAT):
         return EditorKind.NUMBER
@@ -333,6 +356,25 @@ def editor_kind(spec: OptionSpec) -> EditorKind:
         # combo gives an enum, for the same reason.
         return EditorKind.CHECKS if spec.choices else EditorKind.LIST
     return EditorKind.TEXT
+
+
+def _has_a_choice_to_make(spec: OptionSpec) -> bool:
+    """True when an ``enum``'s drop-down would hold two entries or more.
+
+    Counted the way the control counts them, not the way the catalog does:
+
+    * a ``nullable`` row gains the explicit ``(from the profile)`` entry, and
+      "resolve it for me" against one named value is a real decision;
+    * a ``choices_from`` row's list arrives with the loaded ``PdkProfile``, so
+      the catalog's frozen copy is one PDK's answer and says nothing about
+      how long the real list is. The demo profile has one corner and the
+      shipped PDK has nine -- counting the frozen list would turn the corner
+      picker into a text box on exactly the machines that need it.
+    """
+
+    if spec.choices_from is not None or spec.nullable:
+        return True
+    return len(spec.choices or []) >= 2
 
 
 def template_freezes(spec: OptionSpec) -> bool:
@@ -392,16 +434,20 @@ def group_label(name: str) -> str:
 def _format_value(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, (list, tuple)):
+        # A list default with no members reads "default (none)" rather than
+        # "default " -- three ``lvs_extra_*_names`` rows default to ``[]``
+        # and rendered the second, which claims a default and then says
+        # nothing about it.
+        return ", ".join(_format_value(item) for item in value) or "(none)"
     if value == "":
         # Two catalog rows default to the empty string. Rendering that as
         # nothing produced the hint "default " with a trailing space and no
         # information -- a blank box beside a blank hint, which is the worst
         # thing a form can show.
         return "(empty)"
-    if isinstance(value, bool):
-        return "on" if value else "off"
-    if isinstance(value, (list, tuple)):
-        return ", ".join(_format_value(item) for item in value)
     return str(value)
 
 
@@ -438,7 +484,31 @@ def _range_text(spec: OptionSpec) -> str:
 
 
 def hint_text(spec: OptionSpec) -> str:
-    """The short grey line beside a field: default, range, guessed members.
+    """The short grey line beside a field, in one vocabulary.
+
+    Four clauses, each answering a question a first-time user asked out loud
+    on the walkthrough, and each phrased so that its *absence* also means
+    something:
+
+    ``default X``
+        what is in the box now, and -- unless an empty-clause follows -- what
+        the generated file will carry.
+    ``empty = X`` / ``unset -- X``
+        what happens when the box is cleared. Only a nullable row has one, so
+        a row without it always sends what it shows. That is the distinction
+        the old wording lost: ``default auto`` could equally mean "``auto`` is
+        the literal we send" and "nobody has chosen yet", which are different
+        command files.
+    ``advisory range A - B (unverified)``
+        the RANGE is the guess, never the value. ``range_verified`` is false
+        on every shipped row, and "(unverified)" on its own was read as a
+        doubt about the number the user had typed -- the opposite of what the
+        field does, which is to accept it as written.
+    ``confirmed list`` / ``list not confirmed`` / ``guessed list ...``
+        how far the drop-down can be trusted. Every row with a value set says
+        one of the three, because when only the guessed ones were marked the
+        silence on the other twenty could equally have meant "verified" or
+        "nobody labelled this one".
 
     Kept to one elided line. Everything longer lives in
     :func:`option_tooltip`, which the user reaches by hovering -- a static
@@ -447,25 +517,26 @@ def hint_text(spec: OptionSpec) -> str:
     """
 
     parts: list[str] = []
-    if spec.default is not None or spec.type is OptionType.BOOL:
+    if spec.default is not None:
         parts.append(f"default {_format_value(spec.default)}")
-        if spec.nullable and spec.placeholder:
-            # A row that has BOTH a default and a meaning for empty has to say
-            # the second one out loud: temperature_c shows 55.0, and nothing
-            # told the user that clearing the box hands the decision to the
-            # corner. The fallback existed in the model and was unreachable in
-            # the only place it could have been used.
-            parts.append(f"empty = {spec.placeholder}")
-    elif spec.placeholder:
-        parts.append(f"unset {_EM_DASH} {spec.placeholder}")
+    if spec.nullable and spec.placeholder:
+        # A row that has BOTH a default and a meaning for empty has to say
+        # the second one out loud: temperature_c shows 55.0, and nothing told
+        # the user that clearing the box hands the decision to the corner.
+        # The fallback existed in the model and was unreachable in the only
+        # place it could have been used.
+        parts.append(
+            f"empty = {spec.placeholder}"
+            if spec.default is not None
+            else f"unset {_EM_DASH} {spec.placeholder}"
+        )
     if spec.range is not None:
-        suffix = "" if spec.range_verified else " (unverified)"
-        parts.append(_range_text(spec) + suffix)
-    if spec.free_input and spec.choices:
-        # The members are in the drop-down now, so the hint no longer repeats
-        # them; what it has to say is that the list is not authoritative and
-        # the field will take anything the tool accepts.
-        parts.append("guessed list - other values accepted")
+        if spec.range_verified:
+            parts.append(f"range {_range_text(spec)}")
+        else:
+            parts.append(f"advisory range {_range_text(spec)} (unverified)")
+    if spec.choices:
+        parts.append(_LIST_CONFIDENCE[spec.choices_confidence])
     if template_freezes(spec):
         # First, not last: this line elides, and the one part of it the user
         # has to read is the part that says the field does nothing.
