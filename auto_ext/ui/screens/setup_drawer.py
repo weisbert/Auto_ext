@@ -263,14 +263,39 @@ class SetupDrawer(QWidget):
         super().__init__(parent)
         self._report: PdkHealthReport | None = None
         self._rows: list[tuple[str, QWidget]] = []
+        #: ``check_id -> what the user typed into that row's pin box``.
+        #: Survives the rebuild every new report causes; see :meth:`set_report`.
+        self._pin_text: dict[str, str] = {}
+        #: The live pin widgets of the CURRENT body. Cleared by :meth:`_clear`
+        #: because the widgets themselves are deleted there.
+        self._pin_edits: dict[str, QLineEdit] = {}
+        self._pin_buttons: dict[str, QPushButton] = {}
         self._build_ui()
         self.set_report(None)
 
     # ---- public API ---------------------------------------------------
 
     def set_report(self, report: PdkHealthReport | None) -> None:
-        """Render ``report``. ``None`` renders the "not checked yet" state."""
+        """Render ``report``. ``None`` renders the "not checked yet" state.
 
+        A new report rebuilds the whole body, which destroys every pin box
+        with it -- and a new report is exactly what Re-check produces, which
+        is the obvious next click after typing a path into one. So what was
+        typed is remembered across the rebuild and put back.
+
+        It is remembered for *this profile* only. A path typed for one PDK is
+        not an answer for the next one, so switching project (or losing the
+        report altogether) forgets it rather than offering it again under a
+        different technology's failing check.
+        """
+
+        previous = self._report
+        if (
+            report is None
+            or previous is None
+            or report.profile_id != previous.profile_id
+        ):
+            self._pin_text.clear()
         self._report = report
         self._summary.setText(summary_text(report))
         self._rebuild()
@@ -418,6 +443,10 @@ class SetupDrawer(QWidget):
 
     def _clear(self) -> None:
         self._rows = []
+        # The widgets below are about to be deleted; the *text* they held
+        # lives on in ``_pin_text``, which is not touched here.
+        self._pin_edits = {}
+        self._pin_buttons = {}
         layout = self._body_layout
         while layout.count():
             item = layout.takeAt(0)
@@ -590,6 +619,7 @@ class SetupDrawer(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.SPACE_SM)
 
+        check_id = result.check_id
         var = self._env_var_name(result)
         edit = QLineEdit(row)
         edit.setPlaceholderText("/abs/path/to/value")
@@ -616,11 +646,52 @@ class SetupDrawer(QWidget):
             pin.clicked.connect(
                 lambda _c=False, v=var, e=edit: self._emit_override(v, e)
             )
+            edit.textChanged.connect(
+                lambda text, cid=check_id: self._on_pin_typed(cid, text)
+            )
+
+        self._pin_edits[check_id] = edit
+        self._pin_buttons[check_id] = pin
+        if available:
+            # Put back whatever was typed before the last rebuild. The
+            # connection above is already live, so this also re-fills
+            # ``_pin_text`` for a row that is being rendered for the first
+            # time -- and settles the Set button's state either way.
+            edit.setText(self._pin_text.get(check_id, ""))
+        self._refresh_pin_enabled(check_id)
 
         layout.addWidget(edit, stretch=1)
         layout.addWidget(browse)
         layout.addWidget(pin)
         return row
+
+    def _on_pin_typed(self, check_id: str, text: str) -> None:
+        self._pin_text[check_id] = text
+        self._refresh_pin_enabled(check_id)
+
+    def _refresh_pin_enabled(self, check_id: str) -> None:
+        """Set is live only when there is something to set.
+
+        The row's enabled state used to be settled once, from the state it
+        was *born* in -- a host is connected and the check names a variable --
+        and the one thing Set actually needs, a value, was checked inside the
+        click handler, which returned without a word. An empty box is the
+        state every one of these rows starts in.
+        """
+
+        edit = self._pin_edits.get(check_id)
+        pin = self._pin_buttons.get(check_id)
+        if edit is None or pin is None:
+            return
+        if not edit.isEnabled():
+            return  # no host to pin into: the whole row is already dead
+        has_value = bool(edit.text().strip())
+        pin.setEnabled(has_value)
+        pin.setToolTip(
+            "Write this value into the profile's env_overrides."
+            if has_value
+            else "Type the value to pin, or Browse for it, and this comes alive."
+        )
 
     def _title_label(
         self, result: PdkCheckResult, parent: QWidget, *, bold: bool

@@ -39,7 +39,11 @@ from auto_ext.ui.screens.project_screen import (  # noqa: E402
     ProjectScreen,
     field_editors,
 )
-from tests.support.v2 import make_profile, make_workspace  # noqa: E402
+from tests.support.v2 import (  # noqa: E402
+    make_profile,
+    make_two_corners,
+    make_workspace,
+)
 
 
 @pytest.fixture
@@ -135,6 +139,47 @@ def test_editing_back_to_the_loaded_value_is_not_dirty(screen: ProjectScreen) ->
     assert screen.is_dirty() is False
 
 
+def test_typing_is_an_edit_before_the_box_is_left(
+    screen: ProjectScreen, qtbot
+) -> None:
+    """"输入 DSPF 路径后按 Ctrl+S，写进去的是旧值."
+
+    Focus-out was the only moment a control announced itself, and neither
+    ``Ctrl+S`` nor closing the window moves focus. Everything downstream --
+    the staged document, the star in the title, the "you have unsaved edits"
+    question -- hangs off this signal, so a keystroke has to reach it.
+    """
+
+    row = screen.row("dspf_out_pattern")
+    control = row.control()
+    control.selectAll()
+    with qtbot.waitSignal(screen.edited, timeout=1000):
+        qtbot.keyClicks(control, "${WORK_ROOT2}/{cell}_typed.dspf")
+
+    assert screen.workspace().dspf_out_pattern == "${WORK_ROOT2}/{cell}_typed.dspf"
+    assert screen.is_dirty() is True
+
+
+def test_typing_a_half_finished_mapping_line_is_not_yet_an_error(
+    screen: ProjectScreen, qtbot
+) -> None:
+    """The multi-line boxes still hold their promise while a line is half typed.
+
+    Live staging must not turn ``SETUP_ROOT`` -- the first eleven keystrokes
+    of ``SETUP_ROOT = /pdk/setup`` -- into an error message under the control.
+    """
+
+    row = screen.row("env_overrides")
+    qtbot.keyClicks(row.control(), "SETUP_ROOT")
+    assert row.error() == ""
+    assert screen.profile().env_overrides == {}
+
+    qtbot.keyClicks(row.control(), " = /pdk/setup")
+    assert row.error() == ""
+    assert screen.profile().env_overrides == {"SETUP_ROOT": "/pdk/setup"}
+    assert screen.is_dirty() is True
+
+
 def test_a_list_field_is_one_entry_per_line(screen: ProjectScreen) -> None:
     row = screen.row("power_names")
     row.control().setPlainText("VDD\nVDDA\n\n  VDDIO  \n")
@@ -211,6 +256,30 @@ def test_save_is_refused_while_a_field_is_invalid(screen: ProjectScreen, qtbot) 
     with qtbot.assertNotEmitted(screen.save_requested):
         screen._save_btn.click()
     assert screen.profile().tech_name == "HN002"
+
+
+def test_save_goes_dead_while_a_field_is_invalid_and_says_why(
+    screen: ProjectScreen,
+) -> None:
+    """"Save 是亮的，按下去什么都没变，连提示都不变."
+
+    A lit button that refuses is the same defect as a button that does
+    nothing: the only difference the user can see is the one the screen never
+    draws. The refusal is a *state* -- there is an invalid field -- so it
+    belongs in the button's enabled flag and in its tooltip, not in a branch
+    of the click handler.
+    """
+
+    _type(screen.row("tech_name"), "HN002")
+    assert screen._save_btn.isEnabled() is True
+
+    _type(screen.row("output_dir_pattern"), "${WORK_ROOT}/{task_id}")
+    assert screen._save_btn.isEnabled() is False
+    assert "output_dir_pattern" in screen._save_btn.toolTip()
+
+    _type(screen.row("output_dir_pattern"), "${WORK_ROOT}/{cell}")
+    assert screen._save_btn.isEnabled() is True
+    assert screen._save_btn.toolTip() == ""
 
 
 # ---- saving ----------------------------------------------------------------
@@ -306,6 +375,49 @@ def test_a_half_typed_table_row_is_not_an_error(screen: ProjectScreen) -> None:
     # the incomplete row is on screen but not in the working copy yet
     assert table.row_count() == 2
     assert [c.name for c in screen.profile().corners] == ["typical"]
+
+
+def test_the_tables_remove_is_dead_until_a_row_is_selected(
+    screen: ProjectScreen,
+) -> None:
+    """"没选东西时按没反应" -- a button that answers nothing must look like it."""
+
+    table = screen.row("corners").control()
+    assert table.table().currentRow() < 0
+    assert table.remove_button().isEnabled() is False
+
+    table.table().setCurrentCell(0, 0)
+    assert table.remove_button().isEnabled() is True
+
+
+def test_removing_a_row_says_what_went_and_that_revert_brings_it_back(
+    screen: ProjectScreen,
+) -> None:
+    """The other half of A-12: it deletes, and nothing on screen says so.
+
+    No confirmation dialog: the removal is a working-copy edit that
+    ``Revert`` undoes and that nothing has written to disk. What was missing
+    is the sentence saying exactly that.
+    """
+
+    row = screen.row("corners")
+    table = row.control()
+    table.set_rows(make_two_corners())
+    row.commit()
+
+    messages: list[str] = []
+    screen.status_changed.connect(messages.append)
+    table.table().setCurrentCell(1, 0)
+    table.remove_button().click()
+
+    assert table.row_count() == 1
+    assert [c.name for c in screen.profile().corners] == ["typical"]
+    assert messages, "removing a row said nothing at all"
+    assert "hot" in messages[-1]
+    assert "Revert" in messages[-1]
+    # and with the selection cleared the button is dead again
+    table.table().setCurrentCell(-1, -1)
+    assert table.remove_button().isEnabled() is False
 
 
 def test_removing_the_corner_the_default_points_at_is_reported(

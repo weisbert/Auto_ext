@@ -41,6 +41,13 @@ screen follows against the catalog, for the same reason.
 
 Assumptions
 -----------
+* **A keystroke is an edit; focus-out is only when a mistake is reported.**
+  Every control announces itself as it is typed into, because everything
+  downstream of an edit -- the staged document, the star in the title,
+  ``File -> Save`` writing the new value instead of the old one, the window
+  asking before it closes -- hangs off that announcement, and neither the
+  Save shortcut nor the title-bar X moves focus. This is the same rule the
+  Recipes screen follows, and for the same reason it had to learn it.
 * **A validation failure is shown at the control, not at save time.**
   ``set_path`` assigns through the attribute and the models use
   ``validate_assignment=True``, so a bad pattern key or an out-of-range
@@ -140,13 +147,12 @@ def field_editors() -> tuple[ProjectField, ...]:
 
 
 class _MultiLineEdit(QPlainTextEdit):
-    """A plain-text box that commits on focus-out, like ``QLineEdit`` does.
+    """A plain-text box that also reports focus-out, like ``QLineEdit`` does.
 
-    ``textChanged`` would fire on every keystroke, and half a typed
-    ``name = value`` line is not a mistake worth an error message under the
-    control -- it is a user who has not finished the line. Focus-out is the
-    same moment ``QLineEdit.editingFinished`` picks, so the whole screen
-    commits at one kind of moment rather than two.
+    Focus-out is the moment a *mistake* is worth reporting: half a typed
+    ``name = value`` line is not an error message under the control, it is a
+    user who has not finished the line. It is emphatically **not** the moment
+    an edit becomes real -- see :meth:`FieldRow._on_typed`.
     """
 
     editingFinished = pyqtSignal()
@@ -162,6 +168,9 @@ class FieldRow(QWidget):
     #: The user changed this field. Carries ``(path, value)``; the value is
     #: already in the control's own type, not text.
     changed = pyqtSignal(str, object)
+    #: A TABLE row was taken out. Carries the row's first column, so the
+    #: screen can say what went rather than only that something did.
+    removed = pyqtSignal(str)
 
     def __init__(self, spec: ProjectField, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -243,14 +252,21 @@ class FieldRow(QWidget):
                 )
             )
             edit.setStyleSheet(f"font-family: {theme.FONT_MONO};")
+            edit.textChanged.connect(self._on_typed)
             edit.editingFinished.connect(self._on_edited)
             return edit
         if kind is FieldKind.TABLE:
             table = _TableControl(self.spec, self)
             table.changed.connect(self._on_edited)
+            table.removed.connect(self.removed)
             return table
         edit = QLineEdit(self)
         edit.setPlaceholderText(self.spec.placeholder)
+        # ``textEdited``, not ``textChanged``: it fires for typing and pasting
+        # and stays silent for ``setText``, which is how the host loads a
+        # value in. See :meth:`_on_typed` for why a keystroke has to announce
+        # itself at all.
+        edit.textEdited.connect(self._on_edited)
         edit.editingFinished.connect(self._on_edited)
         return edit
 
@@ -368,6 +384,25 @@ class FieldRow(QWidget):
 
         self._on_edited()
 
+    def _on_typed(self, *_args: Any) -> None:
+        """Announce what is in the control now, saying nothing about a bad line.
+
+        The quiet half of :meth:`_on_edited`, for the signals that fire on
+        every keystroke. A line the parser cannot read yet is skipped rather
+        than reported: ``SETUP_ROOT`` is the first eleven characters of
+        ``SETUP_ROOT = /pdk/setup``, not a mistake. Focus-out still runs the
+        loud version, so an unfinished line is reported the moment the user
+        looks away from it.
+        """
+
+        if self._loading:
+            return
+        try:
+            value = self.value()
+        except ValueError:
+            return
+        self.changed.emit(self.spec.path, value)
+
     def _on_edited(self, *_args: Any) -> None:
         if self._loading:
             return
@@ -392,9 +427,16 @@ class _TableControl(QWidget):
     at a time. The row is kept on screen and the table simply reports the rows
     that are complete, so typing the second column completes it rather than
     having to re-enter the first.
+
+    Remove is enable-managed against the selection. It used to be lit at all
+    times and to ``return`` on ``currentRow() == -1``, so the first press --
+    the one a user makes before selecting anything -- did nothing and said
+    nothing, which is indistinguishable from a broken button.
     """
 
     changed = pyqtSignal()
+    #: A row was taken out; carries its first column, or ``""`` when blank.
+    removed = pyqtSignal(str)
 
     def __init__(self, spec: ProjectField, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -419,6 +461,11 @@ class _TableControl(QWidget):
             header.setSectionResizeMode(index, QHeaderView.Stretch)
         self._table.setMinimumHeight(theme.ROW_HEIGHT * 4)
         self._table.itemChanged.connect(self._on_item_changed)
+        # Both, because the two move independently: clicking a cell changes
+        # the current cell and the selection, while a programmatic
+        # ``setCurrentCell(-1, -1)`` changes only the first.
+        self._table.itemSelectionChanged.connect(self._refresh_buttons)
+        self._table.currentCellChanged.connect(self._refresh_buttons)
         root.addWidget(self._table)
 
         buttons = QHBoxLayout()
@@ -432,6 +479,8 @@ class _TableControl(QWidget):
         buttons.addWidget(self._remove)
         buttons.addStretch(1)
         root.addLayout(buttons)
+
+        self._refresh_buttons()
 
     def set_rows(self, rows: list[Any]) -> None:
         self._loading = True
@@ -473,6 +522,19 @@ class _TableControl(QWidget):
     def table(self) -> QTableWidget:
         return self._table
 
+    def remove_button(self) -> QPushButton:
+        """The Remove control, so a caller can ask whether it is live."""
+
+        return self._remove
+
+    def _refresh_buttons(self, *_args: Any) -> None:
+        self._remove.setEnabled(self._table.currentRow() >= 0)
+        self._remove.setToolTip(
+            ""
+            if self._remove.isEnabled()
+            else "Select a row first; Remove acts on the selected one."
+        )
+
     def _on_add(self) -> None:
         row = self._table.rowCount()
         self._loading = True
@@ -487,10 +549,16 @@ class _TableControl(QWidget):
 
     def _on_remove(self) -> None:
         row = self._table.currentRow()
-        if row < 0:
+        if row < 0:  # pragma: no cover - the button is disabled in this state
             return
+        item = self._table.item(row, 0)
+        label = item.text().strip() if item is not None else ""
         self._table.removeRow(row)
+        self._refresh_buttons()
+        # ``changed`` first: it is what puts the new row list in the working
+        # copy, and ``removed`` is the sentence about what that did.
         self.changed.emit()
+        self.removed.emit(label)
 
     def _on_item_changed(self, _item: QTableWidgetItem) -> None:
         if self._loading:
@@ -647,6 +715,9 @@ class ProjectScreen(QWidget):
             for spec in in_group:
                 row = FieldRow(spec, panel)
                 row.changed.connect(self._on_field_changed)
+                row.removed.connect(
+                    lambda label, path=spec.path: self._on_row_removed(path, label)
+                )
                 self._rows[spec.path] = row
                 layout.addWidget(row)
         return panel
@@ -850,6 +921,7 @@ class ProjectScreen(QWidget):
             set_path(trial, path, value)
         except Exception as exc:  # pydantic ValidationError and anything it wraps
             row.set_error(_first_message(exc))
+            self._refresh_enabled()
             self._refresh_status()
             return
         if is_workspace:
@@ -866,8 +938,34 @@ class ProjectScreen(QWidget):
             finally:
                 self._loading = False
         self._set_dirty(self._compute_dirty())
+        # Not only through _set_dirty: an invalid field has to take Save out
+        # of service even when dirtiness itself did not move, which is the
+        # usual case -- something else was already edited.
+        self._refresh_enabled()
         self._refresh_status()
         self.edited.emit(self._changed_workspace(), self._changed_profile())
+
+    def _on_row_removed(self, path: str, label: str) -> None:
+        """Say what a table Remove took out, and that it is not gone for good.
+
+        The row leaves the screen the instant the button is pressed, and the
+        only other thing that changes is a status line reading "unsaved
+        changes" -- which is what every other edit says too. Nothing has
+        reached the disk, so the honest sentence names both halves.
+        """
+
+        row = self._rows.get(path)
+        if row is None or row.error():
+            # The model refused the shorter list (removing the corner
+            # ``default_corner`` points at does exactly that). The error
+            # under the control is the message that matters; do not paint
+            # over it with a report of a removal that did not take.
+            return
+        what = label or "the selected row"
+        self.status_changed.emit(
+            f"removed {what} from {row.spec.label} - not written yet, "
+            f"Revert puts it back"
+        )
 
     @staticmethod
     def _owns(fields: tuple[ProjectField, ...], path: str) -> bool:
@@ -894,10 +992,10 @@ class ProjectScreen(QWidget):
         self.dirty_changed.emit(dirty)
 
     def _on_save(self) -> None:
-        if not self._dirty:
-            return
-        if self.errors():
-            self._refresh_status()
+        # Both guards are states :meth:`_refresh_enabled` has already taken
+        # the button out of service for; they stay as the belt to that
+        # braces, not as the place the refusal is communicated.
+        if not self._dirty or self.errors():
             return
         self.save_requested.emit(self._changed_workspace(), self._changed_profile())
 
@@ -922,7 +1020,18 @@ class ProjectScreen(QWidget):
 
     def _refresh_enabled(self) -> None:
         loaded = self._workspace is not None or self._profile is not None
-        self._save_btn.setEnabled(loaded and self._dirty)
+        # A field the model rejected is a state, not an event: Save cannot
+        # write while one is on screen, so it says so by going out of service
+        # and naming the field. It used to stay lit and refuse inside the
+        # click handler, re-emitting the status line the edit had already
+        # emitted -- a press that changed nothing a user could see.
+        errors = self.errors()
+        self._save_btn.setEnabled(loaded and self._dirty and not errors)
+        if errors:
+            path, message = next(iter(errors.items()))
+            self._save_btn.setToolTip(f"Fix {path} first: {message}")
+        else:
+            self._save_btn.setToolTip("")
         self._revert_btn.setEnabled(loaded and self._dirty)
         # Reading the environment back needs a profile to invert expressions
         # against; without one there is nothing to match the file's paths to.
