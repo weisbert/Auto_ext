@@ -36,13 +36,19 @@ target carries the defaults those rules fall back to. This is why
 What this module does NOT do: render anything. It answers questions about
 options; the renderer is a separate concern and lands with the C2 work.
 
-Verification claims. Nothing in ``options.yaml`` has been checked against a
-real Cadence installation -- there is none on the development machine. Every
-row that depends on one is marked in place with a ``question:`` and mirrored
-in ``docs/refactor/OFFICE_TODO.md``. In particular **no** ``range`` in the
-file has been verified (``range_verified`` is false on every row), and the
-``unit`` of ``coupling_cap_threshold_absolute`` is transcribed from a
-hand-written manifest that is physically impossible as written.
+Verification claims. Nothing in ``options.yaml`` has been *run* against a real
+Cadence installation -- there is none on the development machine. Every row
+that still depends on one is marked in place with a ``question:`` and mirrored
+in ``docs/refactor/OFFICE_TODO.md``. Rows carrying no question have been read
+out of the vendor manual by the red-zone probe (``scripts/extdoc_probe.py``),
+which is evidence about the tool but not about this PDK.
+
+``range_verified`` is false on every row but one: the 0-100 fF bound on
+``coupling_cap_threshold_absolute`` is transcribed from the manual, and it is
+the only bound in this file that is not a guard rail somebody invented. The
+same row's ``unit`` used to say farads, on the strength of a hand-written
+manifest, which made its own default look physically impossible; the unit was
+the wrong half.
 """
 
 from __future__ import annotations
@@ -1048,19 +1054,30 @@ class TemplateVarAudit(Frozen):
       catalog row claims for that file. This is the one that catches "added a
       template variable, forgot the catalog entry", which is exactly how the
       manifest system rotted.
+    * ``no_landing_site`` -- a row claims its value arrives as ``[[var]]`` and
+      then names no file at all. Neither direction above can see it: both walk
+      ``opt.targets``, which is derived from ``lands_in``, so an empty
+      ``lands_in`` makes the forwards loop empty and contributes nothing to
+      the backwards one. It is the strongest claim the ``currently`` column
+      can make paired with no evidence for it.
     """
 
     #: ``(option key, template_var, target)``
     missing_in_template: list[tuple[str, str, str]] = Field(default_factory=list)
     #: ``(target, template_var)``
     missing_in_catalog: list[tuple[str, str]] = Field(default_factory=list)
+    #: ``(option key, template_var)``
+    no_landing_site: list[tuple[str, str]] = Field(default_factory=list)
     #: Templates named by the catalog that could not be read at all.
     unreadable_templates: list[str] = Field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return not (
-            self.missing_in_template or self.missing_in_catalog or self.unreadable_templates
+            self.missing_in_template
+            or self.missing_in_catalog
+            or self.no_landing_site
+            or self.unreadable_templates
         )
 
     def describe(self) -> str:
@@ -1078,6 +1095,13 @@ class TemplateVarAudit(Frozen):
             lines.append(
                 f"  {target} references [[{var}]] but no catalog row claims that "
                 f"variable for this file -- add a row (or fix template_var)"
+            )
+        for key, var in self.no_landing_site:
+            lines.append(
+                f"  catalog row {key!r} says its value reaches a template as "
+                f"[[{var}]] but names no landing site, so it reaches nothing. "
+                f"Add the lands_in entry, or set currently to config_field if "
+                f"the value only ever travels through Python"
             )
         for tpl in self.unreadable_templates:
             lines.append(f"  template named by the catalog is unreadable: {tpl}")
@@ -1106,6 +1130,12 @@ def audit_template_vars(
     Only rows whose ``currently`` says the value arrives through Jinja today
     (``jinja_var`` / ``manifest_knob``) are required to appear; a hardcoded
     literal has, by definition, no variable in the file yet.
+
+    Three findings, not two. The third, ``no_landing_site``, exists because
+    both of the others iterate ``opt.targets``: a row that names no file has
+    an empty loop in one and is invisible to the other, so "this value reaches
+    a template" went unchecked for precisely the rows with nothing to check it
+    against.
     """
 
     cat = catalog if catalog is not None else builtin_catalog()
@@ -1125,8 +1155,15 @@ def audit_template_vars(
             unreadable.append(spec.template)
 
     missing_in_template: list[tuple[str, str, str]] = []
+    no_landing_site: list[tuple[str, str]] = []
     for opt in cat.options:
         if not opt.expected_in_templates:
+            continue
+        if not opt.targets:
+            # Both loops below are over ``opt.targets``, so this row would be
+            # skipped by the audit entirely -- the one shape that could claim
+            # to reach a template and be believed without evidence.
+            no_landing_site.append((opt.key, opt.template_var))
             continue
         for target in opt.targets:
             found = per_target.get(target)
@@ -1154,5 +1191,6 @@ def audit_template_vars(
     return TemplateVarAudit(
         missing_in_template=sorted(missing_in_template),
         missing_in_catalog=sorted(missing_in_catalog),
+        no_landing_site=sorted(no_landing_site),
         unreadable_templates=sorted(unreadable),
     )

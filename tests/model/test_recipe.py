@@ -130,6 +130,62 @@ def test_emit_must_name_at_least_one_output_form() -> None:
         make_recipe(output={"emit": ["dspf", "dspf"]})
 
 
+def test_unticking_every_xy_class_is_refused_rather_than_written_as_a_bare_option() -> None:
+    """The DSPF form's checkbox list can be emptied in one click.
+
+    ``-output_xy`` is emitted outside the loop that writes its values, so an
+    empty list used to produce a bare ``-output_xy \\`` followed straight by
+    the next option -- an option with no operand, in a file Quantus reads
+    hours after the user clicked. Its two siblings, ``extraction.extract`` and
+    ``output.emit``, have refused an empty list from the start; this one was
+    the odd one out.
+    """
+
+    with pytest.raises(ValidationError, match="output_xy"):
+        make_recipe(output={"dspf": {"output_xy": []}})
+    assert make_recipe(output={"dspf": {"output_xy": ["MOS"]}}).output.dspf.output_xy == [
+        "MOS"
+    ]
+
+
+def test_a_fracture_length_under_five_is_refused_here_and_not_by_quantus() -> None:
+    """The tool errors on the whole command file, hours after the click.
+
+    A tight RF transmission line invites exactly the number that is refused:
+    the vendor floor is 5 (microns or squares, whichever unit is selected) and
+    below it Quantus rejects the deck outright. The literal ``infinite`` is
+    the LVS-input default and stays legal; 100 is what the manual recommends
+    for long transmission lines, and 50 is the accuracy floor it warns about.
+    """
+
+    with pytest.raises(ValidationError, match="5"):
+        make_recipe(extraction={"max_fracture_length": "3"})
+    for good in ("infinite", "5", "50", "100"):
+        recipe = make_recipe(extraction={"max_fracture_length": good})
+        assert recipe.extraction.max_fracture_length == good
+    with pytest.raises(ValidationError, match="infinite"):
+        make_recipe(extraction={"max_fracture_length": "as long as it takes"})
+
+
+def test_the_coupling_threshold_is_bounded_by_the_documented_femtofarad_range() -> None:
+    """0.01 was never 10 mF; the unit is femtofarads and the range is 0 to 100.
+
+    The catalog carried ``unit: F`` and a note saying the default was
+    physically impossible, which made the one knob that decides how many
+    coupling caps survive look untrustworthy. It is not: 0.01 fF is the
+    vendor's own example value, and anything above 100 is out of range.
+    """
+
+    assert make_recipe().extraction.coupling_cap_threshold_absolute == 0.01
+    assert make_recipe(
+        extraction={"coupling_cap_threshold_absolute": 100.0}
+    ).extraction.coupling_cap_threshold_absolute == 100.0
+    with pytest.raises(ValidationError):
+        make_recipe(extraction={"coupling_cap_threshold_absolute": 500.0})
+    with pytest.raises(ValidationError):
+        make_recipe(extraction={"coupling_cap_threshold_absolute": -1.0})
+
+
 def test_emit_is_a_list_so_one_run_can_produce_both_forms() -> None:
     # The whole point of removing the single quantus template slot: today a
     # run structurally cannot emit an extracted view and a DSPF together.
