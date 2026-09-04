@@ -34,6 +34,9 @@ from auto_ext.ui.widgets.patch_strip import (  # noqa: E402
     DIFF_ADD_TEXT,
     DIFF_DEL_FILL,
     DIFF_DEL_TEXT,
+    DROP_ALL,
+    DROP_ALL_IDLE,
+    DROP_ONE,
     GLYPH_COLLAPSED,
     GLYPH_EXPANDED,
     NOOP_ADVICE,
@@ -339,7 +342,7 @@ def test_expanding_shows_one_row_per_hunk_and_a_footer(qtbot) -> None:
     assert strip.summary_text() == "2 manual edits"
     assert strip.subtitle_text() == "applied after render, before the tool runs"
     assert strip.toggle_button().text() == "Hide diff"
-    assert strip.revert_all_button().text() == "Revert all 2"
+    assert strip.revert_all_button().text() == DROP_ALL.format(count=2)
     assert len(strip.hunk_rows()) == 2
     assert strip.footer().isVisible()
     assert "never silently dropped" in strip.footer().text()
@@ -418,8 +421,37 @@ def test_an_applied_row_offers_revert_but_not_delete(qtbot) -> None:
         reports=[report(HunkOutcome(hunk_id="0000000a", status=PatchStatus.CLEAN))],
     )
     row = strip.hunk_rows()[0]
-    assert row.revert_button().text() == "Revert"
+    assert row.revert_button().text() == DROP_ONE
     assert row.delete_button() is None
+
+
+def test_the_strips_buttons_name_manual_edits_rather_than_saying_revert(
+    qtbot,
+) -> None:
+    """"Revert all" sat five pixels from the header's "Revert" and meant less.
+
+    The header's Revert unstages the WHOLE recipe -- every form edit and the
+    patches with them. This one drops the rendered-file patches and nothing
+    else, so of the two controls the one saying "all" was the narrower, and a
+    user picking between them by the plain English of the labels picks wrong.
+    "Revert" belongs to the recipe; the escape hatch drops manual edits, the
+    word its own per-hunk tooltip was already using.
+    """
+
+    strip = _strip(qtbot)
+    strip.set_patches([make_patch(hunks=[make_hunk("0000000a"), make_hunk("0000000b")])])
+    strip.set_expanded(True)
+
+    everything = strip.revert_all_button()
+    assert "revert" not in everything.text().lower(), (
+        "the narrower of the two controls still borrows the wider one's word"
+    )
+    assert "manual edit" in everything.text().lower()
+    assert "2" in everything.text(), "the count belongs on the button that drops them"
+
+    one = strip.hunk_rows()[0].revert_button()
+    assert "revert" not in one.text().lower()
+    assert one.text() != everything.text()
 
 
 def test_a_disabled_hunk_is_shown_rather_than_hidden(qtbot) -> None:

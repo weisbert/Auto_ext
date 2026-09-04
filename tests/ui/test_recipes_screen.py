@@ -703,6 +703,51 @@ def test_reverting_every_hunk_clears_the_escape_hatch(qtbot) -> None:
     assert screen.patch_strip.is_expanded() is False
 
 
+def test_the_two_reverts_on_the_screen_do_not_have_inverted_scopes(qtbot) -> None:
+    """One undoes the whole recipe, one undoes the manual edits only.
+
+    They sit five pixels apart, and the labels used to say the opposite of
+    what they do: the header's plain "Revert" unstages every form edit AND
+    the patches, while "Revert all" dropped the patches and nothing else. Of
+    the two, the one saying "all" was the narrower -- so a user choosing
+    between them by plain English chooses wrong every time.
+    """
+
+    screen = _screen(qtbot)
+    recipe = make_recipe()
+    recipe.patches = [make_patch(("0000000a",))]
+    screen.set_recipes([recipe])
+    screen.patch_strip.set_expanded(True)
+
+    whole = screen.revert_button()
+    hatch = screen.patch_strip.revert_all_button()
+
+    assert whole.text() == "Revert"
+    assert "all" not in whole.text().lower(), (
+        "the wider control does not claim 'all'; the narrower one must not either"
+    )
+    assert "revert" not in hatch.text().lower(), (
+        f"two controls share the word 'revert' with inverted scopes: "
+        f"{whole.text()!r} (whole recipe) and {hatch.text()!r} (patches only)"
+    )
+    assert "manual edit" in hatch.text().lower(), (
+        "the narrower control has to name what it is narrower about"
+    )
+
+    # And the narrower one still does exactly what its new label says: the
+    # form edit survives, the manual edit does not.
+    warm = screen.editor("temperature_c")
+    warm.line_edit().setText("125.0")
+    warm.line_edit().textEdited.emit("125.0")
+
+    hatch.click()
+
+    assert screen.current_recipe().patches == []
+    assert screen.current_recipe().extraction.temperature_c == 125.0, (
+        "the control that names manual edits reverted a form edit as well"
+    )
+
+
 def test_edit_rendered_names_the_recipe(qtbot) -> None:
     screen = _screen(qtbot)
     recipe = make_recipe()
