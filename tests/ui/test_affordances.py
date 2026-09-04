@@ -660,14 +660,31 @@ def test_choosing_a_run_swaps_the_empty_pane_for_the_card(runs, qtbot) -> None:
 # same receiver the artifact grid's identical widget already had. Its
 # AFFORDANCE_EXEMPT entry is gone with it -- deleting that entry was the fix
 # the entry itself named.
-def test_the_runset_path_opens_the_file_it_points_at(card, tmp_path, qtbot) -> None:
+def test_the_runset_path_opens_the_file_it_points_at(
+    card, tmp_path, monkeypatch: pytest.MonkeyPatch, qtbot
+) -> None:
     """A press on a link-coloured path must carry a path that is really there.
 
     The path is planted through ``PathLabel``'s own public API rather than by
     building a hand-off plan: a plan needs a PDK tree, a deck and a runset on
     disk, and none of that is what this test is about. What is under test is
     the wiring behind a label the app has already decided to draw as live.
+
+    ``open_in_os`` is stubbed in both modules that own a copy of the name, the
+    way :func:`test_one_press_on_a_log_launches_exactly_one_editor` does. This
+    was not needed while M-52 was open -- nothing was connected, so the press
+    reached no launcher -- and became mandatory the moment it was wired: the
+    signal now travels to MainWindow._open_path, which really does hand the
+    file to the desktop. On this host that is ``os.startfile`` on a
+    ``.runset``, an extension nothing is registered for, so Windows puts up
+    its "How do you want to open this file?" chooser -- and blocks inside
+    ``ShellExecuteW`` until somebody answers it. A test suite must not depend
+    on a human being at the machine, and must not leave dialogs behind.
     """
+
+    launched: list[Path] = []
+    for module in ("auto_ext.ui.main_window", "auto_ext.ui.screens.runs_screen"):
+        monkeypatch.setattr(f"{module}.open_in_os", launched.append)
 
     runset = tmp_path / "frozen.runset"
     runset.write_text("*lvsRunset\n", encoding="utf-8")
@@ -680,6 +697,10 @@ def test_the_runset_path_opens_the_file_it_points_at(card, tmp_path, qtbot) -> N
     with qtbot.waitSignal(card.artifact_requested, timeout=500) as blocker:
         qtbot.mouseClick(label, Qt.LeftButton)
     assert Path(blocker.args[0]).exists()
+    assert launched == [runset], (
+        "one press on the runset path must reach the launcher exactly once, "
+        f"with the file the label named: {launched}"
+    )
 
 
 # M-62 is FIXED: _on_list_menu makes the row under the cursor the selected row
