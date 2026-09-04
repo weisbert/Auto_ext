@@ -1239,6 +1239,46 @@ def test_the_strip_offers_reset_only_when_there_is_something_to_reset(qtbot) -> 
     assert bar.reset_button().isEnabled() is False
 
 
+def test_reset_names_the_row_it_is_about_to_reset(qtbot) -> None:
+    """The strip's Reset follows FOCUS, and focus is not a selection.
+
+    A Tab, or a stray click anywhere on the form, moves what the button will
+    act on -- and the button sits 42px from the row it would destroy, saying
+    only "Reset to default". So a user who changed the temperature, tabbed
+    on, then reached for Reset because the temperature looked wrong reset
+    something else entirely and had no way to see it happen.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    bar = screen.detail_bar()
+
+    warm = screen.editor("temperature_c")
+    warm.line_edit().setText("125.0")
+    warm.line_edit().textEdited.emit("125.0")
+    screen._on_focus_changed(None, warm)
+    assert "temperature_c" in bar.reset_button().text()
+
+    # Tab moves on. Nothing else about the screen changed.
+    other = screen.editor("min_res_ohm")
+    other.line_edit().setText("7")
+    other.line_edit().textEdited.emit("7")
+    screen._on_focus_changed(warm, other)
+    assert "min_res_ohm" in bar.reset_button().text(), (
+        "the button still reads the same generic words after focus moved, so "
+        "nothing on screen says which row it will act on"
+    )
+    assert "temperature_c" not in bar.reset_button().text()
+
+    bar.reset_button().click()
+
+    recipe = screen.current_recipe()
+    assert recipe.extraction.temperature_c == 125.0, (
+        "Reset took the row the user was looking at, not the row it named"
+    )
+    assert recipe.extraction.min_res_ohm != 7
+
+
 def test_focus_leaving_the_form_keeps_the_last_description(qtbot) -> None:
     """Otherwise the sentence vanishes at the moment the user acts on it."""
 
