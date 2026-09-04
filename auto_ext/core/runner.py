@@ -78,7 +78,10 @@ Observability:
   each stage and forwarded into :func:`run_subprocess`; when set
   mid-subprocess, the in-flight EDA process is terminated (SIGTERM
   with a 10s grace, then SIGKILL) and the stage is marked
-  :attr:`StageStatus.CANCELLED`.
+  :attr:`StageStatus.CANCELLED`. It is also checked before each *task*:
+  once one task has been claimed, a cancelled dispatch stops handing out
+  run directories, so stopping a twenty-cell batch adds one run to the
+  history rather than twenty.
 """
 
 from __future__ import annotations
@@ -89,6 +92,7 @@ import platform
 import re
 import shutil
 import socket
+import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -108,6 +112,12 @@ from auto_ext.core.env import (
     substitute_env,
 )
 from auto_ext.core.errors import AutoExtError, ConfigError, WorkdirError
+from auto_ext.core.failure_class import (
+    DETAILS_FAILURE_KEY,
+    FailureVerdict,
+    classify_failure,
+    classify_tool_result,
+)
 from auto_ext.core.progress import (
     CancelToken,
     NullReporter,
@@ -401,6 +411,7 @@ def run_tasks(
     )
 
     _validate_stages(stages)
+    _validate_stage_overlap(stages, pipeline=pipeline)
     _validate_tasks(tasks, stages, pipeline=pipeline)
     if layout_export_path is not None:
         layout_export_path = _validate_layout_export(layout_export_path, stages, tasks)
@@ -440,7 +451,39 @@ def run_tasks(
     summary = RunSummary(batch_id=batch_id, runs_root=runs_root)
     _safe_call(reporter, "on_run_start", len(tasks), list(stages))
 
+    def _never_started(task: TaskConfig) -> TaskResult:
+        """Account for a task the cancel reached before it began.
+
+        It gets a :class:`TaskResult` and a start/end pair on the reporter --
+        a GUI tree that saw ``on_task_start`` without an end would sit on
+        "running" forever, and a summary missing a task would misreport the
+        dispatch -- but **no run directory**. Cancelling a twenty-cell batch
+        used to write twenty complete run directories, nineteen of them
+        recording that nothing happened, and the history the user then had to
+        scroll through was nineteen rows of noise around the one run they
+        actually stopped.
+        """
+
+        _safe_call(reporter, "on_task_start", task.task_id, list(stages))
+        result = TaskResult(task_id=task.task_id, overall=TaskStatus.CANCELLED)
+        _safe_call(reporter, "on_task_end", task.task_id, TaskStatus.CANCELLED)
+        return result
+
+    # The dispatch always leaves exactly one receipt for having been asked:
+    # the first task goes through the recording path even when the token is
+    # already set, so a cancelled run is still a complete, readable run
+    # directory. Every task after that one is skipped outright — it never
+    # began, so there is nothing about it to record.
+    claimed: list[str] = []
+    claim_lock = threading.Lock()
+
     def _submit(task: TaskConfig) -> TaskResult:
+        with claim_lock:
+            skip = bool(claimed) and cancel_token.is_cancelled()
+            if not skip:
+                claimed.append(task.task_id)
+        if skip:
+            return _never_started(task)
         return _run_single_task(
             project=project,
             task=task,
@@ -989,9 +1032,20 @@ def _append_synthetic_stage(
     ``stages`` list silently omitted everything that was skipped would be
     unreadable six months later, when "did jivaro not run, or did it not get
     recorded?" is exactly the question being asked.
+
+    A synthetic *failure* -- the work dir that could not be prepared, the
+    workspace another run holds the lock on -- is classified like any other,
+    so the card shows a diagnosis rather than a bare red row. It never
+    started, so the verdict is a never-started one and points at the reason
+    instead of at a stage log that does not exist.
     """
     _safe_call(reporter, "on_stage_start", task_id, step.key)
     moment = utcnow()
+    details: dict[str, Any] = {}
+    if status == StageStatus.FAILED:
+        details[DETAILS_FAILURE_KEY] = _jsonable(
+            classify_failure(stage=step.stage, precondition_error=reason).as_dict()
+        )
     record = StageRecord(
         key=step.key,
         stage=step.stage,
@@ -999,6 +1053,7 @@ def _append_synthetic_stage(
         started_at=moment,
         ended_at=moment,
         duration_s=0.0,
+        details=details,
         error=reason if status in (StageStatus.CANCELLED, StageStatus.FAILED) else None,
         skip_reason=reason,
         render_target=step.plan.target.value if step.plan is not None else None,
@@ -1009,6 +1064,38 @@ def _append_synthetic_stage(
     task_result.stages.append(result)
     _safe_store(append_event, run_dir, _stage_end_event(result))
     _safe_call(reporter, "on_stage_end", task_id, step.key, status, reason)
+
+
+def _stage_verdict(
+    *,
+    stage: str,
+    tool_result: ToolResult | None,
+    log_path: Path | None,
+    render_error: str | None = None,
+    precondition_error: str | None = None,
+) -> FailureVerdict:
+    """Why this stage failed, decided while the evidence is still in hand.
+
+    Two shapes of failure reach here. A stage that *ran* has a
+    :class:`~auto_ext.tools.base.ToolResult` carrying the exit code, the
+    parsed LVS report and the declared-but-absent outputs, and
+    :func:`~auto_ext.core.failure_class.classify_tool_result` reads all three
+    out of it. A stage that never started has none of that -- only the reason
+    it refused -- and its verdict must not tell the user to read a stage log
+    that was never opened.
+
+    Never raises: the classifier promises not to, and a run that fell over
+    while explaining why it fell over would be the worst outcome of all.
+    """
+
+    if tool_result is not None:
+        return classify_tool_result(tool_result, stage=stage)
+    return classify_failure(
+        stage=stage,
+        render_error=render_error,
+        precondition_error=precondition_error,
+        log_path=log_path,
+    )
 
 
 def _run_single_stage(
@@ -1037,7 +1124,29 @@ def _run_single_stage(
         rendered: Path | None = None,
         argv: list[str] | None = None,
         logged: bool = False,
+        render_error: str | None = None,
+        precondition_error: str | None = None,
     ) -> StageResult:
+        details = _jsonable_diagnostics(tool_result)
+        if status == StageStatus.FAILED:
+            # Classify here, once, while the facts are still live. The record
+            # keeps the exit code but not the parsed LvsReport, not the render
+            # error and not "the tool never wrote what it declared", so a
+            # consumer re-deriving the diagnosis months later gets a worse
+            # answer than the runner could give now.
+            details[DETAILS_FAILURE_KEY] = _jsonable(
+                _stage_verdict(
+                    stage=stage,
+                    tool_result=tool_result,
+                    log_path=log_path if logged else None,
+                    render_error=render_error,
+                    # A stage that raised before any log existed never really
+                    # started, so its own message is the whole evidence and
+                    # the verdict must not send the reader to a missing log.
+                    precondition_error=precondition_error
+                    or (None if logged or render_error else error),
+                ).as_dict()
+            )
         record = StageRecord(
             key=step.key,
             stage=stage,
@@ -1052,7 +1161,7 @@ def _run_single_stage(
             rendered_path=_run_relative(exec_ctx.run_dir, rendered),
             render_target=step.plan.target.value if step.plan is not None else None,
             artifacts=[str(p) for p in (tool_result.artifact_paths if tool_result else [])],
-            details=_jsonable_diagnostics(tool_result),
+            details=details,
             error=error,
         )
         return StageResult(
@@ -1084,7 +1193,11 @@ def _run_single_stage(
                 templates_root=pipeline.templates_root,
             )
         except AutoExtError as exc:
-            return _finish(StageStatus.FAILED, error=f"render failed: {exc}")
+            return _finish(
+                StageStatus.FAILED,
+                error=f"render failed: {exc}",
+                render_error=str(exc),
+            )
         patch_report = rendered.patch_report
         rendered_path = rendered.out_path
         rendered_record: Path | None = rendered_path
@@ -1114,7 +1227,12 @@ def _run_single_stage(
     if step.plan is not None and step.plan.target is render.RenderTarget.QUANTUS_DSPF:
         problem = _ensure_dspf_parent(context, dry_run=dry_run)
         if problem is not None:
-            return _finish(StageStatus.FAILED, error=problem, rendered=rendered_record)
+            return _finish(
+                StageStatus.FAILED,
+                error=problem,
+                rendered=rendered_record,
+                precondition_error=problem,
+            )
 
     if dry_run:
         return _finish(StageStatus.DRY_RUN, rendered=rendered_record)
@@ -1920,6 +2038,39 @@ def _validate_stages(stages: list[str]) -> None:
         raise ConfigError(
             f"unknown stage(s): {sorted(unknown)}; valid: {list(STAGE_ORDER)}"
         )
+
+
+def _validate_stage_overlap(stages: list[str], *, pipeline: RecipePipeline) -> None:
+    """Refuse a dispatch whose stage set the recipe cannot honour at all.
+
+    ``_recipe_steps`` intersects the caller's ``stages`` with
+    ``recipe.stages``, and that intersection can be **empty** -- tick only
+    ``jivaro`` for a recipe that stops at calibre and there is nothing to run.
+    An empty run used to be legal: it claimed a run directory, took the
+    workspace lock, executed nothing, and ``_compute_overall`` found no
+    failure and returned PASSED. A green "PASSED" over an empty stage strip is
+    the worst answer available, because the one thing the user came for --
+    "did my cell extract?" -- is answered yes by a run that never looked.
+
+    Refused rather than warned, and refused *here*, before a run directory
+    exists: an empty run is never what the user meant, and the two stage lists
+    are both in hand at dispatch time, so the message can name each side and
+    let the user decide which one to change. (Warning instead would leave a
+    run in the history whose only content is the warning -- the same fake
+    action wearing a different colour. The owner can overrule this; it is a
+    contract decision, not a technical one.)
+    """
+
+    declared = {s.value for s in pipeline.recipe.stages}
+    if declared & set(stages):
+        return
+    raise ConfigError(
+        f"none of the requested stage(s) {sorted(set(stages))} are in recipe "
+        f"{pipeline.recipe.recipe_id!r}, which declares "
+        f"{[s for s in STAGE_ORDER if s in declared]}. Nothing would run, so "
+        "nothing is started: either pick a stage the recipe declares, or add "
+        "the stage to the recipe."
+    )
 
 
 def _validate_tasks(
