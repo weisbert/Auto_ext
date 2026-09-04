@@ -562,25 +562,25 @@ def test_show_discrepancies_brings_the_band_back_when_there_is_range(
     assert bar.value() != was, "the view did not move towards the LVS band"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "M-51 open: refresh() re-lists and re-emits status_text(), which is "
-        "the string already on the bar, so a re-read of an unchanged "
-        "directory produces no pixel at all"
-    ),
-)
+# M-51 is FIXED: refresh() ends with an acknowledgement that carries the
+# wall-clock time, so a second press is a different string on the bar.
 def test_refresh_says_something_new_when_the_directory_has_not_changed(
     runs, window, qtbot
 ) -> None:
-    """Pressing Refresh twice must be distinguishable from pressing it once."""
+    """Pressing Refresh twice must be distinguishable from pressing it once.
+
+    The acknowledgement's clock has one-second resolution, so the second
+    press has to land in a later second than the first; a 10 ms gap turned
+    this into a race that passed or failed with the machine's load.
+    """
 
     press = button(runs, "Refresh")
     qtbot.mouseClick(press, Qt.LeftButton)
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: window.shell.status_left() != "", timeout=2000)
     first = window.shell.status_left()
+    qtbot.wait(1100)  # the acknowledgement carries a wall-clock time
     qtbot.mouseClick(press, Qt.LeftButton)
-    qtbot.wait(10)
+    qtbot.waitUntil(lambda: window.shell.status_left() != first, timeout=2000)
     assert window.shell.status_left() != first, (
         "the status line says the same words after the second Refresh, so the "
         "user cannot tell whether the button did anything"
