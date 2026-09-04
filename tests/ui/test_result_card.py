@@ -1593,3 +1593,197 @@ def test_result_card_show_lvs_detail_does_not_raise_off_screen(
     qtbot.addWidget(card)
     card.set_run(record, run_dir=run_dir)
     card.show_lvs_detail()
+
+
+# ============================================================================
+# review 2026-09-04: the card's own defects (M-26, M-28, M-45, M-52, M-63)
+# ============================================================================
+
+
+def test_show_discrepancies_changes_something_when_the_card_does_not_scroll(
+    qtbot, populated_run
+) -> None:
+    """M-26: the button promises a destination; a no-op scroll delivers none.
+
+    ``ensureWidgetVisible`` moves nothing when the LVS band is already the
+    first widget of an unscrolled viewport, which is the normal case.
+    """
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    card.resize(900, 1400)  # so tall that the details never need to scroll
+    card.show()
+    qtbot.waitExposed(card)
+    assert card._scroll.verticalScrollBar().maximum() == 0, "no scrolling to do"
+
+    before = card._lvs_band.styleSheet()
+    button = [b for b in _failure_buttons(card) if b.text().startswith("Show ")][0]
+    qtbot.mouseClick(button, Qt.LeftButton)
+    assert card.lvs_detail_highlighted() is True
+    assert card._lvs_band.styleSheet() != before
+
+
+def test_the_lvs_highlight_fades_by_itself(qtbot, populated_run) -> None:
+    """A highlight that stayed would read as a state, not as an answer."""
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    plain = card._lvs_band.styleSheet()
+    card.show_lvs_detail()
+    assert card.lvs_detail_highlighted() is True
+    qtbot.waitUntil(lambda: not card.lvs_detail_highlighted(), timeout=5000)
+    assert card._lvs_band.styleSheet() == plain
+
+
+def test_a_run_without_lvs_does_not_inherit_the_previous_discrepancy_count(
+    qtbot, populated_run, make_run_record
+) -> None:
+    """M-28: ``_delta`` survived ``set_run``, so the next card offered to show
+    17 discrepancies for a run that never reached LVS."""
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    assert card.discrepancy_delta is not None
+
+    crashed = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[_stage("si", status=StageStatus.FAILED)],
+    )
+    card.set_run(crashed)
+    assert card.discrepancy_delta is None
+    assert card._lvs_banner.text() == "not run"
+    labels = [b.text() for b in _failure_buttons(card)]
+    assert not any(any(ch.isdigit() for ch in label) for label in labels), labels
+
+
+def test_only_one_visible_button_opens_calibre_interactive(
+    qtbot, populated_run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-45: the fixed action and the LVS failure row offered the same thing
+    under two different labels."""
+
+    from PyQt5.QtWidgets import QPushButton
+
+    record, run_dir = populated_run
+    monkeypatch.setattr(rc, "plan_calibre_handoff", lambda rec, *a, **k: _plan(ok=True))
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    card.show()
+    qtbot.waitExposed(card)
+
+    offers = [
+        b
+        for b in card.findChildren(QPushButton)
+        if "Calibre Interactive" in b.text() and b.isVisible() and b.isEnabled()
+    ]
+    assert [b.text() for b in offers] == ["Open in Calibre Interactive"]
+
+
+def test_the_fixed_handoff_button_is_there_when_no_failure_row_offers_it(
+    qtbot, make_run_record, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The card-level action steps aside for the duplicate, never for good."""
+
+    monkeypatch.setattr(rc, "plan_calibre_handoff", lambda rec, *a, **k: _plan(ok=True))
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(make_run_record(stages=[_stage("calibre")]))
+    card.show()
+    qtbot.waitExposed(card)
+    assert card._handoff_btn.isVisible()
+    assert card._handoff_btn.isEnabled()
+
+
+def test_clicking_the_runset_path_opens_it(
+    qtbot, populated_run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-52: the runset line is drawn as a link, with the hand cursor, and
+    nothing was connected to its ``clicked``."""
+
+    from PyQt5.QtCore import QPoint
+
+    record, run_dir = populated_run
+    runset = run_dir / "rendered" / "lvs.qci"
+    monkeypatch.setattr(
+        rc,
+        "plan_calibre_handoff",
+        lambda rec, *a, **k: HandoffPlan(
+            argv=("/opt/calibre", "-gui", "-lvs", "-runset", str(runset)),
+            cwd=run_dir,
+            env={},
+            runset=runset,
+            stage_key="calibre",
+            executable="calibre",
+        ),
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+    card.resize(900, 700)
+    card.show()
+    qtbot.waitExposed(card)
+    assert card._runset_line.is_live()
+    assert card._runset_line.cursor().shape() == Qt.PointingHandCursor
+
+    with qtbot.waitSignal(card.artifact_requested, timeout=1000) as blocker:
+        qtbot.mouseClick(
+            card._runset_line, Qt.LeftButton, pos=QPoint(4, card._runset_line.height() // 2)
+        )
+    assert blocker.args == [runset]
+
+
+def test_two_calibre_logs_are_never_offered_under_the_same_label(
+    qtbot, make_run_record, run_dir: Path
+) -> None:
+    """M-63: a retried calibre stage gave two controls the same words and two
+    different files."""
+
+    (run_dir / "logs" / "calibre.log").write_text("first try\n", encoding="utf-8")
+    (run_dir / "logs" / "calibre.retry.log").write_text("second\n", encoding="utf-8")
+    record = make_run_record(
+        run_dir=run_dir,
+        overall=TaskStatus.FAILED,
+        stages=[
+            StageRecord(
+                key="calibre",
+                stage="calibre",
+                status=StageStatus.FAILED,
+                log_path="logs/calibre.log",
+                exit_code=1,
+            ),
+            StageRecord(
+                key="calibre.retry",
+                stage="calibre",
+                status=StageStatus.FAILED,
+                log_path="logs/calibre.retry.log",
+                exit_code=1,
+            ),
+        ],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    controls = [
+        b for b in _failure_buttons(card) if b.text().startswith("Open ")
+    ] + [card._calibre_log_btn]
+    opened: dict[str, set[str]] = {}
+    for button in controls:
+        with qtbot.waitSignal(card.log_requested, timeout=1000) as blocker:
+            button.click()
+        opened.setdefault(button.text(), set()).add(Path(blocker.args[0]).name)
+
+    # One label may name one file; the same words for two files is the defect.
+    assert all(len(names) == 1 for names in opened.values()), opened
+    # And the label is the file name, so the two rows can be told apart.
+    assert opened == {
+        "Open calibre.log": {"calibre.log"},
+        "Open calibre.retry.log": {"calibre.retry.log"},
+    }

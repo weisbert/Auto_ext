@@ -200,6 +200,11 @@ GLYPH_EXPANDED = "▴"
 #: captions from wrapping into four lines each in a narrow card.
 LVS_COLUMN_WIDTH = 180
 
+#: How long the LVS band stays washed after "Show N discrepancies". Long
+#: enough to be seen after the eye has moved, short enough that it cannot be
+#: mistaken for a persistent state.
+LVS_HIGHLIGHT_MS = 1600
+
 #: Hunk statuses that really altered the rendered file.
 APPLIED_PATCH_STATUSES: frozenset[PatchStatus] = frozenset(
     {PatchStatus.CLEAN, PatchStatus.SHIFTED}
@@ -796,6 +801,21 @@ def resolve_run_relative(run_dir: Path | None, relative: str | None) -> Path | N
     return Path(run_dir) / PurePosixPath(relative)
 
 
+def stage_log_name(stage: StageRecord) -> str:
+    """The file name of a stage's log, for a button that opens exactly it.
+
+    The recorded name when there is one; otherwise the name the runner would
+    have written (``logs/<key>.log``). Never ``<tool>.log``: several stage
+    records can share a tool -- a retried ``calibre``, ``quantus.ext`` beside
+    ``quantus.dspf`` -- and two buttons carrying one name for two files is
+    what sent the user to the wrong log.
+    """
+
+    if stage.log_path:
+        return PurePosixPath(stage.log_path).name
+    return f"{stage.key}.log"
+
+
 def _clear_layout(layout: Any) -> None:
     """Delete every child widget/layout so a section can be rebuilt."""
 
@@ -888,6 +908,14 @@ class ResultCard(QWidget):
         self._stage_logs_open = False
 
         self._build_ui()
+
+        # Owned by the card, not a bare ``QTimer.singleShot``: a timer parented
+        # here dies with the widget, so a card closed while the wash is up
+        # cannot fire into a deleted C++ object.
+        self._lvs_highlight_timer = QTimer(self)
+        self._lvs_highlight_timer.setSingleShot(True)
+        self._lvs_highlight_timer.timeout.connect(self._clear_lvs_highlight)
+
         self.clear()
 
     # ---- public API ---------------------------------------------------
@@ -1008,9 +1036,32 @@ class ResultCard(QWidget):
         return record
 
     def show_lvs_detail(self) -> None:
-        """Scroll the LVS band into view. The "Show N discrepancies" action."""
+        """The "Show N discrepancies" action: put the LVS band under the eye.
+
+        Scrolling alone cannot be the whole effect of a labelled button. The
+        band is the *first* widget in the details area, so on a card that fits
+        its window the scroll range toward it is zero and nothing at all
+        moves -- the button reads as dead exactly when the card is easiest to
+        read. The scroll is kept for the case where it does help, and the band
+        is washed with the selection tint for :data:`LVS_HIGHLIGHT_MS` so the
+        destination is visible either way.
+        """
 
         self._scroll.ensureWidgetVisible(self._lvs_band)
+        self._lvs_band.setStyleSheet(
+            f"QFrame#{OBJ_CARD_BAND} {{ background: {theme.ACCENT_TINT}; "
+            f"border: none; border-bottom: 1px solid {theme.LINE_ROW}; "
+            f"border-left: {theme.SELECTED_BAR_WIDTH}px solid {theme.ACCENT}; }}"
+        )
+        self._lvs_highlight_timer.start(LVS_HIGHLIGHT_MS)
+
+    def lvs_detail_highlighted(self) -> bool:
+        """True while the LVS band is washed by :meth:`show_lvs_detail`."""
+
+        return self._lvs_highlight_timer.isActive()
+
+    def _clear_lvs_highlight(self) -> None:
+        self._lvs_band.setStyleSheet(self._lvs_band_qss)
 
     # ---- construction -------------------------------------------------
 
@@ -1246,6 +1297,8 @@ class ResultCard(QWidget):
     def _build_lvs_band(self, parent: QWidget) -> QWidget:
         band = _band(parent)
         self._lvs_band = band
+        #: The plain sheet :meth:`_clear_lvs_highlight` restores.
+        self._lvs_band_qss = band.styleSheet()
         outer = QVBoxLayout(band)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -1396,6 +1449,10 @@ class ResultCard(QWidget):
         outer.addWidget(self._launch_row)
 
         self._runset_line = PathLabel(band, mode=Qt.ElideLeft)
+        # A PathLabel with a path styles itself as a link and takes the
+        # pointing-hand cursor, so it must actually open something -- the same
+        # wiring the artifact grid uses.
+        self._runset_line.clicked.connect(self.artifact_requested)
         self._runset_note = QLabel("", band)
         self._runset_note.setStyleSheet(
             f"{_MONO} font-size: {theme.FONT_SIZE_META}px; "
@@ -1704,6 +1761,11 @@ class ResultCard(QWidget):
         return None
 
     def _fill_lvs(self) -> None:
+        # First, before any branch can skip it: the delta belongs to the run
+        # being drawn. Left standing, the previous run's count came back as a
+        # "Show 17 discrepancies" button on a run that never reached LVS, and
+        # out of the public ``discrepancy_delta`` property as well.
+        self._delta = None
         record = self._record
         assert record is not None
         lvs = record.results.lvs
@@ -1972,7 +2034,11 @@ class ResultCard(QWidget):
         button_layout.addStretch(1)
         for action in failure_actions(
             code,
-            log_name=f"{stage.stage}.log",
+            # The recorded file, not the tool name: the runner writes
+            # ``logs/<stage key>.log``, so a retried calibre stage and a
+            # ``quantus.dspf`` step each name their own log rather than
+            # borrowing a sibling's.
+            log_name=stage_log_name(stage),
             discrepancies=self._delta.current if self._delta else None,
         ):
             button_layout.addWidget(self._action_button(action, buttons, stage, verdict))
@@ -2163,6 +2229,14 @@ class ResultCard(QWidget):
         enabled = plan is not None and plan.ok
         self._handoff_btn.setEnabled(bool(enabled))
         self._handoff_btn.setToolTip(self._handoff_tooltip())
+        # An LVS failure row already carries "Open in Calibre Interactive",
+        # wired to this very method. Two buttons with almost the same words on
+        # one card is a question ("do they differ?"), not an affordance, so the
+        # card-level one steps aside for the row that has the context. It comes
+        # back for every other run, which is where it is the only offer.
+        self._handoff_btn.setVisible(
+            not any(group.code == CODE_LVS for group in self._groups)
+        )
 
         if plan is not None and plan.argv:
             self._launch_line.set_placeholder(plan.command_line)
@@ -2192,6 +2266,13 @@ class ResultCard(QWidget):
 
         calibre_log = self.stage_log_path("calibre")
         self._calibre_log_btn.setEnabled(calibre_log is not None)
+        # The label names the file this button really opens. When calibre ran
+        # twice in one run this control resolves the *last* attempt while the
+        # failure row resolves its own stage, and two buttons reading "Open
+        # calibre.log" then opened two different files.
+        self._calibre_log_btn.setText(
+            f"Open {calibre_log.name}" if calibre_log is not None else "Open calibre.log"
+        )
         self._calibre_log_btn.setToolTip(
             str(calibre_log)
             if calibre_log is not None
