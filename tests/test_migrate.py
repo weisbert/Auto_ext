@@ -984,15 +984,41 @@ def test_open_questions_only_name_values_that_were_written(
 def test_open_questions_are_written_next_to_the_value(
     tmp_path: Path, elsewhere: None
 ) -> None:
+    """The example row is chosen by predicate, never by name.
+
+    This used to name ``coupling_cap_threshold_absolute`` as its specimen of a
+    value nobody has confirmed. Reading the vendor manual and answering that
+    question -- deleting the row's ``question:`` -- then turned this test red,
+    which is exactly backwards: answering a question is progress, and the
+    thing worth guarding is that *whatever* is still unconfirmed reaches the
+    file beside its own value. So ask the report which questions landed in
+    this recipe and check every one of them.
+    """
+
     report = run_migration(REAL_CONFIG, tmp_path)
-    recipe_text = (tmp_path / "recipes" / f"{report.recipes[0].recipe_id}.yaml").read_text(
-        encoding="utf-8"
-    )
+    recipe_id = report.recipes[0].recipe_id
+    recipe_text = (tmp_path / "recipes" / f"{recipe_id}.yaml").read_text(encoding="utf-8")
+
+    asked = [q for q in report.open_questions if q.file == f"recipes/{recipe_id}.yaml"]
+    assert asked, "the migration reported no open question against this recipe"
     assert "NEEDS CONFIRMATION" in recipe_text
-    assert "coupling_cap_threshold_absolute" in recipe_text
+
     lines = recipe_text.splitlines()
-    index = next(i for i, line in enumerate(lines) if "coupling_cap_threshold_absolute:" in line)
-    assert any("NEEDS CONFIRMATION" in line for line in lines[max(0, index - 3) : index])
+    for question in asked:
+        leaf = question.field_path.rsplit(".", 1)[-1]
+        index = next(
+            (i for i, line in enumerate(lines) if line.strip().startswith(f"{leaf}:")),
+            None,
+        )
+        assert index is not None, f"{question.field_path} was asked about but never written"
+        # The comment block immediately above the value, however many lines the
+        # question wrapped to.
+        above = []
+        cursor = index - 1
+        while cursor >= 0 and lines[cursor].strip().startswith("#"):
+            above.append(lines[cursor])
+            cursor -= 1
+        assert any("NEEDS CONFIRMATION" in line for line in above), question.field_path
 
 
 def test_generated_files_say_the_sources_were_left_alone(

@@ -53,13 +53,53 @@ def test_an_ambiguous_option_name_is_qualified_by_its_statement() -> None:
     """`-type` belongs to extract, metal_fill, input_db and output_db alike.
 
     Searching it bare finds all four and answers none.
+
+    Both specimens are picked by predicate rather than named. This test used
+    to name ``-use_field_solver`` as its example of a name nobody shares, and
+    went red the day somebody read the manual and deleted that row's
+    ``question:`` -- an answered question is progress, not a regression. Every
+    row the table carries is an open question, so which rows exist changes
+    constantly; what must not change is that a shared name is qualified by its
+    statement and an unshared one is not.
     """
 
+    from auto_ext.catalog import builtin_catalog
+
+    from scripts.refresh_extdoc_fields import OVERRIDE
+
+    catalog = builtin_catalog()
+    # Counted per row, the way build_table counts it.
+    seen: dict[str, int] = {}
+    for opt in catalog.options:
+        for name in {site.option for site in opt.lands_in if site.option}:
+            seen[name] = seen.get(name, 0) + 1
+
     table, _ = build_table()
-    assert "'metal_fill -type'" in table
-    assert "'output_db -type'" in table
+    # OVERRIDE rows have their terms replaced wholesale, so they say nothing
+    # about how a derived term is spelled.
+    asked = [opt for opt in catalog.options if opt.question and opt.key not in OVERRIDE]
+
+    shared = {
+        (site.section, site.option)
+        for opt in asked
+        for site in opt.lands_in
+        if site.option and seen.get(site.option, 0) > 1
+    }
+    assert shared, "no open question lands on an option name that two rows share"
+    for section, option in sorted(shared):
+        assert repr(f"{section} {option}") in table
+        assert repr(option) not in table, f"{option} is shared and must not be searched bare"
+
     # ...and one that is NOT shared keeps its bare name.
-    assert "'-use_field_solver'" in table
+    bare = {
+        site.option
+        for opt in asked
+        for site in opt.lands_in
+        if site.option and seen.get(site.option, 0) == 1
+    }
+    assert bare, "no open question lands on an option name of its own"
+    for option in sorted(bare):
+        assert repr(option) in table
 
 
 def test_a_row_that_emits_nothing_gets_a_term_the_manual_has_seen() -> None:
