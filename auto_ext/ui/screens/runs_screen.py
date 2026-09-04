@@ -484,6 +484,7 @@ class RunsScreen(QWidget):
         self._card.copy_requested.connect(
             lambda text: self.status_message.emit(f"copied: {text}")
         )
+        self._card.status_message.connect(self.status_message.emit)
 
         card_holder = QWidget(self._stack)
         holder_layout = QVBoxLayout(card_holder)

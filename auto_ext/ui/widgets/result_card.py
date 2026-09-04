@@ -664,8 +664,8 @@ def stage_chips(record: RunRecord) -> list[StageChip]:
         tooltip_bits = [STAGE_DISPLAY.get(status, status)]
         if stage.duration_s is not None:
             tooltip_bits.append(format_duration(stage.duration_s))
-        if stage.exit_code is not None:
-            tooltip_bits.append(f"exit code {stage.exit_code}")
+        if exit_text(stage):
+            tooltip_bits.append(exit_text(stage))
         if stage.error:
             tooltip_bits.append(stage.error)
         chips.append(
@@ -801,6 +801,86 @@ def resolve_run_relative(run_dir: Path | None, relative: str | None) -> Path | N
     return Path(run_dir) / PurePosixPath(relative)
 
 
+class LogTarget(NamedTuple):
+    """A stage's log: what was recorded, where it resolves, is it there.
+
+    "This stage produced no log" and "the log it produced is not there any
+    more" are different problems with different fixes, and the card used to
+    print the first message for both: the runner leaves ``log_path`` empty
+    only for the failures that happen before a log exists (a render error, a
+    DSPF parent error), and writes a log for every real subprocess -- exit 127
+    included. Telling the user a file was never written when its path is
+    recorded in ``run.json`` sends them looking for the wrong thing.
+    """
+
+    #: The run-relative path as recorded, ``""`` when the stage recorded none.
+    recorded: str
+    #: ``recorded`` resolved against the run directory, when both are known.
+    path: Path | None
+    #: The resolved path is a readable file right now.
+    live: bool
+
+    @property
+    def why_not(self) -> str:
+        """One line for a control that cannot act. Empty when it can."""
+
+        if self.live:
+            return ""
+        if not self.recorded:
+            return "This stage recorded no log."
+        if self.path is None:
+            return (
+                f"This stage recorded {self.recorded}, but the run directory "
+                "is not known, so it cannot be resolved."
+            )
+        return f"Recorded as {self.recorded}, but {self.path} is not there now."
+
+
+def stage_log_target(run_dir: Path | None, stage: StageRecord) -> LogTarget:
+    """Resolve one stage's archived log without deciding what to say about it."""
+
+    recorded = str(stage.log_path or "")
+    path = resolve_run_relative(run_dir, stage.log_path)
+    return LogTarget(recorded=recorded, path=path, live=bool(path and path.is_file()))
+
+
+def exit_text(stage: StageRecord) -> str:
+    """``"exit 127"``, ``"terminated"`` or ``""`` for a stage's exit code.
+
+    A cancelled stage's exit code is the signal that killed it -- ``-15`` on
+    POSIX -- which is what ``tools/base.py`` warns about in its own docstring:
+    it describes the kill, not the problem. Printing it raw asked the user to
+    decode a number that says nothing about their design.
+    """
+
+    if stage.exit_code is None:
+        return ""
+    if stage.status == StageStatus.CANCELLED:
+        return "terminated"
+    return f"exit {stage.exit_code}"
+
+
+def report_gone_reason(path: Path) -> str:
+    """Why a recorded LVS report cannot be opened, without inventing a cause.
+
+    "A later run overwrote the workarea copy" is the usual reason a workarea
+    path has vanished, and it is a guess the card may only make when the path
+    really is absent. A directory, an unreadable mount or a stale NFS handle
+    is a different state and gets its own sentence.
+    """
+
+    try:
+        exists = path.exists()
+        is_dir = path.is_dir()
+    except OSError as exc:  # EACCES / ESTALE on a network mount
+        return f"Cannot be read on this host: {exc}"
+    if not exists:
+        return "Gone - a later run of this cell overwrote the workarea copy."
+    if is_dir:
+        return "This path is a directory, not a report file."
+    return "This path exists but is not a readable regular file."
+
+
 def stage_log_name(stage: StageRecord) -> str:
     """The file name of a stage's log, for a button that opens exactly it.
 
@@ -895,6 +975,10 @@ class ResultCard(QWidget):
     #: Emitted with a section hint (``"Paths"``, ``""``) when a configuration
     #: failure sends the user to the Setup drawer.
     setup_requested = pyqtSignal(str)
+    #: Emitted with one line for the status bar when a gesture the card
+    #: advertises cannot do anything -- a double-click on a stage whose log is
+    #: gone. Silence there reads as a broken application.
+    status_message = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1603,8 +1687,8 @@ class ResultCard(QWidget):
                 tooltip_bits.append(stage.skip_reason)
             if stage.error:
                 tooltip_bits.append(stage.error)
-            if stage.exit_code is not None:
-                tooltip_bits.append(f"exit code {stage.exit_code}")
+            if exit_text(stage):
+                tooltip_bits.append(exit_text(stage))
             if tooltip_bits:
                 item.setToolTip(1, "\n".join(tooltip_bits))
             for artifact in stage.artifacts:
@@ -1616,24 +1700,38 @@ class ResultCard(QWidget):
                 item.addChild(child)
             tree.addTopLevelItem(item)
 
-    def _selected_stage_log(self) -> Path | None:
+    def _selected_stage(self) -> StageRecord | None:
+        """The :class:`StageRecord` behind the selected row, if it is a stage."""
+
         items = self._stage_tree.selectedItems()
-        if not items:
+        if not items or self._record is None:
             return None
         item = items[0]
         if item.data(0, _ROLE_KIND) != _KIND_STAGE:
             return None
-        raw = item.data(0, _ROLE_PATH)
-        if not raw:
+        key = item.text(0)
+        for stage in self._record.stages:
+            if stage.key == key:
+                return stage
+        return None
+
+    def _selected_stage_log(self) -> Path | None:
+        stage = self._selected_stage()
+        if stage is None:
             return None
-        path = Path(str(raw))
-        return path if path.is_file() else None
+        target = stage_log_target(self._run_dir, stage)
+        return target.path if target.live else None
 
     def _update_log_button(self) -> None:
-        path = self._selected_stage_log()
-        self._open_log_btn.setEnabled(path is not None)
+        stage = self._selected_stage()
+        if stage is None:
+            self._open_log_btn.setEnabled(False)
+            self._open_log_btn.setToolTip("Select a stage that produced a log.")
+            return
+        target = stage_log_target(self._run_dir, stage)
+        self._open_log_btn.setEnabled(target.live)
         self._open_log_btn.setToolTip(
-            str(path) if path is not None else "Select a stage that produced a log."
+            str(target.path) if target.live else target.why_not
         )
 
     def _emit_selected_log(self) -> None:
@@ -1642,15 +1740,31 @@ class ResultCard(QWidget):
             self.log_requested.emit(path)
 
     def _on_stage_double_click(self, item: QTreeWidgetItem, column: int) -> None:
+        """The gesture the hint under the tree advertises. Never silent.
+
+        A stage whose log was recorded and then deleted, and a stage that never
+        wrote one, both used to end here with a bare ``return``.
+        """
+
         raw = item.data(0, _ROLE_PATH)
-        if not raw:
-            return
-        path = Path(str(raw))
         if item.data(0, _ROLE_KIND) == _KIND_ARTIFACT:
-            self.artifact_requested.emit(path)
+            if raw:
+                self.artifact_requested.emit(Path(str(raw)))
             return
-        if path.is_file():
-            self.log_requested.emit(path)
+
+        stage = None
+        if self._record is not None:
+            stage = next(
+                (s for s in self._record.stages if s.key == item.text(0)), None
+            )
+        if stage is None:
+            return
+        target = stage_log_target(self._run_dir, stage)
+        if target.live:
+            assert target.path is not None
+            self.log_requested.emit(target.path)
+            return
+        self.status_message.emit(f"{stage.key}: {target.why_not}")
 
     def _on_stage_menu(self, pos: QPoint) -> None:
         """Right-click menu on a stage or artifact row (deferred popup)."""
@@ -1684,7 +1798,21 @@ class ResultCard(QWidget):
             act_log = QAction("Open log file", menu)
             if log_path is None or not log_path.is_file():
                 act_log.setEnabled(False)
-                act_log.setToolTip("This stage produced no log.")
+                stage = (
+                    next(
+                        (
+                            s
+                            for s in (self._record.stages if self._record else [])
+                            if s.key == item.text(0)
+                        ),
+                        None,
+                    )
+                )
+                act_log.setToolTip(
+                    stage_log_target(self._run_dir, stage).why_not
+                    if stage is not None
+                    else "This stage produced no log."
+                )
             else:
                 act_log.setToolTip(str(log_path))
                 act_log.triggered.connect(
@@ -1985,9 +2113,10 @@ class ResultCard(QWidget):
         title.setStyleSheet(
             f"{_MONO} font-weight: {theme.FONT_WEIGHT_BOLD};"
         )
+        exit_note = exit_text(stage)
         where = _caption(
             f"{stage.key}"
-            + (f" - exit {stage.exit_code}" if stage.exit_code is not None else "")
+            + (f" - {exit_note}" if exit_note else "")
             + (f" - {format_duration(stage.duration_s)}" if stage.duration_s else ""),
             middle,
         )
@@ -2080,15 +2209,12 @@ class ResultCard(QWidget):
             button.setToolTip("Scroll to the LVS banner, count and CELL SUMMARY.")
             button.clicked.connect(lambda _c=False: self.show_lvs_detail())
         else:  # ACTION_OPEN_LOG
-            log_path = resolve_run_relative(self._run_dir, stage.log_path)
-            live = log_path is not None and log_path.is_file()
-            button.setEnabled(live)
-            button.setToolTip(
-                str(log_path) if live else "This stage archived no log in the run."
-            )
-            if live:
+            target = stage_log_target(self._run_dir, stage)
+            button.setEnabled(target.live)
+            button.setToolTip(str(target.path) if target.live else target.why_not)
+            if target.live:
                 button.clicked.connect(
-                    lambda _c=False, p=log_path: self.log_requested.emit(p)
+                    lambda _c=False, p=target.path: self.log_requested.emit(p)
                 )
         return button
 
@@ -2128,7 +2254,7 @@ class ResultCard(QWidget):
                 row,
                 "lvs report",
                 lvs.source_path,
-                reason="Gone - a later run of this cell overwrote the workarea copy.",
+                reason=report_gone_reason(Path(lvs.source_path)),
             )
         else:
             row = self._add_output_row(

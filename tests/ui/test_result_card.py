@@ -1236,7 +1236,7 @@ def test_result_card_open_log_button_tracks_the_selection(
     # The skipped stage produced no log -> the button goes back to disabled.
     card._stage_tree.setCurrentItem(card._stage_tree.topLevelItem(2))
     assert not card._open_log_btn.isEnabled()
-    assert "produced a log" in card._open_log_btn.toolTip()
+    assert "no log" in card._open_log_btn.toolTip()
 
 
 def test_result_card_double_click_opens_logs_and_artifacts(
@@ -1787,3 +1787,153 @@ def test_two_calibre_logs_are_never_offered_under_the_same_label(
         "Open calibre.log": {"calibre.log"},
         "Open calibre.retry.log": {"calibre.retry.log"},
     }
+
+
+# ============================================================================
+# review 2026-09-04: a log that was recorded and is gone (M-34, M-35, M-48)
+# ============================================================================
+
+
+@pytest.fixture
+def deleted_log(populated_run):
+    """``populated_run`` with the calibre log removed from the run directory."""
+
+    record, run_dir = populated_run
+    (run_dir / "logs" / "calibre.log").unlink()
+    return record, run_dir
+
+
+def test_a_recorded_log_that_is_gone_is_not_reported_as_never_written(
+    qtbot, deleted_log
+) -> None:
+    """M-34: three messages read "no log" off ``is_file()`` alone, and the
+    runner writes a log for every real subprocess -- including exit 127."""
+
+    record, run_dir = deleted_log
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    calibre = card._stage_tree.topLevelItem(1)
+    card._stage_tree.setCurrentItem(calibre)
+    assert not card._open_log_btn.isEnabled()
+    assert "logs/calibre.log" in card._open_log_btn.toolTip()
+
+    # The failure row's own button says the same thing.
+    row_button = [
+        b for b in _failure_buttons(card) if b.text() == "Open calibre.log"
+    ]
+    if row_button:
+        assert "logs/calibre.log" in row_button[0].toolTip()
+
+
+def test_a_stage_that_never_wrote_a_log_says_so_instead(qtbot, populated_run) -> None:
+    """The other half of M-34: "recorded and gone" and "never written" are
+    different problems with different fixes."""
+
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    skipped = card._stage_tree.topLevelItem(2)  # quantus, skipped, no log_path
+    card._stage_tree.setCurrentItem(skipped)
+    assert not card._open_log_btn.isEnabled()
+    tip = card._open_log_btn.toolTip()
+    assert "no log" in tip
+    assert "logs/" not in tip
+
+
+def test_a_report_path_that_is_a_directory_is_not_called_overwritten(
+    qtbot, make_run_record, run_dir: Path
+) -> None:
+    """M-34 again: the artifacts grid invented a cause for any non-file path."""
+
+    stale = run_dir / "results" / "lvs.report"
+    stale.mkdir(parents=True)
+    record = make_run_record(
+        run_dir=run_dir,
+        results=RunResults(
+            lvs=LvsResult(passed=True, banner="CORRECT", source_path=str(stale))
+        ),
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    labels = [
+        label
+        for label in card._artifacts_group.findChildren(PathLabel)
+        if label.full_text() == str(stale)
+    ]
+    assert labels, "the report row names the recorded path"
+    assert "overwrote" not in labels[0].toolTip()
+    assert "directory" in labels[0].toolTip()
+
+
+def test_double_clicking_a_stage_whose_log_is_gone_says_something(
+    qtbot, deleted_log
+) -> None:
+    """M-35: the hint under the tree advertises the gesture; the gesture
+    returned in silence whenever the file was not there."""
+
+    record, run_dir = deleted_log
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    calibre = card._stage_tree.topLevelItem(1)
+    with qtbot.waitSignal(card.status_message, timeout=1000) as blocker:
+        card._on_stage_double_click(calibre, 0)
+    assert "logs/calibre.log" in blocker.args[0]
+
+
+def test_double_clicking_a_stage_that_wrote_no_log_says_so(
+    qtbot, populated_run
+) -> None:
+    record, run_dir = populated_run
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record, run_dir=run_dir)
+
+    skipped = card._stage_tree.topLevelItem(2)
+    with qtbot.waitSignal(card.status_message, timeout=1000) as blocker:
+        card._on_stage_double_click(skipped, 0)
+    assert "no log" in blocker.args[0]
+
+
+def test_a_cancelled_stage_does_not_report_the_signal_that_killed_it(
+    qtbot, make_run_record
+) -> None:
+    """M-48: exit -15 describes the kill, not the problem."""
+
+    record = make_run_record(
+        overall=TaskStatus.CANCELLED,
+        stages=[
+            _stage("calibre", status=StageStatus.CANCELLED, exit_code=-15),
+        ],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+
+    texts = _failure_texts(card)
+    assert not any("-15" in t for t in texts), texts
+    assert any("terminated" in t for t in texts), texts
+
+    chips = card._stage_strip.findChildren(Chip)
+    calibre = [c for c in chips if c.text().startswith("calibre ")][0]
+    assert "-15" not in calibre.toolTip()
+
+
+def test_a_failed_stage_still_reports_its_exit_code(qtbot, make_run_record) -> None:
+    """The number is only meaningless for a stage the user killed."""
+
+    record = make_run_record(
+        overall=TaskStatus.FAILED,
+        stages=[_stage("si", status=StageStatus.FAILED, exit_code=127)],
+    )
+    card = ResultCard()
+    qtbot.addWidget(card)
+    card.set_run(record)
+    assert any("127" in t for t in _failure_texts(card))
