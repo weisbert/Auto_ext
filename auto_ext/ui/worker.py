@@ -15,8 +15,9 @@ and the attached reporter emits each one as it is written.
 that want different ones -- an RF top level and a bias cell are not asking
 Quantus the same question. So the worker takes a list of :class:`RunBatch`
 and makes one ``run_tasks`` call per recipe, in order, merging the summaries.
-Grouping happens above (``CellsScreen._dispatch``), because that is where the
-rows and the run bar's override live.
+Grouping happens above (``CellsScreen._resolve_batches``), because that is
+where the rows and the run bar's override live -- and because it happens when
+the user presses Run, not when the job reaches the front of the queue.
 
 Batches run one after another rather than side by side. ``max_workers``
 parallelises tasks *within* a call, and two Quantus batches racing would
@@ -24,6 +25,12 @@ double the licence draw against a ceiling the site actually has (``ceil(N/2)``
 licences for N CPUs). Sequential is also what makes cancellation simple: the
 shared token stops the batch in flight and the loop then declines to start
 the next.
+
+The same argument decides what happens above this class. Since 2026-09-05 the
+Cells screen lets the user press Run while a run is in flight, but a press
+appends a *job* to a queue there and exactly one ``RunWorker`` is ever alive:
+the queue is a waiting line, not a second thread. Every licence sentence above
+still holds, and there is nothing here for the queue to change.
 
 ``profile`` is required -- it supplies the process literals -- and so is a
 non-empty batch list. Neither has a fallback: a run started against the wrong

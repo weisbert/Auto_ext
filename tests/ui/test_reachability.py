@@ -801,7 +801,7 @@ def _worker_kwargs_the_gui_passes() -> set[str]:
                 strict=True,
                 reason=(
                     "M-133/E-1: the bar's box is not passed by "
-                    "cells_screen._dispatch until the other session wires it"
+                    "cells_screen._start_job until the other session wires it"
                 ),
             ),
         ),

@@ -1,24 +1,38 @@
-"""The run bar: what you press to start a batch, and what it becomes once
-the batch is in flight.
+"""The run bar: what you press to start a batch, and what it shows while
+batches are in flight.
 
-Two states, one widget, drawn from artboards ``1a`` and ``1b``::
+Two halves of one widget, drawn from artboards ``1a`` and ``1b``::
 
-    idle (1a)
+    idle (1a) -- ALWAYS on screen
     +--------------------------------------------------------------+
     | 3 cells selected . recipe for this run [per row (2) v]  hint  |
     | stages [x]si [x]strmout [x]calibre [x]quantus [ ]jivaro       |  [Run 3 cells]
     |        | [ ]dry run [ ]continue on LVS fail | jobs [2]        |
     +--------------------------------------------------------------+
 
-    running (1b)
+    live panel (1b) -- ADDED below it whenever a job is running or waiting
     +--------------------------------------------------------------+ 28px
-    | > Run 138   3 passed . 1 failed . 1 running . 2 queued        |
-    |                              jobs 2  [Cancel run] [Collapse]  |
+    | > Run 2 cells . 1 run waiting   3 passed . 1 failed . 1 queued|
+    |          jobs 2 [Drop 1 waiting run] [Cancel run] [Collapse]  |
     +--------------------------------------------------------------+ 24px
     | logs/.../quantus.log            [x] follow  [Open in editor]  |
     +--------------------------------------------------------------+
     |  (log slot -- empty until set_log_widget())                   |
     +--------------------------------------------------------------+
+
+The panel used to *replace* the idle strip, which took the Run button off
+the screen for the whole run. A user who has just watched one extraction
+start is exactly the user with a second one to throw at it -- the Cadence
+gesture the owner asked for -- so the strip stays: Run means "enqueue a
+job" and never stops meaning it. :meth:`RunBar.set_queued_jobs` is how the
+screen says how many presses are waiting behind the one in flight; the
+count lands in the panel title and lights the *Drop* button, which throws
+away the waiting runs and leaves the running one alone.
+
+Two counts, two words. The title's **waiting** counts whole Run presses
+that have not started; the counts line's **queued** counts tasks inside the
+job that is running. They were both called "queued" for one revision, which
+put two unrelated numbers under one word on the same 28px strip.
 
 **No progress bar and no ETA, on purpose.** The user said the wall-clock
 cost of a run is not something they steer by; a bar that fills at a rate
@@ -113,6 +127,7 @@ OBJ_RUN_TITLE = "runPanelTitle"
 OBJ_RUN_COUNTS = "runPanelCounts"
 OBJ_RUN_LOG_PATH = "runPanelLogPath"
 OBJ_SEPARATOR = "barSeparator"
+OBJ_DROP_QUEUED = "runPanelDropQueued"
 
 
 def apply_families(font: QFont, families: Sequence[str]) -> QFont:
@@ -351,7 +366,11 @@ class RunBar(QFrame):
         The Run button was pressed and there is a selection to run. The
         host decides what "run" means; the bar changes nothing by itself.
     ``cancel_requested()``
-        Cancel was pressed while running.
+        Cancel was pressed while running. It is about the job in flight and
+        nothing else; the queue behind it is ``drop_queued_requested``.
+    ``drop_queued_requested()``
+        The Drop button was pressed: throw away the runs waiting behind the
+        one in flight, which keeps going.
     ``collapse_toggled(bool)``
         The Collapse button flipped the log half of the panel. The payload
         is the new *collapsed* state.
@@ -369,6 +388,7 @@ class RunBar(QFrame):
 
     run_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
+    drop_queued_requested = pyqtSignal()
     collapse_toggled = pyqtSignal(bool)
     stages_changed = pyqtSignal(object)
     jobs_changed = pyqtSignal(int)
@@ -389,6 +409,8 @@ class RunBar(QFrame):
         self._compact = False
         self._running = False
         self._collapsed = False
+        self._queued_jobs = 0
+        self._run_label = "Run"
         self._log_path: Path | None = None
         self._log_widget: QWidget | None = None
         self._syncing = False
@@ -503,7 +525,18 @@ class RunBar(QFrame):
         self._panel_counts.setObjectName(OBJ_RUN_COUNTS)
         self._panel_jobs = QLabel("", header)
         self._panel_jobs.setObjectName(OBJ_RUN_MONO)
+        # Two different verbs, so two different controls. Cancel is about
+        # the hours already spent by the job in flight; Drop queued is about
+        # presses the user has changed their mind about. One button that
+        # meant both would make "stop" ambiguous at the worst moment.
+        self._drop_button = QPushButton("Drop waiting runs", header)
+        self._drop_button.setObjectName(OBJ_DROP_QUEUED)
+        self._drop_button.clicked.connect(self.drop_queued_requested)
+        self._drop_button.hide()
         self._cancel_button = QPushButton("Cancel run", header)
+        self._cancel_button.setToolTip(
+            "Stop the run in flight. Stages already finished keep their output."
+        )
         self._cancel_button.clicked.connect(self.cancel_requested)
         self._collapse_button = QPushButton("Collapse", header)
         self._collapse_button.clicked.connect(self._on_collapse_clicked)
@@ -511,6 +544,7 @@ class RunBar(QFrame):
         head.addWidget(self._panel_title)
         head.addWidget(self._panel_counts, 1)
         head.addWidget(self._panel_jobs)
+        head.addWidget(self._drop_button)
         head.addWidget(self._cancel_button)
         head.addWidget(self._collapse_button)
 
@@ -805,23 +839,75 @@ class RunBar(QFrame):
     # ---- running panel ---------------------------------------------------
 
     def set_running(self, running: bool) -> None:
-        """Swap between the idle bar and the live run panel."""
+        """Show (or hide) the live run panel *under* the idle strip.
+
+        The idle strip is never taken away. It used to be -- ``set_running``
+        hid the whole widget the Run button lives in -- and the user's report
+        of 2026-09-04 is what that cost: mid-run there was no Run button to
+        press, so a batch could not be queued behind the one running, and a
+        busy app was indistinguishable from a broken one.
+        """
 
         self._running = bool(running)
-        self._idle.setVisible(not self._running)
+        self._idle.setVisible(True)
         self._panel.setVisible(self._running)
         if self._running:
             self._panel_jobs.setText(f"jobs {self.jobs()}")
             self._cancel_button.setEnabled(True)
             self._cancel_button.setText("Cancel run")
+            self._cancel_button.setToolTip(
+                "Stop the run in flight. Stages already finished keep their "
+                "output."
+            )
 
     def is_running(self) -> bool:
         return self._running
 
+    def set_queued_jobs(self, count: int) -> None:
+        """How many Run presses are waiting behind the one in flight.
+
+        Drives the panel title's ``· N runs waiting`` suffix and the Drop
+        button, which is hidden at zero -- a control for an empty queue is a
+        control that teaches the user nothing.
+
+        The word on screen is **waiting**, never "queued". The counts line
+        beside it already says "N queued" about *tasks inside the current
+        job*; the same word over two unrelated numbers, six inches apart, is
+        how a panel stops being read.
+        """
+
+        self._queued_jobs = max(int(count), 0)
+        self._refresh_panel_title()
+
+    def queued_jobs(self) -> int:
+        return self._queued_jobs
+
+    def _refresh_panel_title(self) -> None:
+        count = self._queued_jobs
+        noun = "run" if count == 1 else "runs"
+        suffix = f" · {count} {noun} waiting" if count else ""
+        self._panel_title.setText(f"{self._run_label}{suffix}")
+        self._drop_button.setVisible(bool(count))
+        self._drop_button.setText(
+            f"Drop {count} waiting {noun}" if count else "Drop waiting runs"
+        )
+        self._drop_button.setToolTip(
+            f"Throw away the {count} {noun} waiting behind this one. "
+            "The run in flight is not touched -- use Cancel run for that."
+        )
+
+    def drop_queued_button(self) -> QPushButton:
+        return self._drop_button
+
     def set_run_label(self, text: str) -> None:
-        self._panel_title.setText(text)
+        """Name the job in flight. The queue suffix is added on top."""
+
+        self._run_label = text
+        self._refresh_panel_title()
 
     def run_label(self) -> str:
+        """What the panel title actually reads, queue suffix included."""
+
         return self._panel_title.text()
 
     def set_counts(
@@ -848,6 +934,28 @@ class RunBar(QFrame):
 
         self._cancel_button.setEnabled(False)
         self._cancel_button.setText("cancelling…")
+        self._cancel_button.setToolTip(
+            "Cancellation is on its way to the runner; it stops at its next "
+            "check."
+        )
+
+    def mark_cancel_stalled(self) -> None:
+        """The deadline passed and the runner has not come back.
+
+        A disabled ``cancelling…`` that never changes is the state the user
+        reported as "I pressed Cancel and it never came back": no Run, no
+        Cancel, nothing to press. The button comes back rather than the
+        screen staying frozen -- the second press is another SIGTERM, and
+        the sentence on the tooltip is the one the user was missing.
+        """
+
+        self._cancel_button.setEnabled(True)
+        self._cancel_button.setText("Cancel run")
+        self._cancel_button.setToolTip(
+            "The runner has not come back since the last Cancel -- it is "
+            "still inside a tool call. Pressing again asks it to stop once "
+            "more."
+        )
 
     def cancel_button(self) -> QPushButton:
         return self._cancel_button

@@ -278,15 +278,102 @@ def test_per_row_summary_reads_singular_for_one_recipe(qtbot) -> None:
 # ---- running panel -------------------------------------------------------
 
 
-def test_running_swaps_the_bar_for_the_panel(qtbot) -> None:
+def test_running_adds_the_panel_and_keeps_the_idle_strip(qtbot) -> None:
+    """The panel is *added*, never swapped in.
+
+    It used to replace the idle strip, which took the Run button, the recipe
+    override, the stages and the jobs spinner off the screen for the whole
+    run. The user's report is what that cost: nothing to press, so no second
+    batch could be thrown at a machine that was already busy.
+    """
+
     bar = _bar(qtbot)
     bar.show()
 
     bar.set_running(True)
 
     assert bar.is_running() is True
-    assert bar._idle.isVisible() is False
+    assert bar._idle.isVisible() is True
     assert bar._panel.isVisible() is True
+    assert bar.run_button().isVisibleTo(bar) is True
+
+    bar.set_running(False)
+
+    assert bar._idle.isVisible() is True
+    assert bar._panel.isVisible() is False
+
+
+def test_the_queue_depth_reaches_the_title_and_lights_the_drop_button(qtbot) -> None:
+    """Two presses waiting behind one run have to be visible and droppable."""
+
+    bar = _bar(qtbot)
+    bar.set_running(True)
+    bar.set_run_label("Run 2 cells")
+    bar.show()
+
+    assert bar.queued_jobs() == 0
+    assert bar.run_label() == "Run 2 cells"
+    assert bar.drop_queued_button().isVisibleTo(bar) is False
+
+    bar.set_queued_jobs(1)
+
+    assert bar.run_label() == "Run 2 cells · 1 run waiting"
+    drop = bar.drop_queued_button()
+    assert drop.isVisibleTo(bar) is True
+    assert drop.text() == "Drop 1 waiting run"
+    assert drop.toolTip().strip(), "the drop control does not say what it drops"
+    assert "cancel" in drop.toolTip().lower(), (
+        "the tooltip does not distinguish dropping the queue from cancelling "
+        "the run in flight"
+    )
+
+    bar.set_queued_jobs(2)
+    assert bar.run_label() == "Run 2 cells · 2 runs waiting"
+    assert drop.text() == "Drop 2 waiting runs"
+
+    fired: list[int] = []
+    bar.drop_queued_requested.connect(lambda: fired.append(1))
+    drop.click()
+    assert fired == [1]
+
+    bar.set_queued_jobs(0)
+    assert bar.run_label() == "Run 2 cells"
+    assert bar.drop_queued_button().isVisibleTo(bar) is False
+
+
+def test_the_panel_never_calls_two_different_numbers_queued(qtbot) -> None:
+    """One word, one number.
+
+    The title counts whole Run presses that have not started; the counts
+    line counts tasks inside the job that *is* running. Both said "queued"
+    for one revision, six inches apart on a 28px strip.
+    """
+
+    bar = _bar(qtbot)
+    bar.set_running(True)
+    bar.set_run_label("Run 2 cells")
+    bar.set_queued_jobs(1)
+    bar.set_counts(passed=1, queued=3)
+
+    assert "queued" not in bar.run_label(), bar.run_label()
+    assert "waiting" in bar.run_label()
+    assert "3 queued" in bar.counts_text()
+    assert "waiting" not in bar.counts_text()
+
+
+def test_a_cancel_that_never_came_back_gives_the_button_back(qtbot) -> None:
+    """M-133 at the widget: ``cancelling…`` must not be a terminal state."""
+
+    bar = _bar(qtbot)
+    bar.set_running(True)
+    bar.mark_cancelling()
+    assert bar.cancel_button().isEnabled() is False
+
+    bar.mark_cancel_stalled()
+
+    assert bar.cancel_button().isEnabled() is True
+    assert bar.cancel_button().text() == "Cancel run"
+    assert "not come back" in bar.cancel_button().toolTip()
 
 
 def test_counts_replace_the_progress_bar(qtbot) -> None:

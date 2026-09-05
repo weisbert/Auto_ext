@@ -405,14 +405,33 @@ class MainWindow(QMainWindow):
 
     # ---- run slots -------------------------------------------------------
 
+    def _run_status_text(self) -> str:
+        """What the shell says while the Cells screen has work outstanding.
+
+        "idle" only when the queue has actually drained: a press the user
+        made and has not seen run is still work in flight, and a status line
+        that said "idle" over a waiting job would be the same lie the run
+        state used to tell about the Run button.
+        """
+
+        if not self._cells.is_running():
+            return "idle"
+        waiting = self._cells.queued_jobs()
+        if not waiting:
+            return "running"
+        # "waiting", not "queued": the run panel already says "N queued"
+        # about the tasks inside the job that is running, and one word over
+        # two unrelated numbers is how a status bar stops being read.
+        return f"running · {waiting} run{'' if waiting == 1 else 's'} waiting"
+
     def _on_run_requested(self, _request: object) -> None:
-        self._shell.set_status(left="running")
+        self._shell.set_status(left=self._run_status_text())
 
     def _on_run_finished(self, _summary: object) -> None:
         """A run that just ended is the one the user wants to look at."""
 
         self._runs.refresh()
-        self._shell.set_status(left="idle")
+        self._shell.set_status(left=self._run_status_text())
 
     def _on_cells_selection_changed(self, keys: object) -> None:
         """The highlight. Reported only while nothing is ticked.
@@ -1059,11 +1078,18 @@ class MainWindow(QMainWindow):
         """
 
         if self._cells.is_running():
+            queued = self._cells.queued_jobs()
+            waiting = (
+                ""
+                if not queued
+                else f"\n\n{queued} waiting run(s) behind it are dropped; "
+                "they have written nothing yet."
+            )
             choice = QMessageBox.question(
                 self,
                 "A run is still going",
                 "Closing cancels it. The stages already finished keep their "
-                "output; the one in flight does not.\n\nClose anyway?",
+                f"output; the one in flight does not.{waiting}\n\nClose anyway?",
                 QMessageBox.Close | QMessageBox.Cancel,
                 QMessageBox.Cancel,
             )

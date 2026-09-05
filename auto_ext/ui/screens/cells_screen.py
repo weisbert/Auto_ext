@@ -60,9 +60,20 @@ this column existed it appeared only in the row tooltip and could not be
 typed anywhere in the GUI. It stays in ``running`` mode's hidden set like
 every other editable column.
 ``running`` (``1b``)
-    check (as a status glyph), library, cell, recipe, stages -- the stage
-    chips need the width, and while a run is in flight nothing else on the
-    row can change anyway.
+    **whichever of the two above is in force, plus ``stages``.** Not a
+    layout of its own: ``1b`` drew a five-column table because a run used to
+    lock the rows, and with the lock gone that same table would have taken
+    ``layout`` / ``source`` / ``ground`` / ``views`` / ``out view`` /
+    ``last run`` away for however long Calibre runs -- six of the eight
+    columns the user can type into, at the moment they most want them. The
+    idle width class keeps tracking the window during a run
+    (:meth:`CellsScreen.set_idle_column_mode`), and where the composed set
+    does not fit, the table scrolls sideways.
+
+    The check column is a *check* column here too. It used to be redrawn as
+    a status glyph, which stripped ``ItemIsUserCheckable`` and made the run
+    set unbuildable for the whole run; the glyph belongs in ``status``,
+    which both idle layouts already carry.
 
 Running a batch
 ---------------
@@ -70,10 +81,31 @@ The screen does not own a thread. It builds the same
 :class:`~auto_ext.ui.worker.RunWorker` +
 :class:`~auto_ext.ui.qt_reporter.QtProgressReporter` +
 :class:`~auto_ext.core.progress.CancelToken` trio the Run tab has always
-used, one run at a time, and turns the reporter's signals into row state.
-Log paths come from the reporter's ``run_dir_ready`` event rather than
-being recomputed from a task id: since S1 the logs live under
-``runs/<run_id>/logs/`` and the run id is not derivable from the row.
+used and turns the reporter's signals into row state. Log paths come from
+the reporter's ``run_dir_ready`` event rather than being recomputed from a
+task id: since S1 the logs live under ``runs/<run_id>/logs/`` and the run
+id is not derivable from the row.
+
+**Nothing is locked while a run is in flight.** Until 2026-09-05 the first
+press of Run put the screen into a modal state: five disabled toolbar
+buttons, ``NoEditTriggers``, a check column with no checkboxes in it, six
+row commands that returned in silence, and a Run button that was not
+disabled but *gone*. The user's report is the whole argument against it:
+after starting one simulation they still want to change things and throw
+the next one in, the way Cadence lets them -- because a Calibre/Quantus
+job is hours long and the person who started it has more work to queue
+behind it, not less. (Their words are quoted, in their own language, in
+``tests/ui/test_second_run.py``.)
+
+So Run means **enqueue a job**, always. :meth:`CellsScreen.start_run`
+snapshots :meth:`~CellsScreen.run_request` and resolves its batches at
+*press* time, then appends a ``_Job`` to :attr:`CellsScreen._queue`; later
+edits to the table cannot move what an already-pressed job will run.
+Exactly one :class:`~auto_ext.ui.worker.RunWorker` is ever in flight (see
+that module for why: two Quantus batches racing double the licence draw),
+and the next job is dispatched from a zero-timer once the previous one's
+``finished`` slot has returned, never from inside it. The same row may sit
+in two jobs at once; run directories already de-collide.
 
 Assumptions
 -----------
@@ -196,6 +228,12 @@ MODE_WIDE = "wide"
 MODE_COMPACT = "compact"
 MODE_RUNNING = "running"
 
+#: How long :meth:`CellsScreen.cancel_run` waits for the runner to come back
+#: before it offers Cancel again and says so. The kill sequence is SIGTERM ->
+#: 10s grace -> SIGKILL, so a shorter deadline would re-arm the button while
+#: a perfectly well-behaved stop is still on time.
+CANCEL_DEADLINE_MS = 15_000
+
 COL_CHECK = 0
 COL_LIBRARY = 1
 COL_CELL = 2
@@ -273,12 +311,15 @@ _COMPACT_WIDTHS = {
     COL_LAST_RUN: 118,
     COL_STATUS: 76,
 }
-_RUNNING_WIDTHS = {
-    COL_CHECK: 26,
-    COL_LIBRARY: 116,
-    COL_RECIPE: 126,
-    COL_STAGES: 352,
-}
+#: What ``running`` adds on top of whichever idle layout is in force. It is
+#: an *addition*, not a replacement: a run can now last hours with more
+#: presses queued behind it, so a layout that hid six of the eight editable
+#: columns for the duration would put the table out of reach for exactly as
+#: long as the user most wants it.
+_RUNNING_EXTRA_WIDTHS = {COL_STAGES: 352}
+_RUNNING_EXTRA_COLUMNS = (COL_STAGES,)
+
+_MODE_WIDTHS = {MODE_WIDE: _WIDE_WIDTHS, MODE_COMPACT: _COMPACT_WIDTHS}
 
 _MODE_COLUMNS = {
     MODE_WIDE: (
@@ -303,8 +344,46 @@ _MODE_COLUMNS = {
         COL_LAST_RUN,
         COL_STATUS,
     ),
-    MODE_RUNNING: (COL_CHECK, COL_LIBRARY, COL_CELL, COL_RECIPE, COL_STAGES),
 }
+
+#: Every mode :meth:`CellsScreen.set_column_mode` accepts. ``running`` has no
+#: entry in :data:`_MODE_COLUMNS` because it is not a layout of its own --
+#: see :func:`_columns_for`.
+MODES = (MODE_WIDE, MODE_COMPACT, MODE_RUNNING)
+
+
+def _columns_for(mode: str, idle_mode: str = MODE_WIDE) -> tuple[int, ...]:
+    """Which columns ``mode`` shows, in column-index order.
+
+    ``running`` is the *current idle layout* plus the stage chips, not a
+    layout of its own. It used to be its own five-column set, which meant a
+    run took ``layout`` / ``source`` / ``ground`` / ``views`` / ``out view``
+    / ``last run`` off the table until it ended -- six of the eight columns
+    the user can type into, for however long Calibre takes. That was
+    defensible while a run locked the table anyway; with the table live and
+    a queue behind it, it is the same defect the running state used to be.
+
+    Where the composed set does not fit, the table scrolls sideways. That is
+    the degradation this screen's sizing note already names, and it is the
+    right one: a column the user cannot scroll to is worse than a column
+    they have to.
+    """
+
+    if mode != MODE_RUNNING:
+        return _MODE_COLUMNS[mode]
+    base = _MODE_COLUMNS.get(idle_mode, _MODE_COLUMNS[MODE_WIDE])
+    return tuple(sorted(set(base) | set(_RUNNING_EXTRA_COLUMNS)))
+
+
+def _widths_for(mode: str, idle_mode: str = MODE_WIDE) -> dict[int, int]:
+    """Artboard widths for ``mode``; ``running`` adds the chip column."""
+
+    if mode != MODE_RUNNING:
+        return _MODE_WIDTHS[mode]
+    return {
+        **_MODE_WIDTHS.get(idle_mode, _WIDE_WIDTHS),
+        **_RUNNING_EXTRA_WIDTHS,
+    }
 
 OBJ_TOOLBAR = "cellsToolbar"
 OBJ_TABLE = "cellsTable"
@@ -368,13 +447,60 @@ class RunRequest(NamedTuple):
 
 @dataclass
 class _LiveRun:
-    """Bookkeeping for the batch currently in flight."""
+    """Bookkeeping for one job -- what its rows have reached so far.
+
+    One per :class:`_Job`, not one per screen: the table stays editable
+    while a job runs, so a row that is added mid-run rebuilds every stage
+    strip in the table and the strips have to be repainted from this
+    record rather than from whatever Qt happened to be showing.
+    """
 
     keys: tuple[str, ...] = ()
     stages: tuple[str, ...] = ()
     started: set[str] = field(default_factory=set)
     finished: dict[str, str] = field(default_factory=dict)
     run_dirs: dict[str, Path] = field(default_factory=dict)
+    #: task id -> stage -> status, so a table reload can redraw the chips.
+    stage_status: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+class _Resolved(NamedTuple):
+    """Everything a press validated, frozen at the moment it was pressed.
+
+    The batches are the obvious half. The other five are the *environment*
+    the run happens in, and they are snapshotted for the same reason: the
+    Recipes screen's Reload button and ``File -> Open`` are both one click
+    away and neither is blocked while a run is going (the screen stays free
+    on purpose). A queued job that re-read the controller when its turn came
+    would run against whatever workarea the reload left behind, or against
+    ``project=None`` and die with a bare "Run failed".
+    """
+
+    batches: list[RunBatch]
+    project: Any
+    auto_ext_root: Any
+    workarea: Any
+    profile: Any
+    resources: Any
+
+
+@dataclass
+class _Job:
+    """One press of Run, resolved at press time and waiting its turn.
+
+    ``resolved`` is built when the button is pressed, not when the job
+    reaches the front of the queue: the user pressed Run over a table and a
+    config they could see, and an edit -- or a reload -- made while the job
+    waits must not silently change what that press asked for.
+    """
+
+    request: RunRequest
+    resolved: _Resolved
+    live: _LiveRun
+    #: What the rows said before this job marked them "queued", so dropping
+    #: the job puts the table back rather than blanking rows that had a
+    #: result on them.
+    previous: dict[str, RowStatus] = field(default_factory=dict)
 
 
 def _status_text_color(status: str, code: str | None = None) -> str:
@@ -729,11 +855,59 @@ class CellsScreen(QWidget):
         self._syncing = False
         self._worker: RunWorker | None = None
         self._reporter: QtProgressReporter | None = None
-        self._live = _LiveRun()
+        #: The job in flight, and the presses waiting behind it. Exactly one
+        #: worker at a time; see the module docstring.
+        self._current: _Job | None = None
+        self._queue: list[_Job] = []
+        #: A worker whose ``finished`` has arrived but whose C++ object may
+        #: still be winding down. Held here so that clearing ``_worker``
+        #: inside the worker's own slot is never the drop of its last
+        #: reference; cleared from the zero-timer that dispatches the next
+        #: job.
+        self._retiring: list[RunWorker] = []
+        #: The worker the last Cancel was aimed at, and a serial that says
+        #: *which* Cancel. The worker alone is not enough: a deadline armed
+        #: for job 1 outlives job 1, and would otherwise report job 2's
+        #: perfectly fresh Cancel as stalled.
+        self._cancelling: RunWorker | None = None
+        self._cancel_serial = 0
+        self._empty_live = _LiveRun()
 
         self._build_ui()
         self.setStyleSheet(_CELLS_QSS)
         self._reload_table()
+
+    @property
+    def _live(self) -> _LiveRun:
+        """Bookkeeping for the job in flight, or an empty one when idle."""
+
+        return self._current.live if self._current is not None else self._empty_live
+
+    def _waiting_suffix(self) -> str:
+        """`` · N runs waiting``, or nothing when the queue is empty.
+
+        "waiting" and not "queued" on purpose: the run panel's counts line
+        already says "N queued" about *tasks inside the current job*, and two
+        different numbers under one word is how a status bar stops being
+        read at all.
+        """
+
+        count = len(self._queue)
+        if not count:
+            return ""
+        return f" · {count} run{'' if count == 1 else 's'} waiting"
+
+    def _say(self, message: str) -> None:
+        """Emit one status line, with the waiting-run count kept on the end.
+
+        Every line this screen emits goes through here. The host writes
+        "running · N runs waiting" when a run starts and is then overwritten
+        by the next stage event, the next edit, the next filter -- so for the
+        hours the user actually watches, the queue depth would be visible for
+        one frame and then never again unless it travels with every line.
+        """
+
+        self.status_message.emit(f"{message}{self._waiting_suffix()}")
 
     # ---- construction ----------------------------------------------------
 
@@ -754,6 +928,7 @@ class CellsScreen(QWidget):
         self.run_bar = RunBar(self)
         self.run_bar.run_requested.connect(self.start_run)
         self.run_bar.cancel_requested.connect(self.cancel_run)
+        self.run_bar.drop_queued_requested.connect(self.drop_queued_jobs)
         self.run_bar.open_log_requested.connect(self.open_log_requested)
         self.run_bar.stages_changed.connect(lambda _s: self._refresh_run_bar())
         self._splitter.addWidget(self.run_bar)
@@ -942,7 +1117,13 @@ class CellsScreen(QWidget):
 
     def _reload_table(self) -> None:
         selected = set(self.selected_keys())
-        self._checked &= set(self._book.keys)
+        keys = set(self._book.keys)
+        self._checked &= keys
+        # Prune here and not only in ``set_cells``: every in-place edit goes
+        # through ``_apply_book``, which used to leave the status of a row
+        # the user had just removed or renamed in the dict. A row that later
+        # took the same key inherited a result it never produced.
+        self._statuses = {k: v for k, v in self._statuses.items() if k in keys}
         self._syncing = True
         try:
             self._table.clearContents()
@@ -959,21 +1140,19 @@ class CellsScreen(QWidget):
         self._refresh_header_check()
         self._refresh_empty_state()
         self._refresh_run_bar()
+        # Every row was rebuilt, stage strips included; a job in flight has
+        # to get its chips back or a mid-run Add blanks the run on screen.
+        self._repaint_live_strips()
 
     def _render_row(self, row: int, entry: CellEntry) -> None:
         key = entry.key
+        # A real check box in every mode, running included: the run set is
+        # what the user builds for the *next* press, and a job in flight is
+        # no reason to take the tool away.
         check = QTableWidgetItem()
         check.setData(Qt.UserRole, key)
-        if self._mode == MODE_RUNNING:
-            status = self._statuses.get(key, RowStatus())
-            check.setText(theme.STATUS_GLYPH.get(status.status, theme.STATUS_GLYPH["pending"]))
-            check.setForeground(QColor(_status_text_color(status.status, status.code)))
-            check.setTextAlignment(_TEXT_ALIGN)
-            check.setData(Qt.CheckStateRole, None)
-            check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-        else:
-            check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
-            check.setCheckState(Qt.Checked if key in self._checked else Qt.Unchecked)
+        check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+        check.setCheckState(Qt.Checked if key in self._checked else Qt.Unchecked)
         self._table.setItem(row, COL_CHECK, check)
 
         values = {
@@ -1106,7 +1285,7 @@ class CellsScreen(QWidget):
             column = _column_of_field(option_key)
         except KeyError:
             return False
-        if column not in _MODE_COLUMNS[self._mode]:
+        if column not in self._visible_columns():
             self.set_column_mode(MODE_WIDE)
         row = 0 if self._table.rowCount() else -1
         if row >= 0:
@@ -1123,25 +1302,39 @@ class CellsScreen(QWidget):
         return self._mode
 
     def set_column_mode(self, mode: str) -> None:
-        if mode not in _MODE_COLUMNS:
+        if mode not in MODES:
             raise ValueError(f"unknown column mode {mode!r}")
         if mode == self._mode:
             return
-        was_running = self._mode == MODE_RUNNING
         self._mode = mode
         if mode != MODE_RUNNING:
             self._idle_mode = mode
         self._apply_mode(mode)
-        if was_running or mode == MODE_RUNNING:
-            self._repaint_check_column()
+
+    def set_idle_column_mode(self, mode: str) -> None:
+        """Choose the width class ``running`` composes itself from.
+
+        ``running`` is the idle layout plus the chip column, so the width
+        class has to keep tracking the window while a job is in flight --
+        otherwise a run that starts wide stays wide through every resize
+        until it ends, which with a queue behind it can be the whole
+        session.
+        """
+
+        if mode not in (MODE_WIDE, MODE_COMPACT):
+            raise ValueError(f"{mode!r} is not an idle column mode")
+        if mode == self._idle_mode:
+            return
+        self._idle_mode = mode
+        if self._mode == MODE_RUNNING:
+            self._apply_mode(MODE_RUNNING)
+
+    def _visible_columns(self) -> tuple[int, ...]:
+        return _columns_for(self._mode, self._idle_mode)
 
     def _apply_mode(self, mode: str) -> None:
-        shown = _MODE_COLUMNS[mode]
-        widths = {
-            MODE_WIDE: _WIDE_WIDTHS,
-            MODE_COMPACT: _COMPACT_WIDTHS,
-            MODE_RUNNING: _RUNNING_WIDTHS,
-        }[mode]
+        shown = _columns_for(mode, self._idle_mode)
+        widths = _widths_for(mode, self._idle_mode)
         header = self._table.horizontalHeader()
         for column in range(len(COLUMN_TITLES)):
             self._table.setColumnHidden(column, column not in shown)
@@ -1154,33 +1347,26 @@ class CellsScreen(QWidget):
         )
 
     def _repaint_check_column(self) -> None:
+        """Redraw the boxes from :attr:`_checked`. Mode-independent.
+
+        It used to swap the boxes for status glyphs in ``MODE_RUNNING``,
+        stripping ``ItemIsUserCheckable`` for the length of the run. That is
+        half of what made the second Run unreachable: the one column the run
+        set is built in went dead exactly when the user wanted to build the
+        next batch.
+        """
+
         self._syncing = True
         try:
             for row, key in enumerate(self._row_keys):
                 item = self._table.item(row, COL_CHECK)
                 if item is None:
                     continue
-                if self._mode == MODE_RUNNING:
-                    status = self._statuses.get(key, RowStatus())
-                    item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                    # Qt draws a check indicator for anything carrying a
-                    # CheckStateRole, flags or no flags. Clear it or the
-                    # glyph shares its cell with a dead checkbox.
-                    item.setData(Qt.CheckStateRole, None)
-                    item.setText(
-                        theme.STATUS_GLYPH.get(status.status, theme.STATUS_GLYPH["pending"])
-                    )
-                    item.setForeground(
-                        QColor(_status_text_color(status.status, status.code))
-                    )
-                else:
-                    item.setText("")
-                    item.setFlags(
-                        Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
-                    )
-                    item.setCheckState(
-                        Qt.Checked if key in self._checked else Qt.Unchecked
-                    )
+                item.setText("")
+                item.setFlags(
+                    Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable
+                )
+                item.setCheckState(Qt.Checked if key in self._checked else Qt.Unchecked)
         finally:
             self._syncing = False
         self._refresh_header_check()
@@ -1194,8 +1380,15 @@ class CellsScreen(QWidget):
             labels = _SHORT_LABELS if compact_toolbar else _LONG_LABELS
             for name, button in self._buttons.items():
                 button.setText(labels[name])
-        if self.auto_compact and self._mode != MODE_RUNNING:
-            self.set_column_mode(MODE_COMPACT if width < TABLE_COMPACT_BELOW else MODE_WIDE)
+        if not self.auto_compact:
+            return
+        wanted = MODE_COMPACT if width < TABLE_COMPACT_BELOW else MODE_WIDE
+        if self._mode == MODE_RUNNING:
+            # A run no longer freezes the width class: it composes its
+            # layout from the idle one, so the idle one has to keep moving.
+            self.set_idle_column_mode(wanted)
+        else:
+            self.set_column_mode(wanted)
 
     # ---- selection -------------------------------------------------------
 
@@ -1253,8 +1446,10 @@ class CellsScreen(QWidget):
         has_rows = bool(self._row_keys)
         self._buttons["duplicate"].setEnabled(bool(keys))
         self._buttons["remove"].setEnabled(bool(keys))
-        self._buttons["add"].setEnabled(self._worker is None)
-        self._buttons["import"].setEnabled(self._worker is None)
+        # Not conditioned on a run any more, and Save is not touched here at
+        # all: its enabled state is ``set_unsaved``'s and nothing else's.
+        self._buttons["add"].setEnabled(True)
+        self._buttons["import"].setEnabled(True)
         if not has_rows:
             self._buttons["duplicate"].setEnabled(False)
             self._buttons["remove"].setEnabled(False)
@@ -1305,8 +1500,6 @@ class CellsScreen(QWidget):
     def toggle_checks_on_selection(self) -> None:
         """Space: tick every highlighted row, or clear them if all are ticked."""
 
-        if self._worker is not None:
-            return
         keys = self.selected_keys()
         if not keys:
             return
@@ -1339,12 +1532,12 @@ class CellsScreen(QWidget):
         header = self._table.horizontalHeader()
         if not isinstance(header, CheckHeader):
             return
-        header.set_check_shown(self._mode != MODE_RUNNING)
+        # Shown in every mode: check-all is how a batch of forty is built,
+        # and a run in flight is not a reason to hide it.
+        header.set_check_shown(True)
         header.set_check_state(self._header_check_state())
 
     def _on_check_all_requested(self, check: bool) -> None:
-        if self._worker is not None:
-            return
         if check:
             self.check_all()
         else:
@@ -1422,7 +1615,7 @@ class CellsScreen(QWidget):
             finally:
                 self._syncing = False
             self.edit_rejected.emit(_first_line(exc))
-            self.status_message.emit(f"edit refused: {_first_line(exc)}")
+            self._say(f"edit refused: {_first_line(exc)}")
             return
         if replacement.key != key:
             if key in self._statuses:
@@ -1437,10 +1630,18 @@ class CellsScreen(QWidget):
     # ---- row commands ----------------------------------------------------
 
     def add_cell(self, entry: CellEntry | None = None) -> str | None:
-        """Append a row and start editing its cell name. Returns its key."""
+        """Append a row, tick it, and start editing its cell name.
 
-        if self._worker is not None:
-            return None
+        Returns its key. **The new row joins the run set**, which reverses
+        the rule this screen shipped with. A row is added in order to run
+        it -- ticking the new row and pressing Run was the user doing by
+        hand, every time, the one thing Add could have done for them --
+        and the highlight it also takes is only about which row Duplicate
+        and Remove would act on. Adding without ticking left the two
+        disagreeing: the new row was the only one highlighted and none of
+        it was in the batch.
+        """
+
         candidate = entry if entry is not None else self._blank_entry()
         try:
             book = self._book.with_added([candidate])
@@ -1448,6 +1649,7 @@ class CellsScreen(QWidget):
             self.edit_rejected.emit(_first_line(exc))
             return None
         self._apply_book(book)
+        self.set_checked_for([candidate.key], True)
         row = self.row_of_key(candidate.key)
         if row is not None:
             self.set_selected_keys([candidate.key])
@@ -1456,6 +1658,17 @@ class CellsScreen(QWidget):
         return candidate.key
 
     def _blank_entry(self) -> CellEntry:
+        """A fresh row that is already runnable.
+
+        It inherits a recipe -- the highlighted row's, else the last row's,
+        else none -- because a blank ``recipe=None`` is indistinguishable at
+        the dispatch from a row bound to a recipe the user deleted, and the
+        refusal that is right for the second ("nothing to guess from") threw
+        away the whole batch for the first. The refusal itself stays: a row
+        that genuinely cannot be resolved still stops the run and is named.
+        """
+
+        recipe = self._inherited_recipe()
         existing = set(self._book.keys)
         index = len(self._book) + 1
         while True:
@@ -1464,16 +1677,31 @@ class CellsScreen(QWidget):
                 cell=f"cell_{index}",
                 layout_view="layout",
                 source_view="schematic",
+                recipe=recipe,
             )
             if candidate.key not in existing:
                 return candidate
             index += 1
 
-    def duplicate_selected(self) -> tuple[str, ...]:
-        """Copy every selected row, renaming the copy until its key is free."""
+    def _inherited_recipe(self) -> str | None:
+        """The recipe a brand-new row should start life bound to."""
 
-        if self._worker is not None:
-            return ()
+        for key in self.selected_keys():
+            entry = self._book.entry(key)
+            if entry.recipe:
+                return entry.recipe
+        for entry in reversed(list(self._book)):
+            if entry.recipe:
+                return entry.recipe
+        return None
+
+    def duplicate_selected(self) -> tuple[str, ...]:
+        """Copy every selected row, tick the copies, rename until keys are free.
+
+        Ticked for the same reason :meth:`add_cell`'s row is: a duplicate is
+        made to be run, usually right next to the row it came from.
+        """
+
         keys = self.selected_keys()
         if not keys:
             return ()
@@ -1492,14 +1720,13 @@ class CellsScreen(QWidget):
             copies.append(candidate)
         self._apply_book(self._book.with_added(copies))
         new_keys = tuple(c.key for c in copies)
+        self.set_checked_for(new_keys, True)
         self.set_selected_keys(new_keys)
         return new_keys
 
     def remove_selected(self) -> tuple[str, ...]:
         """Drop every selected row."""
 
-        if self._worker is not None:
-            return ()
         keys = set(self.selected_keys())
         if not keys:
             return ()
@@ -1605,12 +1832,6 @@ class CellsScreen(QWidget):
                 font = cell.font()
                 font.setBold(record.status == "running")
                 cell.setFont(font)
-            check = self._table.item(row, COL_CHECK)
-            if check is not None and self._mode == MODE_RUNNING:
-                check.setText(
-                    theme.STATUS_GLYPH.get(record.status, theme.STATUS_GLYPH["pending"])
-                )
-                check.setForeground(QColor(_status_text_color(record.status, record.code)))
         finally:
             self._syncing = False
 
@@ -1670,7 +1891,7 @@ class CellsScreen(QWidget):
         hidden = self.hidden_checked_count()
         if hidden:
             noun = "cell" if hidden == 1 else "cells"
-            self.status_message.emit(
+            self._say(
                 f"filter hides {hidden} checked {noun} — they are still in the run"
             )
 
@@ -1706,29 +1927,29 @@ class CellsScreen(QWidget):
             if key not in keys:
                 self.set_selected_keys([key])
                 keys = (key,)
+        # Nothing here is conditioned on a run being in flight: the table is
+        # live for the whole run, so the menu is too.
         menu = QMenu(self._table)
-        running = self._worker is not None
 
         act_add = QAction(_LONG_LABELS["add"], menu)
         act_add.triggered.connect(self.add_cell)
-        act_add.setEnabled(not running)
         menu.addAction(act_add)
 
         act_duplicate = QAction("Duplicate", menu)
         act_duplicate.triggered.connect(self.duplicate_selected)
-        act_duplicate.setEnabled(bool(keys) and not running)
+        act_duplicate.setEnabled(bool(keys))
         menu.addAction(act_duplicate)
 
         act_remove = QAction("Remove", menu)
         act_remove.triggered.connect(self.remove_selected)
-        act_remove.setEnabled(bool(keys) and not running)
+        act_remove.setEnabled(bool(keys))
         menu.addAction(act_remove)
 
         menu.addSeparator()
         all_enabled = all(self._book.entry(k).enabled for k in keys) if keys else False
         toggle_text = "Disable rows" if all_enabled else "Enable rows"
         act_toggle = QAction(toggle_text, menu)
-        act_toggle.setEnabled(bool(keys) and not running)
+        act_toggle.setEnabled(bool(keys))
         act_toggle.triggered.connect(
             lambda _checked=False, keys=keys, enable=not all_enabled: self.set_enabled_for(
                 keys, enable
@@ -1739,7 +1960,7 @@ class CellsScreen(QWidget):
         menu.addSeparator()
         all_checked = all(key in self._checked for key in keys) if keys else False
         act_check = QAction("Uncheck rows" if all_checked else "Check rows", menu)
-        act_check.setEnabled(bool(keys) and not running)
+        act_check.setEnabled(bool(keys))
         act_check.setShortcut(QKeySequence(Qt.Key_Space))
         act_check.triggered.connect(
             lambda _checked=False, keys=keys, on=not all_checked: self.set_checked_for(
@@ -1749,13 +1970,13 @@ class CellsScreen(QWidget):
         menu.addAction(act_check)
 
         act_clear = QAction("Clear all checks", menu)
-        act_clear.setEnabled(bool(self._checked) and not running)
+        act_clear.setEnabled(bool(self._checked))
         act_clear.triggered.connect(lambda _checked=False: self.clear_checks())
         menu.addAction(act_clear)
 
         menu.addSeparator()
         act_export = QAction("Export GDS…", menu)
-        act_export.setEnabled(bool(keys) and not running)
+        act_export.setEnabled(bool(keys))
         act_export.setToolTip(
             "Write a standalone GDS for software outside this flow. "
             "The layout file Calibre reads is not moved."
@@ -1777,7 +1998,18 @@ class CellsScreen(QWidget):
     # ---- running ---------------------------------------------------------
 
     def is_running(self) -> bool:
-        return self._worker is not None
+        """A job is in flight *or* waiting behind one.
+
+        The window's close guard reads this, and a press the user made and
+        has not seen run is as much "still going" as the worker itself.
+        """
+
+        return self._worker is not None or bool(self._queue)
+
+    def queued_jobs(self) -> int:
+        """How many Run presses are waiting behind the one in flight."""
+
+        return len(self._queue)
 
     def run_request(self) -> RunRequest:
         """What pressing Run right now would ask for."""
@@ -1807,8 +2039,6 @@ class CellsScreen(QWidget):
         rather than a single filename, because one fixed name would have each
         cell silently overwrite the last.
         """
-        if self._worker is not None:
-            return
         keys = tuple(keys) if keys else self.selected_keys()
         keys = tuple(k for k in keys if self._book.entry(k).enabled)
         if not keys:
@@ -1831,48 +2061,40 @@ class CellsScreen(QWidget):
         if not target:
             return
 
-        self.run_requested.emit(
-            RunRequest(
-                keys=keys,
-                stages=("strmout",),
-                jobs=1,
-                dry_run=False,
-                continue_on_lvs_fail=False,
-                recipe_override=self.run_bar.recipe_override(),
-                layout_export_path=target,
-            )
+        request = RunRequest(
+            keys=keys,
+            stages=("strmout",),
+            jobs=1,
+            dry_run=False,
+            continue_on_lvs_fail=False,
+            recipe_override=self.run_bar.recipe_override(),
+            layout_export_path=target,
         )
-        if self._controller is None:
-            return
-        self._dispatch(
-            RunRequest(
-                keys=keys,
-                stages=("strmout",),
-                jobs=1,
-                dry_run=False,
-                continue_on_lvs_fail=False,
-                recipe_override=self.run_bar.recipe_override(),
-                layout_export_path=target,
-            )
-        )
+        if self._controller is not None:
+            self._enqueue(request)
+        self.run_requested.emit(request)
 
     def start_run(self) -> None:
-        """Announce the request, then dispatch it if we have a controller.
+        """Enqueue a job for the run set as it stands right now.
+
+        Never a refusal. Pressing Run while a job is in flight appends a
+        second one behind it -- that is the whole gesture the user asked
+        for -- and the request is snapshotted here, so an edit made while
+        the job waits cannot change what this press asked to run.
 
         ``run_requested`` fires either way, so a host that wants to own the
         dispatch can connect to it and construct the screen without a
-        controller.
+        controller. It fires *after* the enqueue, so a host reading
+        :meth:`queued_jobs` from the slot sees the press it is being told
+        about.
         """
 
-        if self._worker is not None:
-            return
         request = self.run_request()
         if not request.keys or not request.stages:
             return
+        if self._controller is not None:
+            self._enqueue(request)
         self.run_requested.emit(request)
-        if self._controller is None:
-            return
-        self._dispatch(request)
 
     def _recipe_batches(
         self, request: RunRequest, by_id: dict, resolve
@@ -1924,12 +2146,24 @@ class CellsScreen(QWidget):
             return [], unresolved
         return [RunBatch(recipe=cache[rid], tasks=grouped[rid]) for rid in order], []
 
-    def _dispatch(self, request: RunRequest) -> None:
+    def _resolve_batches(self, request: RunRequest) -> _Resolved | None:
+        """Turn a request into a run this screen could start today.
+
+        Every refusal dialog fires here, which is at *press* time: the user
+        is looking at the table and the config they built the request from,
+        so "these rows name no recipe" points at rows still on the screen.
+        Returning ``None`` means the press produced no job.
+
+        What comes back is the batches *and* the five controller values the
+        worker needs, captured here rather than read again when the job
+        starts -- see :class:`_Resolved`.
+        """
+
         controller = self._controller
         project = getattr(controller, "project", None)
         if project is None:
             QMessageBox.warning(self, "No config", "Load a config directory first.")
-            return
+            return None
         by_id = {task.task_id: task for task in controller.tasks}
         missing = [key for key in request.keys if key not in by_id]
         if missing:
@@ -1940,7 +2174,7 @@ class CellsScreen(QWidget):
                 + "\n".join(missing)
                 + "\n\nReload the config, or remove the rows.",
             )
-            return
+            return None
         auto_ext_root = controller.auto_ext_root
         workarea = controller.workarea
         if auto_ext_root is None or workarea is None:
@@ -1950,7 +2184,7 @@ class CellsScreen(QWidget):
                 "auto_ext_root and workarea could not be derived. "
                 "Pass --auto-ext-root / --workarea to the gui command.",
             )
-            return
+            return None
 
         # ``run_tasks`` takes one recipe and one profile per call. The
         # profile is the workspace's; the recipes come from the rows, and
@@ -1967,11 +2201,11 @@ class CellsScreen(QWidget):
                 "workspace.yaml names the profile; check that "
                 "config/profiles/ holds a file with that id.",
             )
-            return
+            return None
 
         resolve = getattr(controller, "run_recipe", None)
         if not callable(resolve):
-            return
+            return None
         batches, unresolved = self._recipe_batches(request, by_id, resolve)
         if unresolved:
             names = "\n".join(f"  {key}" for key in unresolved[:8])
@@ -1989,9 +2223,61 @@ class CellsScreen(QWidget):
                 "Pick one in each row's recipe column, or choose one in "
                 "the run bar to use for this run only.",
             )
-            return
+            return None
         if not batches:
+            return None
+        return _Resolved(
+            batches=batches,
+            project=project,
+            auto_ext_root=auto_ext_root,
+            workarea=workarea,
+            profile=profile,
+            resources=getattr(controller, "resources", None),
+        )
+
+    def _enqueue(self, request: RunRequest) -> _Job | None:
+        """Resolve a press into a job and put it at the back of the queue."""
+
+        resolved = self._resolve_batches(request)
+        if resolved is None:
+            return None
+        job = _Job(
+            request=request,
+            resolved=resolved,
+            live=_LiveRun(keys=request.keys, stages=request.stages),
+        )
+        # Rows the job in flight is already reporting on keep their live
+        # state; the rest are told they are spoken for.
+        running_keys = set(self._live.keys)
+        for key in request.keys:
+            if key in running_keys:
+                continue
+            job.previous[key] = self.row_status(key)
+            self.set_row_status(key, "pending", text="queued")
+        self._queue.append(job)
+        # The rows a waiting job spoke for say "queued" in the status column;
+        # without this their chip column still reads an em dash, so the same
+        # row answers the same question two different ways.
+        self._repaint_live_strips()
+        self._refresh_run_panel()
+        self._pump()
+        return job
+
+    def _pump(self) -> None:
+        """Start the next job, if there is one and nothing is in flight."""
+
+        if self._worker is not None or not self._queue:
+            self._refresh_run_panel()
             return
+        self._start_job(self._queue.pop(0))
+
+    def _start_job(self, job: _Job) -> None:
+        """Build the worker trio for ``job`` and set it going.
+
+        Every input comes off the job, not off the controller: the job was
+        validated when the button went down and the controller may have been
+        reloaded since (see :class:`_Resolved`).
+        """
 
         reporter = QtProgressReporter()
         reporter.run_started.connect(self._on_run_started)
@@ -2002,36 +2288,120 @@ class CellsScreen(QWidget):
         reporter.run_dir_ready.connect(self._on_run_dir_ready)
         token = CancelToken()
 
+        request = job.request
+        resolved = job.resolved
         self._reporter = reporter
-        self._live = _LiveRun(keys=request.keys, stages=request.stages)
+        self._current = job
         self._worker = RunWorker(
-            project=project,
-            batches=batches,
+            project=resolved.project,
+            batches=resolved.batches,
             stages=list(request.stages),
-            auto_ext_root=auto_ext_root,
-            workarea=workarea,
+            auto_ext_root=resolved.auto_ext_root,
+            workarea=resolved.workarea,
             reporter=reporter,
             cancel_token=token,
-            profile=profile,
-            resources=getattr(controller, "resources", None),
+            profile=resolved.profile,
+            resources=resolved.resources,
             max_workers=request.jobs if request.jobs >= 2 else None,
             dry_run=request.dry_run,
             layout_export_path=request.layout_export_path,
         )
         self._worker.error.connect(self._on_worker_error)
         self._worker.finished.connect(self._on_worker_done)
-        self._enter_running_state(request)
+        # M-134: the QThread's C++ object outlives the Python reference by
+        # exactly one trip through the event loop, which is what a plain
+        # ``self._worker = None`` in the finished slot did not give it.
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._enter_running_state(job)
         self._worker.start()
 
     def cancel_run(self) -> None:
-        if self._worker is None:
+        """Stop the job in flight. The queue behind it is left alone."""
+
+        worker = self._worker
+        if worker is None:
             return
-        self._worker.request_cancel()
+        worker.request_cancel()
+        self._cancelling = worker
+        self._cancel_serial += 1
+        serial = self._cancel_serial
         self.run_bar.mark_cancelling()
-        self.status_message.emit("cancelling — the runner stops at its next check")
+        self._say("cancelling — the runner stops at its next check")
+        # M-133: a cancel that never comes back used to leave the screen with
+        # neither Run nor Cancel. Nothing here can make a stuck subprocess
+        # return, but the user is owed the sentence and the button.
+        #
+        self._arm_cancel_deadline(serial)
+
+    def _arm_cancel_deadline(self, serial: int) -> None:
+        """One deadline per press, owned by this screen.
+
+        The serial is what makes the deadline belong to *this* press. A timer
+        already ticking cannot be recalled, so a 15s deadline armed for job 1
+        still fires long after job 1 stopped and job 2 started; a guard that
+        only asked "is the worker I cancelled still in flight" would then call
+        job 2's five-second-old Cancel stalled. Pressing Cancel twice on one
+        worker has the same shape and the same answer: only the newest press
+        owns the deadline.
+
+        A ``QTimer`` parented to the screen rather than ``QTimer.singleShot``,
+        because a free-standing 15s timer outlives the widget it was armed
+        for -- and a deadline that fires into a destroyed run bar is a
+        RuntimeError on a dead C++ button, which is not a sentence anyone can
+        act on.
+        """
+
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: self._on_cancel_deadline(serial))
+        timer.timeout.connect(timer.deleteLater)
+        timer.start(CANCEL_DEADLINE_MS)
+
+    def _on_cancel_deadline(self, serial: int) -> None:
+        if serial != self._cancel_serial:
+            return  # a later Cancel owns the deadline now
+        if self._worker is None or self._worker is not self._cancelling:
+            return  # it came back, or a different job is in flight now
+        self.run_bar.mark_cancel_stalled()
+        self._say(
+            "the runner has not come back since Cancel — it is still inside "
+            "a tool call; press Cancel again, or leave it and keep working"
+        )
+
+    def drop_queued_jobs(self) -> tuple[str, ...]:
+        """Throw away every job waiting behind the one in flight.
+
+        Returns the row keys that stopped being spoken for. The running job
+        is untouched -- that is :meth:`cancel_run`'s job, and one control
+        that meant both would make "stop" ambiguous at the worst moment.
+        """
+
+        if not self._queue:
+            return ()
+        dropped, self._queue = self._queue, []
+        count = len(dropped)
+        still_queued = set(self._live.keys)
+        restored: set[str] = set()
+        for job in reversed(dropped):
+            for key, previous in job.previous.items():
+                if key in still_queued:
+                    continue
+                self.set_row_status(
+                    key,
+                    previous.status,
+                    text=previous.text,
+                    when=previous.when,
+                    code=previous.code,
+                )
+                restored.add(key)
+        self._repaint_live_strips()
+        self._refresh_run_panel()
+        noun = "run" if count == 1 else "runs"
+        self._say(f"dropped {count} waiting {noun}")
+        return tuple(sorted(restored))
 
     def stop_run_and_wait(self, timeout_ms: int = 5000) -> bool:
-        """Cancel a run and block until the thread is really gone.
+        """Drop the queue, cancel the run in flight, block until it is gone.
 
         For the window's ``closeEvent`` only. ``cancel_run`` returns
         immediately and the runner notices at its next check; letting the
@@ -2040,34 +2410,39 @@ class CellsScreen(QWidget):
         clean stop. Returns whether the thread finished in time.
         """
 
+        self._queue = []
+        self._refresh_run_panel()
         worker = self._worker
         if worker is None:
             return True
         self.cancel_run()
         return bool(worker.wait(timeout_ms))
 
-    def _enter_running_state(self, request: RunRequest) -> None:
+    def _enter_running_state(self, job: _Job) -> None:
+        """Show the live panel for ``job``. Nothing on the screen goes dead.
+
+        What this method used to do -- ``NoEditTriggers``, five disabled
+        toolbar buttons, a check column redrawn as glyphs -- is the whole of
+        the user's 2026-09-04 report and is gone. The only thing a run now
+        changes is the column layout and the panel under the table.
+        """
+
+        request = job.request
         self.set_column_mode(MODE_RUNNING)
-        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        for button in self._buttons.values():
-            button.setEnabled(False)
         self.run_bar.set_running(True)
-        self.run_bar.set_run_label(f"Run {len(request.keys)} cells")
+        noun = "cell" if len(request.keys) == 1 else "cells"
+        self.run_bar.set_run_label(f"Run {len(request.keys)} {noun}")
         self.run_bar.set_counts(queued=len(request.keys))
         self.run_bar.set_log_path(None)
         self._reveal_run_panel()
-        for key in self._row_keys:
-            strip = self.stage_strip(key)
-            if strip is None:
-                continue
-            strip.set_stages(request.stages)
-            if key in request.keys:
-                strip.set_placeholder("queued")
-            else:
-                strip.set_placeholder("—")
+        self._repaint_live_strips()
         for key in request.keys:
             self.set_row_status(key, "pending", text="queued")
-        self.status_message.emit("running — edits are locked while a run is in flight")
+        self._refresh_run_panel()
+        self._say(
+            f"running {len(request.keys)} {noun} — the table stays live, and "
+            "Run queues another job behind this one"
+        )
 
     def _reveal_run_panel(self) -> None:
         """Give the run panel room, once, when a run starts.
@@ -2095,19 +2470,67 @@ class CellsScreen(QWidget):
         total = sum(sizes) or self._splitter.height()
         if total <= 0 or len(sizes) != 2:
             return
-        bar = max(self.run_bar.sizeHint().height(), self.run_bar.minimumSizeHint().height())
+        bar = max(
+            self.run_bar.sizeHint().height(), self.run_bar.minimumSizeHint().height()
+        )
         if bar <= 0 or bar >= total:
             return
         self._splitter.setSizes([total - bar, bar])
 
+    def _refresh_run_panel(self) -> None:
+        """Panel visible while anything is running or waiting; depth on it.
+
+        This is also the one place that notices the queue has emptied by a
+        route other than a worker finishing -- Drop queued, or a close that
+        threw the queue away. Hiding the panel without leaving the running
+        state left the table in ``running`` mode with 26px rows and the
+        splitter still at two fifths, over a screen with no run on it.
+        """
+
+        live = self._worker is not None or bool(self._queue)
+        self.run_bar.set_queued_jobs(len(self._queue))
+        if not live and self.run_bar.is_running():
+            self._leave_running_state()
+            return
+        self.run_bar.set_running(live)
+
+    def _repaint_live_strips(self) -> None:
+        """Redraw every stage strip from the jobs, not from what Qt had.
+
+        The table is editable during a run, and any add / remove / rename
+        rebuilds every row -- which used to be impossible and so never had to
+        be survivable. Each strip is re-derived here: the job in flight wins,
+        then a queued job, and a row in neither is dashed out.
+        """
+
+        if self._current is None and not self._queue:
+            return
+        queued: dict[str, _Job] = {}
+        for job in self._queue:
+            for key in job.request.keys:
+                queued.setdefault(key, job)
+        live = self._current.live if self._current is not None else None
+        for key in self._row_keys:
+            strip = self.stage_strip(key)
+            if strip is None:
+                continue
+            if live is not None and key in live.keys:
+                strip.set_stages(live.stages or STAGE_ORDER)
+                if key in live.started:
+                    strip.set_placeholder(None)
+                    strip.set_statuses(live.stage_status.get(key, {}))
+                else:
+                    strip.set_placeholder("queued")
+            elif key in queued:
+                strip.set_stages(queued[key].request.stages or STAGE_ORDER)
+                strip.set_placeholder("queued")
+            else:
+                strip.set_placeholder("—")
+
     def _leave_running_state(self) -> None:
-        self._worker = None
-        self._reporter = None
         self.run_bar.set_running(False)
+        self.run_bar.set_queued_jobs(0)
         self._restore_table_space()
-        self._table.setEditTriggers(
-            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
-        )
         self.set_column_mode(self._idle_mode)
         self._refresh_run_bar()
 
@@ -2141,6 +2564,7 @@ class CellsScreen(QWidget):
             self._live.run_dirs[task_id] = Path(run_dir)
 
     def _on_stage_started(self, task_id: str, stage: str) -> None:
+        self._live.stage_status.setdefault(task_id, {})[stage] = "running"
         strip = self.stage_strip(task_id)
         if strip is not None:
             strip.set_status(stage, "running")
@@ -2149,11 +2573,12 @@ class CellsScreen(QWidget):
             self.run_bar.set_log_path(path)
             if path is not None:
                 self.log_path_changed.emit(path)
-        self.status_message.emit(f"running — {task_id} / {stage}")
+        self._say(f"running — {task_id} / {stage}")
 
     def _on_stage_finished(
         self, task_id: str, stage: str, status: str, error: object
     ) -> None:
+        self._live.stage_status.setdefault(task_id, {})[stage] = status
         strip = self.stage_strip(task_id)
         if strip is not None:
             strip.set_status(stage, status)
@@ -2166,15 +2591,87 @@ class CellsScreen(QWidget):
         self._update_counts()
 
     def _on_worker_error(self, message: str) -> None:
-        QMessageBox.critical(self, "Run failed", message)
+        """Report a run that raised, without stopping the queue behind it.
+
+        Deliberately not ``QMessageBox.critical``. That static spins a
+        nested event loop until the user clicks OK, and the events it
+        processes include the worker's own ``finished`` and the zero-timer
+        behind it -- so the next job would start, and print its stage lines
+        into a run panel sitting behind an error dialog nobody has read yet.
+        A modeless box says the same sentence and lets the queue move.
+        """
+
+        box = QMessageBox(QMessageBox.Critical, "Run failed", message, QMessageBox.Ok, self)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+        box.setModal(False)
+        box.show()
 
     def _on_worker_done(self) -> None:
-        summary = self._worker.summary if self._worker is not None else None
-        self._leave_running_state()
-        finished = self._live.finished
+        """Retire the job that just ended; the next one starts off a timer.
+
+        ``self._worker`` is handed to :attr:`_retiring` rather than simply
+        cleared: dropping the last Python reference to a ``QThread`` from
+        inside that thread's own ``finished`` slot is M-134, the
+        "QThread: Destroyed while thread is still running" crash. The next
+        job is dispatched from :meth:`_advance` on a zero-timer, so no
+        worker is ever constructed inside another worker's slot either.
+        """
+
+        worker = self._worker
+        summary = worker.summary if worker is not None else None
+        finished = dict(self._live.finished)
+        self._disconnect_reporter(self._reporter)
+        self._worker = None
+        self._reporter = None
+        self._current = None
+        self._cancelling = None
+        if worker is not None:
+            self._retiring.append(worker)
+        if self._queue:
+            self._refresh_run_panel()
+        else:
+            self._leave_running_state()
         passed = sum(1 for status in finished.values() if status == "passed")
-        self.status_message.emit(f"idle — {passed}/{len(finished)} passed")
+        if self._queue:
+            # Not "idle": there is a press the user made and has not seen
+            # run, and ``_say`` puts the count of them on the end.
+            self._say(f"{passed}/{len(finished)} passed")
+        else:
+            self._say(f"idle — {passed}/{len(finished)} passed")
         self.run_finished.emit(summary)
+        QTimer.singleShot(0, self._advance)
+
+    def _advance(self) -> None:
+        """One event-loop tick after a run ended: let go, then start the next."""
+
+        self._retiring.clear()
+        self._pump()
+
+    @staticmethod
+    def _disconnect_reporter(reporter: QtProgressReporter | None) -> None:
+        """Unhook a retired reporter from this screen's slots.
+
+        Today nothing is left to emit -- ``run_tasks`` joins its thread pool
+        inside a ``with`` block, so every worker thread is gone before
+        ``finished`` reaches us. That is a property of the runner, not of
+        this screen, and a retired reporter that could still reach the slots
+        of the *next* job's bookkeeping is not a dependency worth keeping.
+        """
+
+        if reporter is None:
+            return
+        for signal in (
+            reporter.run_started,
+            reporter.task_started,
+            reporter.stage_started,
+            reporter.stage_finished,
+            reporter.task_finished,
+            reporter.run_dir_ready,
+        ):
+            try:
+                signal.disconnect()
+            except TypeError:
+                pass  # nothing was connected
 
     def _stage_log_path(self, task_id: str, stage: str) -> Path | None:
         """``runs/<run_id>/logs/<stage>.log``, once the run dir is known.

@@ -49,6 +49,8 @@ from PyQt5.QtWidgets import (  # noqa: E402
     QInputDialog,
     QMessageBox,
     QPushButton,
+    QStyle,
+    QStyleOptionViewItem,
     QTreeWidget,
 )
 from pytestqt.exceptions import capture_exceptions  # noqa: E402
@@ -64,7 +66,11 @@ from auto_ext.model.run import (  # noqa: E402
 from auto_ext.ui.main_window import MainWindow  # noqa: E402
 from auto_ext.ui.screens import cells_screen as cells_mod  # noqa: E402
 from auto_ext.ui.screens import runs_screen as runs_mod  # noqa: E402
-from auto_ext.ui.screens.cells_screen import COL_CELL, COL_LAST_RUN  # noqa: E402
+from auto_ext.ui.screens.cells_screen import (  # noqa: E402
+    COL_CELL,
+    COL_CHECK,
+    COL_LAST_RUN,
+)
 from auto_ext.ui.widgets.failure_chip import PathLabel  # noqa: E402
 
 _REPORT_WITH_MISMATCH = """\
@@ -346,23 +352,33 @@ def workers(monkeypatch) -> list[_FakeWorker]:
 
 
 def _tick_cells(qtbot, cells, rows: tuple[int, ...]) -> tuple[str, ...]:
-    """Put ``rows`` in the run set by clicking them."""
+    """Make the run set exactly ``rows``, by clicking their check boxes.
 
+    The run set is the check column, not the highlight -- they stopped being
+    the same thing on 2026-09-04 -- so this used to click the cell name and
+    tick nothing at all. Every journey below then reached ``assert workers``
+    with a dead Run button and failed there, which is not the sentence any
+    of them is about.
+
+    The starting state is cleared rather than assumed: ``add_cell`` ticks the
+    row it adds, so a journey that calls :func:`_add_rows` first arrives here
+    with rows already in the run set.
+    """
+
+    cells.clear_checks()
     table = cells.table
-    for position, row in enumerate(rows):
-        item = table.item(row, COL_CELL)
+    for row in rows:
+        item = table.item(row, COL_CHECK)
         assert item is not None, f"row {row} is not in the table"
-        qtbot.mouseClick(
-            table.viewport(),
-            Qt.LeftButton,
-            Qt.ControlModifier if position else Qt.NoModifier,
-            table.visualItemRect(item).center(),
-        )
-        if position:
-            # QTest leaves the modifier latched application-wide; a later
-            # programmatic setCurrentIndex would then read it as a toggle.
-            qtbot.keyRelease(table.viewport(), Qt.Key_Control, Qt.NoModifier)
-    return cells.selected_keys()
+        option = QStyleOptionViewItem()
+        option.initFrom(table)
+        option.rect = table.visualRect(table.model().index(row, COL_CHECK))
+        option.features = QStyleOptionViewItem.HasCheckIndicator
+        point = table.style().subElementRect(
+            QStyle.SE_ItemViewItemCheckIndicator, option, table
+        ).center()
+        qtbot.mouseClick(table.viewport(), Qt.LeftButton, Qt.NoModifier, point)
+    return cells.checked_keys()
 
 
 def _add_rows(cells, count: int) -> None:
@@ -473,8 +489,8 @@ def test_a_run_with_no_stages_at_all_does_not_read_as_passed(
 @pytest.mark.xfail(
     strict=True,
     reason="M-24: the checkbox is read into RunRequest and then dropped -- "
-    "_dispatch builds RunWorker without it, RunWorker has no such parameter, "
-    "and the runner takes the value from the recipe only",
+    "_start_job builds RunWorker without it, RunWorker has no such "
+    "parameter, and the runner takes the value from the recipe only",
 )
 def test_continue_on_lvs_fail_reaches_the_runner(
     qtbot, window: MainWindow, workers: list[_FakeWorker]

@@ -389,10 +389,79 @@ def test_a_finished_run_refreshes_the_history(
     assert window.shell.status_left() == "idle"
 
 
-def test_a_started_run_says_so_in_the_status_bar(loaded_window: MainWindow) -> None:
+def test_the_status_bar_counts_the_queue_and_says_idle_only_when_it_drains(
+    qtbot, loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"running" is not a synonym for "one worker is alive".
+
+    A press the user made and has not seen run is still work outstanding,
+    so the shell says how many are waiting and reaches "idle" only when the
+    last one is retired.
+
+    And it has to keep saying it. The host writes this line once, when the
+    press lands; every stage of an hours-long extraction overwrites it, so
+    the depth has to travel on the screen's own lines too or it is visible
+    for exactly one frame.
+    """
+
+    from types import SimpleNamespace
+
+    from PyQt5.QtCore import QObject, pyqtSignal
+
+    from auto_ext.ui.screens import cells_screen as cells_mod
+
+    class _FakeWorker(QObject):
+        error = pyqtSignal(str)
+        finished = pyqtSignal()
+        instances: list["_FakeWorker"] = []
+
+        def __init__(self, **kwargs) -> None:
+            super().__init__()
+            self.kwargs = kwargs
+            self.summary = SimpleNamespace(runs=[])
+            _FakeWorker.instances.append(self)
+
+        def start(self) -> None:
+            pass
+
+        def request_cancel(self) -> None:
+            pass
+
+    _FakeWorker.instances = []
+    monkeypatch.setattr(cells_mod, "RunWorker", _FakeWorker)
+
     window = loaded_window
-    window.cells_screen.run_requested.emit(object())
+    cells = window.cells_screen
+    cells.set_checked_keys(cells.cells().keys[:1])
+
+    cells.run_bar.run_button().click()
+    assert _FakeWorker.instances, "the Run click dispatched nothing"
     assert window.shell.status_left() == "running"
+
+    cells.run_bar.run_button().click()
+    assert window.shell.status_left() == "running · 1 run waiting"
+
+    # The event the user actually watches for hours. Whatever the screen
+    # writes over the host's line has to carry the depth with it.
+    reporter = _FakeWorker.instances[0].kwargs["reporter"]
+    reporter.on_stage_start(cells.cells().keys[0], "calibre")
+    assert "1 run waiting" in window.shell.status_left(), (
+        f"a stage event wrote {window.shell.status_left()!r} and the waiting "
+        "run stopped being visible"
+    )
+
+    _FakeWorker.instances[0].finished.emit()
+    qtbot.wait(10)
+    # The waiting job took over, so the screen's own "running N cells" line
+    # is the last writer; what matters is that nothing said "idle" while a
+    # job was still going and that the suffix is gone with the queue.
+    assert window.shell.status_left().startswith("running")
+    assert "waiting" not in window.shell.status_left()
+    assert len(_FakeWorker.instances) == 2, "the waiting job never started"
+
+    _FakeWorker.instances[1].finished.emit()
+    qtbot.wait(10)
+    assert window.shell.status_left() == "idle"
 
 
 def test_the_log_path_the_screen_publishes_reaches_the_viewer(

@@ -310,10 +310,30 @@ def test_compact_merges_views_and_pushes_ground_into_the_tooltip(qtbot) -> None:
 
 
 def test_running_mode_shows_chips_in_a_taller_row(qtbot) -> None:
+    """``running`` is the idle layout plus chips, not a layout of its own.
+
+    Artboard ``1b`` drew five columns because a run used to lock the rows.
+    With the lock gone -- and a queue that can keep the panel up for hours --
+    that table would take six of the eight typeable columns away for the
+    whole session, so the running layout is composed, not substituted.
+    """
+
     screen = _screen(qtbot)
     screen.set_column_mode(MODE_RUNNING)
 
-    assert _visible_titles(screen) == ["", "library", "cell", "recipe", "stages"]
+    assert _visible_titles(screen) == [
+        "",
+        "library",
+        "cell",
+        "layout",
+        "source",
+        "ground",
+        "out view",
+        "recipe",
+        "last run",
+        "status",
+        "stages",
+    ]
     assert isinstance(screen.table.cellWidget(0, COL_STAGES), StageChipStrip)
     assert (
         screen.table.verticalHeader().defaultSectionSize()
@@ -322,7 +342,43 @@ def test_running_mode_shows_chips_in_a_taller_row(qtbot) -> None:
     )
 
 
-def test_running_mode_swaps_the_checkbox_for_a_status_glyph(qtbot) -> None:
+def test_the_running_layout_follows_the_width_class_it_composes_from(qtbot) -> None:
+    """A resize during a run has to reach the columns, not only the toolbar.
+
+    ``running`` used to be its own frozen set, so a job that started at a
+    wide window stayed wide through every resize until it ended. With the
+    queue that can be the whole session.
+    """
+
+    screen = _screen(qtbot)
+    screen.show()
+    qtbot.waitExposed(screen)
+    screen.resize(1280, 600)
+    qtbot.wait(10)
+    screen.set_column_mode(MODE_RUNNING)
+    assert "layout" in _visible_titles(screen)
+
+    screen.resize(900, 600)
+    qtbot.wait(10)
+
+    assert screen.column_mode() == MODE_RUNNING, "the resize ended the run layout"
+    titles = _visible_titles(screen)
+    assert titles == ["", "library", "cell", "views", "out view", "recipe",
+                      "last run", "status", "stages"], titles
+
+
+def test_running_mode_keeps_a_real_check_column_and_shows_status_beside_it(
+    qtbot,
+) -> None:
+    """The glyph lives in ``status``; the check column stays a check column.
+
+    It used to be redrawn as the status glyph, which stripped
+    ``ItemIsUserCheckable`` for the length of the run -- so the one column
+    the next batch is built in went dead exactly when the user wanted to
+    build it. ``status`` was hidden in this mode and is now shown, which is
+    where the glyph belonged all along.
+    """
+
     screen = _screen(qtbot)
     key = screen.cells().keys[0]
     screen.set_row_status(key, "passed", text="passed")
@@ -330,19 +386,25 @@ def test_running_mode_swaps_the_checkbox_for_a_status_glyph(qtbot) -> None:
     screen.set_column_mode(MODE_RUNNING)
 
     item = screen.table.item(0, COL_CHECK)
-    assert item.text() == theme.STATUS_GLYPH["passed"]
-    assert not (item.flags() & Qt.ItemIsUserCheckable)
+    assert item.text() == ""
+    assert bool(item.flags() & Qt.ItemIsUserCheckable)
+    assert screen.table.isColumnHidden(COL_STATUS) is False
+    assert theme.STATUS_GLYPH["passed"] in screen.table.item(0, COL_STATUS).text()
 
 
-def test_leaving_running_mode_restores_the_checkboxes(qtbot) -> None:
+def test_leaving_running_mode_keeps_the_checkboxes(qtbot) -> None:
     screen = _screen(qtbot)
+    screen.set_checked_keys(screen.cells().keys[:1])
     screen.set_column_mode(MODE_RUNNING)
+
+    assert screen.table.item(0, COL_CHECK).checkState() == Qt.Checked
 
     screen.set_column_mode(MODE_WIDE)
 
     item = screen.table.item(0, COL_CHECK)
     assert item.text() == ""
     assert bool(item.flags() & Qt.ItemIsUserCheckable)
+    assert item.checkState() == Qt.Checked
 
 
 # ---- empty state (artboard 1i) -------------------------------------------
@@ -708,7 +770,9 @@ def test_the_header_box_checks_and_clears_every_visible_row(qtbot) -> None:
     assert header.check_state() == Qt.Unchecked
 
 
-def test_the_header_box_shows_partial_and_hides_during_a_run(qtbot) -> None:
+def test_the_header_box_shows_partial_and_stays_up_during_a_run(qtbot) -> None:
+    """Check-all is how a batch of forty is built; a run does not take it away."""
+
     screen = _screen(qtbot)
     header = screen.table.horizontalHeader()
 
@@ -716,7 +780,7 @@ def test_the_header_box_shows_partial_and_hides_during_a_run(qtbot) -> None:
     assert header.check_state() == Qt.PartiallyChecked
 
     screen.set_column_mode(MODE_RUNNING)
-    assert header.is_check_shown() is False
+    assert header.is_check_shown() is True
     screen.set_column_mode(MODE_WIDE)
     assert header.is_check_shown() is True
 
@@ -786,7 +850,9 @@ def test_a_run_keeps_the_ticks_for_the_next_one(qtbot) -> None:
     screen.set_checked_keys(keys[:2])
 
     screen.set_column_mode(MODE_RUNNING)
-    assert screen.table.item(0, COL_CHECK).checkState() == Qt.Unchecked
+    # Ticked and still tickable: the boxes are drawn from the run set in
+    # every mode now, so the batch is visible while it runs.
+    assert screen.table.item(0, COL_CHECK).checkState() == Qt.Checked
     screen.set_column_mode(MODE_WIDE)
 
     assert screen.checked_keys() == tuple(keys[:2])
@@ -977,6 +1043,32 @@ def test_screen_never_blocks_the_940x560_window(qtbot) -> None:
 
     assert hint.width() <= 700, f"cells screen demands {hint.width()}px of width"
     assert hint.height() <= 400, f"cells screen demands {hint.height()}px of height"
+
+
+def test_the_run_panel_costs_the_floor_nothing_now_that_it_is_additive(
+    qtbot, controller, fake_worker
+) -> None:
+    """The panel is drawn *under* the idle strip instead of over it.
+
+    That is two strips of chrome where there used to be one, and the run
+    bar's height is the one number this screen's minimum is made of -- so a
+    floor measured only at idle would stop measuring the state the user
+    actually spends hours in.
+    """
+
+    screen = _screen(qtbot, controller=controller)
+    screen.run_bar.set_log_widget(QLabel("log"))
+    screen.set_checked_keys(screen.cells().keys)
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    screen.start_run()
+    qtbot.wait(10)
+
+    assert screen.run_bar.is_running() is True
+    hint = screen.minimumSizeHint()
+    assert hint.width() <= 700, f"a run demands {hint.width()}px of width"
+    assert hint.height() <= 400, f"a run demands {hint.height()}px of height"
 
 
 def test_an_empty_screen_is_no_bigger_than_a_full_one(qtbot) -> None:
@@ -1325,21 +1417,46 @@ def test_one_job_means_serial_not_a_pool_of_one(qtbot, controller, fake_worker) 
     assert fake_worker.instances[0].kwargs["max_workers"] is None
 
 
-def test_a_second_run_cannot_start_while_one_is_in_flight(
+def test_a_second_press_queues_a_job_behind_the_one_in_flight(
     qtbot, controller, fake_worker
 ) -> None:
+    """One worker at a time, but never a refused press.
+
+    The licence argument in ``worker.py`` is about threads, not about the
+    user's intent: a second press is a second *job*, it waits, and it starts
+    itself when the first one is retired.
+    """
+
     screen = _screen(qtbot, controller=controller)
     screen.set_checked_keys(screen.cells().keys[:1])
 
     screen.start_run()
     screen.start_run()
 
-    assert len(fake_worker.instances) == 1
+    assert len(fake_worker.instances) == 1, "two workers were alive at once"
+    assert screen.queued_jobs() == 1
+    assert screen.is_running() is True
+
+    fake_worker.instances[0].finished.emit()
+    qtbot.wait(10)
+
+    assert len(fake_worker.instances) == 2, "the queued job never started"
+    assert screen.queued_jobs() == 0
 
 
-def test_running_locks_edits_and_switches_the_table(qtbot, controller, fake_worker) -> None:
+def test_running_switches_the_table_and_locks_nothing(
+    qtbot, controller, fake_worker
+) -> None:
+    """"跑了一个仿真之后，用户还能改什么东西，然后再继续扔仿真."
+
+    The only thing a run changes is the column layout and the panel under
+    the table. Every control the old running state took away is checked
+    here, because taking any one of them away is what the user reported.
+    """
+
     screen = _screen(qtbot, controller=controller)
     screen.set_checked_keys(screen.cells().keys[:2])
+    screen.set_unsaved(True)
     messages: list[str] = []
     screen.status_message.connect(messages.append)
 
@@ -1347,11 +1464,17 @@ def test_running_locks_edits_and_switches_the_table(qtbot, controller, fake_work
 
     assert screen.is_running() is True
     assert screen.column_mode() == MODE_RUNNING
-    assert screen.table.editTriggers() == QAbstractItemView.NoEditTriggers
-    assert screen.toolbar_button("add").isEnabled() is False
+    assert screen.table.editTriggers() != QAbstractItemView.NoEditTriggers
+    for name in ("add", "duplicate", "remove", "import", "save"):
+        screen.set_selected_keys(screen.cells().keys[:1])
+        assert screen.toolbar_button(name).isEnabled() is True, name
+    assert screen.table.item(0, COL_CHECK).flags() & Qt.ItemIsUserCheckable
     assert screen.run_bar.is_running() is True
+    assert screen.run_bar.run_button().isVisibleTo(screen.run_bar) is True
+    assert screen.run_bar.run_button().isEnabled() is True
     assert screen.run_bar.counts_text() == "0 passed · 0 failed · 0 running · 2 queued"
-    assert any("edits are locked" in m for m in messages)
+    assert screen.run_bar.run_label() == "Run 2 cells"
+    assert not any("locked" in m for m in messages), messages
 
 
 def test_rows_outside_the_batch_are_not_marked_queued(
@@ -1490,6 +1613,147 @@ def test_cancel_asks_the_worker_once_and_says_so(qtbot, controller, fake_worker)
 
     assert fake_worker.instances[0].cancelled is True
     assert screen.run_bar.cancel_button().isEnabled() is False
+
+
+def test_a_new_row_inherits_a_recipe_from_the_highlight_then_from_the_last_row(
+    qtbot,
+) -> None:
+    """A blank ``recipe=None`` is the shape the dispatch refuses to guess at.
+
+    Two rows bound to different recipes make the precedence visible: the row
+    the user is pointing at wins, and with nothing highlighted the last row
+    in the table is the best available guess at "the one I was just working
+    on". A table where nothing names a recipe still produces ``None``, which
+    is what keeps the whole-batch refusal reachable.
+    """
+
+    screen = _screen(qtbot)
+    keys = screen.cells().keys
+    screen.set_recipe_binding(keys[0], "rc-default")
+    screen.set_recipe_binding(keys[1], "rc-fast")
+
+    screen.set_selected_keys([keys[0]])
+    added = screen.add_cell()
+    assert screen.cells().entry(added).recipe == "rc-default"
+
+    screen.table.clearSelection()
+    added2 = screen.add_cell()
+    assert screen.cells().entry(added2).recipe == "rc-default", (
+        "with nothing highlighted the last row's recipe should carry over"
+    )
+
+    bare = _screen(qtbot)
+    bare.table.clearSelection()
+    fresh = bare.add_cell()
+    assert bare.cells().entry(fresh).recipe is None, (
+        "a table where no row names a recipe must not invent one"
+    )
+
+
+def test_adding_a_row_mid_run_keeps_the_running_rows_chips(
+    qtbot, controller, fake_worker
+) -> None:
+    """A mid-run Add rebuilds every row, stage strips included.
+
+    That was impossible before -- Add returned on ``self._worker is not
+    None`` -- so nothing had to survive it. The strips are redrawn from the
+    job's own record now; if they were not, the user would watch a live run
+    blank itself for pressing Add.
+    """
+
+    screen = _screen(qtbot, controller=controller)
+    keys = screen.cells().keys
+    screen.set_checked_keys(keys[:1])
+    screen.start_run()
+    reporter = fake_worker.instances[0].kwargs["reporter"]
+    reporter.on_task_start(keys[0], ["si", "calibre"])
+    reporter.on_stage_start(keys[0], "si")
+    reporter.on_stage_end(keys[0], "si", "passed", None)
+    assert screen.stage_strip(keys[0]).statuses()["si"] == "passed"
+
+    screen.add_cell()
+
+    strip = screen.stage_strip(keys[0])
+    assert strip is not None
+    assert strip.placeholder() is None, "the running row went back to 'queued'"
+    assert strip.statuses().get("si") == "passed", (
+        "pressing Add blanked the chips of a row that is still running"
+    )
+    assert screen.stage_strip(screen.cells().keys[-1]).placeholder() == "—", (
+        "the row the user just added claims to be part of the running batch"
+    )
+
+
+def test_dropping_the_last_waiting_run_hands_the_whole_screen_back(
+    qtbot, controller, fake_worker
+) -> None:
+    """Hiding the panel is not the same as leaving the running state.
+
+    ``_leave_running_state`` was reachable only from a worker finishing, so
+    a queue emptied by Drop -- or by a close that threw it away -- left the
+    table in ``running`` mode, with 26px rows and the splitter still giving
+    two fifths of the screen to a panel that was no longer there.
+    """
+
+    screen = _screen(qtbot, controller=controller)
+    screen.run_bar.set_log_widget(QLabel("log"))
+    screen.set_checked_keys(screen.cells().keys[:1])
+    screen.resize(1280, 600)
+    screen.show()
+    qtbot.waitExposed(screen)
+    qtbot.wait(10)
+    idle_before = screen.splitter.sizes()[1]
+
+    screen.start_run()
+    fake_worker.instances[0].finished.emit()
+    qtbot.wait(10)
+    assert screen.column_mode() == MODE_WIDE
+
+    # Now the other route: a job waiting with nothing in flight, dropped.
+    screen.start_run()
+    screen.start_run()
+    assert screen.queued_jobs() == 1
+    screen.drop_queued_jobs()
+    fake_worker.instances[-1].finished.emit()
+    qtbot.wait(10)
+
+    assert screen.is_running() is False
+    assert screen.run_bar.is_running() is False
+    assert screen.column_mode() == MODE_WIDE, "the table stayed in the run layout"
+    assert (
+        screen.table.verticalHeader().defaultSectionSize() == theme.ROW_HEIGHT
+    ), "the taller chip rows outlived the run"
+    assert screen.splitter.sizes()[1] <= idle_before + 4, (
+        "the run panel kept two fifths of the screen after it went away"
+    )
+
+
+def test_a_removed_row_does_not_leave_its_result_for_the_next_one(
+    qtbot,
+) -> None:
+    """Statuses are pruned on every book swap, not only on ``set_cells``.
+
+    Every in-place edit goes through ``_apply_book``, which used to keep the
+    status of a row the user had just removed. A row later given the same
+    key -- readding a cell you deleted by mistake is one gesture -- inherited
+    a PASSED it never produced.
+    """
+
+    screen = _screen(qtbot)
+    entry = next(iter(screen.cells()))
+    key = entry.key
+    screen.set_row_status(key, "passed", text="passed", when="2026-09-05 10:00")
+
+    screen.set_selected_keys([key])
+    screen.remove_selected()
+    assert screen.row_status(key).status == "pending"
+
+    screen.add_cell(entry)
+
+    assert screen.row_status(key).status == "pending", (
+        "the re-added row inherited the removed row's result"
+    )
+    assert "passed" not in screen.table.item(screen.row_of_key(key), COL_STATUS).text()
 
 
 def test_finishing_gives_the_screen_back(qtbot, controller, fake_worker) -> None:
