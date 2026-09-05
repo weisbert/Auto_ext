@@ -55,7 +55,12 @@
 #                     elsewhere" (the profile for a corner, the DUT for the
 #                     view to reduce). The form shows an explicit
 #                     "(from the profile)" entry, not an empty control.
-# placeholder         grey text for an empty control when ``default`` is null.
+# placeholder         what the tool does when the control is left empty.
+#                     Usually grey text under a null ``default``. A row whose
+#                     empty state is legal but whose default is not empty gets
+#                     one too -- ``output_xy`` reads "0 of 8 - no XY
+#                     coordinates" on the closed control, because a count of
+#                     zero on its own looks like a value nobody set.
 # choices_confidence  certain | likely | guess -- how sure the VALUE SET is.
 #                     Deliberately NOT the same column as ``observed``: a value
 #                     can be certainly hardcoded (observed) while its legal
@@ -3374,6 +3379,7 @@ options:
     default: [CANONICAL_RES, PARASITIC_RES, CANONICAL_CAP, PARASITIC_CAP, DIODE, MOS, BIPOLAR, GENERIC]
     currently: jinja_var
     observed: true
+    placeholder: no XY coordinates
     source_ref: templates/quantus/dspf.cmd.j2:52
     notes: >-
       Nine physical lines: the option on one, then one quoted value per line,
@@ -3386,13 +3392,15 @@ options:
       members lowercase. Ours is what the Cadence Quantus UI 18.21-s340
       export itself wrote -- the golden deck header records the tool -- so
       QRC demonstrably accepts the uppercase spelling and it is kept.
-      THE LIST MUST NOT BE EMPTIED. The option name is written outside the
-      per-value loop, so an empty list emits a bare `-output_xy` in front of
-      the next option; the model refuses it rather than the template dropping
-      the line, because a DSPF with no coordinates at all is a different
-      extraction, not a safe fallback.
+      The empty list is legal and means "no XY coordinates": the option is
+      optional to Quantus, so the guard `[% if output_xy %]` drops the option
+      name together with its values and the deck says nothing about
+      coordinates. The option name used to sit outside the per-value loop,
+      which is how an empty list wrote a bare `-output_xy`; the guard is what
+      fixed that, and it is why this is the one value_per_line site that is
+      also an optional one.
     lands_in:
-      - {target: quantus.dspf.cmd, section: output_db, option: -output_xy, line: 52, layout: value_per_line}
+      - {target: quantus.dspf.cmd, section: output_db, option: -output_xy, line: 52, layout: value_per_line, optional: true}
     why: Which element classes get coordinates in the DSPF. Affects file size and back-annotation.
 
   - key: netlist_coupling_values

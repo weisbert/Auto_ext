@@ -779,10 +779,15 @@ def _apply_site(
         return anchor
     index, drifted = anchor
 
-    if site.rule.optional:
-        return _rewrite_optional_line(lines, site, target, index, drifted)
+    # VALUE_PER_LINE is checked BEFORE ``optional``: such a site is always both
+    # (the option name is written only when the list has members), and one
+    # rewriter has to emit the ``[% if %]`` and the ``[% for %]`` together --
+    # wrapping the option line alone would leave its value lines outside the
+    # guard, which is a deck that writes operands with no option in front.
     if site.rule.layout is Layout.VALUE_PER_LINE:
         return _rewrite_value_per_line(lines, site, spec, index, drifted, pattern)
+    if site.rule.optional:
+        return _rewrite_optional_line(lines, site, target, index, drifted)
     if site.rule.layout is Layout.VALUE_ON_NEXT_LINE:
         return _rewrite_next_line(lines, site, spec, index, drifted)
     return _rewrite_in_slot(lines, site, spec, index, drifted, pattern)
@@ -1079,19 +1084,38 @@ def _rewrite_value_per_line(
     drifted: bool,
     pattern: re.Pattern[str],
 ) -> Rewrite | Refusal:
-    """``-output_xy`` followed by one quoted value per line -> a hugging loop.
+    """``-output_xy`` followed by one quoted value per line -> a guarded loop.
 
-    The value lines collapse into one loop body, and ``[% endfor %]`` is glued
-    to the front of the line that follows them. That gluing is the whole point:
-    with ``trim_blocks`` off, an ``[% endfor %]`` on a line of its own emits the
-    newline that follows it and the file grows a blank line the tool never
-    wrote.
+    Three tags, all hugging. ``[% if list %]`` is glued to the front of the
+    OPTION line, the value lines collapse into one ``[% for %]`` body, and
+    ``[% endfor %][% endif %]`` is glued to the front of the line that follows
+    them. The gluing is the whole point: with ``trim_blocks`` off, a tag on a
+    line of its own emits the newline after it and the file grows a blank line
+    the tool never wrote.
+
+    The guard is not optional decoration. The option name is written once,
+    outside the loop, so a list with no members would leave ``-output_xy``
+    standing in front of the next option -- a switch with no operand, which
+    Quantus reads hours after anybody could connect it to a click. The empty
+    list is a legal thing to ask for (a DSPF with no XY coordinates), so it
+    has to render as the option being omitted whole, and the only shape that
+    does that is the option name inside the same ``[% if %]`` as its values.
+
+    A site deck that carries NO ``-output_xy`` at all never reaches here:
+    :func:`_find_anchor` refuses it as ``ANCHOR_NOT_FOUND`` and the site keeps
+    a template with no such line, which renders "omitted" for every value of
+    the list -- including the default one, so the refusal is reported rather
+    than papered over.
     """
 
     target = spec.id
     opt = site.opt
     values = list(opt.default or [])
     if not values:
+        # About the CATALOG's default, not about the user's list: an empty
+        # default means there is no block of value lines in the shipped deck
+        # to recognise and replace. (An empty list at RUN time is fine -- that
+        # is exactly what the guard this function writes is for.)
         return _refuse(
             site,
             target,
@@ -1163,14 +1187,18 @@ def _rewrite_value_per_line(
 
     head, tail = shapes[0]
     slot = f'"[[ {LOOP_VAR} ]]"' if quoted else f"[[ {LOOP_VAR} ]]"
+    guard_line = f"[% if {opt.template_var} %]{lines[index]}"
     loop_line = f"[% for {LOOP_VAR} in {opt.template_var} %]{head}{slot}{tail}"
-    before = tuple(lines[first : last + 2])
-    endfor_line = "[% endfor %]" + lines[last + 1]
+    before = (lines[index], *lines[first : last + 2])
+    endfor_line = "[% endfor %][% endif %]" + lines[last + 1]
 
-    # The following line is rewritten first: splicing the block away would move
-    # it, and its index is only valid until then.
+    # Order matters, and only for the first two. The line AFTER the block is
+    # rewritten before the splice, because collapsing eight lines into one
+    # moves it and its index is valid only until then. The option line sits
+    # before the splice, so its index survives either way.
     lines[last + 1] = endfor_line
     lines[first : last + 1] = [loop_line]
+    lines[index] = guard_line
 
     return _finish(
         site,
@@ -1178,14 +1206,18 @@ def _rewrite_value_per_line(
         line=first + 1,
         drifted=drifted,
         shape=Shape.LIST_PER_LINE,
-        literal="\n".join(before[: len(values)]),
+        literal="\n".join(before[1 : len(values) + 1]),
         placeholder=loop_line,
         before=before,
-        after=(loop_line, endfor_line),
+        after=(guard_line, loop_line, endfor_line),
         notes=[
             _drift_note(site, index, drifted),
-            "[% endfor %] is glued to the following line on purpose: trim_blocks "
-            "is off, so a tag on a line of its own would emit a blank line",
+            "[% if %] takes in the option name as well as its values: the name "
+            "is written once, outside the loop, so an empty list left outside "
+            "the guard would emit a switch with no operand",
+            "[% endfor %][% endif %] is glued to the following line on purpose: "
+            "trim_blocks is off, so a tag on a line of its own would emit a "
+            "blank line",
         ],
     )
 

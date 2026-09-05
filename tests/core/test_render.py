@@ -24,6 +24,7 @@ from auto_ext.core import render
 from auto_ext.core.errors import AutoExtError
 from auto_ext.core.patch import PatchConflictError, capture_patch, render_masked, sha256_text
 from auto_ext.core.patch_models import PatchStatus
+from auto_ext.core.readback import read_back_from_templates
 from auto_ext.model.common import RenderTarget, Stage
 from auto_ext.model.pdk import (
     CornerSpec,
@@ -1782,3 +1783,136 @@ def test_a_recipe_naming_a_corner_the_second_pdk_lacks_is_refused_there(
     message = str(excinfo.value)
     assert "rcworst" in message
     assert "typical" in message
+
+
+# ---- an empty output_xy is a deck without the option -------------------------
+
+
+def _dspf_deck(recipe: Recipe, profile: PdkProfile, tmp_path: Path) -> str:
+    """The rendered ``dspf.cmd`` for one recipe."""
+
+    ctx = render.build_context(
+        dut=make_dut(),
+        recipe=recipe,
+        profile=profile,
+        run=make_run(tmp_path),
+        resolved_env=ENV,
+    )
+    plan = next(
+        p for p in render.plan_targets(recipe) if p.target is RenderTarget.QUANTUS_DSPF
+    )
+    return render.render_one(
+        plan,
+        context=ctx,
+        recipe=recipe,
+        profile=profile,
+        resolved_env=ENV,
+        out_dir=tmp_path / "rendered",
+    ).text
+
+
+def _dspf_recipe(**dspf: object) -> Recipe:
+    return Recipe(
+        recipe_id="xy",
+        name="xy",
+        output={"emit": [OutputKind.DSPF], "dspf": dspf},
+    )
+
+
+def test_an_empty_output_xy_omits_the_option_rather_than_writing_a_bare_switch(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    """``output_xy: []`` is "no XY coordinates", and it has to render as nothing.
+
+    The option name is written once, outside the loop that writes its values,
+    so an unguarded template turns an empty list into a bare ``-output_xy``
+    standing in front of ``-netlist_coupling_values`` -- a switch whose operand
+    is the next option's name. The model briefly refused the empty list, which
+    made every recipe already carrying one unloadable and took the whole DSPF
+    with it.
+
+    Two things are asserted, and the second is the one a reader forgets:
+    ``trim_blocks`` is off, so a guard written as an ordinary block would drop
+    the option AND leave a blank line inside a backslash-continued statement,
+    which truncates the command Quantus reads.
+    """
+
+    text = _dspf_deck(_dspf_recipe(output_xy=[]), profile, tmp_path)
+    assert "-output_xy" not in text
+    assert "CANONICAL_RES" not in text
+
+    statement = _statement(text, "output_db -type dspf")
+    assert "" not in [line.strip() for line in statement], (
+        f"a blank line inside output_db truncates the statement: {statement}"
+    )
+    for line in statement[:-1]:
+        assert line.rstrip().endswith("\\"), f"{line!r} broke the continuation chain"
+    assert not statement[-1].rstrip().endswith("\\")
+
+    # The option that used to follow the block now follows the one that used to
+    # precede it, with nothing in between.
+    stripped = [line.strip() for line in statement]
+    where = stripped.index('-include_parasitic_res_model "comment" \\')
+    assert stripped[where + 1] == '-netlist_coupling_values "double" \\', stripped
+
+
+def test_the_default_output_xy_still_writes_all_eight_classes(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    """The guard changes nothing for a recipe that asks for coordinates."""
+
+    text = _dspf_deck(_dspf_recipe(), profile, tmp_path)
+    statement = _statement(text, "output_db -type dspf")
+    assert any("-output_xy" in line for line in statement)
+    for member in ("CANONICAL_RES", "PARASITIC_CAP", "BIPOLAR", "GENERIC"):
+        assert f'"{member}"' in text
+    for line in statement[:-1]:
+        assert line.rstrip().endswith("\\")
+
+
+def test_one_ticked_class_writes_the_option_with_exactly_that_operand(
+    tmp_path: Path, profile: PdkProfile
+) -> None:
+    text = _dspf_deck(_dspf_recipe(output_xy=["MOS"]), profile, tmp_path)
+    statement = _statement(text, "output_db -type dspf")
+    values = [line.strip() for line in statement if line.strip().startswith('"')]
+    assert values == ['"MOS" \\']
+
+
+@pytest.mark.parametrize(
+    "wanted",
+    [
+        pytest.param([], id="none"),
+        pytest.param(["MOS"], id="one"),
+        pytest.param(
+            [
+                "CANONICAL_RES",
+                "PARASITIC_RES",
+                "CANONICAL_CAP",
+                "PARASITIC_CAP",
+                "DIODE",
+                "MOS",
+                "BIPOLAR",
+                "GENERIC",
+            ],
+            id="all-eight",
+        ),
+    ],
+)
+def test_output_xy_survives_render_then_read_back(
+    tmp_path: Path, profile: PdkProfile, wanted: list[str]
+) -> None:
+    """Render -> read back -> the same list, the empty one included.
+
+    The empty case is the one that had to be decided rather than discovered.
+    An omitted ``-output_xy`` could read back as "the file says nothing, keep
+    the recipe default", and that default is all eight classes -- so a deck
+    that asks for no coordinates would come back asking for eight, and
+    re-rendering it would produce a DIFFERENT deck from the one imported. The
+    absence of a guarded option IS its value, so it reads back as ``[]``.
+    """
+
+    text = _dspf_deck(_dspf_recipe(output_xy=wanted), profile, tmp_path)
+    back = read_back_from_templates({RenderTarget.QUANTUS_DSPF: text})
+    assert back.values["output_xy"] == wanted
+    assert "output_xy" not in back.unread

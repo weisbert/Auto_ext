@@ -28,7 +28,7 @@ pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
 from PyQt5.QtCore import QPoint, Qt  # noqa: E402
-from PyQt5.QtWidgets import QDialog, QMenu  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QDialog, QMenu  # noqa: E402
 
 from auto_ext.catalog import (  # noqa: E402
     Currently,
@@ -46,7 +46,12 @@ from auto_ext.core.patch_models import (  # noqa: E402
     StagePatchReport,
     TemplatePatch,
 )
-from auto_ext.model.recipe import Recipe, recipe_from_catalog  # noqa: E402
+from auto_ext.model.recipe import (  # noqa: E402
+    OutputKind,
+    Recipe,
+    recipe_from_catalog,
+)
+from auto_ext.ui.screens import recipes_screen as recipes_screen_module  # noqa: E402
 from auto_ext.ui.screens.recipes_screen import (
     member_specs,
     pointer_specs,  # noqa: E402
@@ -1614,3 +1619,43 @@ def test_the_extract_rules_are_a_common_row_not_an_all_only_one(qtbot) -> None:
 
     assert [s.key for s in bands["IN COMMON"]] == ["extract_type"]
     assert bands["IN ALL ONLY"] == []
+
+
+def test_unticking_every_xy_class_stages_and_reloads(qtbot) -> None:
+    """The click that produced the recipe that would not open.
+
+    ``none`` on the ``output_xy`` popup is one click, it is a legal request --
+    a DSPF with no XY coordinates -- and until 2026-09-05 the recipe it
+    produced was written to disk and then refused on load, which took the
+    whole file down: not one field, the DSPF.
+
+    So all four steps are asserted here rather than only the first: the value
+    reaches the working copy, the editor is NOT marked invalid, the screen
+    hands the recipe out on save, and the saved object survives the
+    serialise/validate round trip that loading a ``recipes/*.yaml`` performs.
+    """
+
+    # ``output_xy`` is a ``requires_emit: [dspf]`` row, so a recipe emitting an
+    # extracted view draws it disabled -- the row exists, this recipe simply
+    # does not reach it. The click under test is only available on a DSPF one.
+    base = make_recipe()
+    dspf = base.model_copy(
+        update={"output": base.output.model_copy(update={"emit": [OutputKind.DSPF]})}
+    )
+    screen = _screen(qtbot)
+    screen.set_recipes([dspf])
+
+    editor = screen.editor("output_xy")
+    editor.none_button().click()
+
+    assert editor.is_invalid() is False
+    assert screen.current_recipe().output.dspf.output_xy == []
+    assert screen.changed_field_paths() == ["output.dspf.output_xy"]
+
+    with qtbot.waitSignal(screen.save_requested, timeout=1000) as blocker:
+        screen.save_button().click()
+    saved = blocker.args[0]
+    assert saved.output.dspf.output_xy == []
+
+    reloaded = Recipe.model_validate(saved.model_dump(mode="json"))
+    assert reloaded.output.dspf.output_xy == []

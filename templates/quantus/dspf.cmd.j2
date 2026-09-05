@@ -49,9 +49,9 @@ output_db -type dspf \
               -include_parasitic_cap_model "[[include_parasitic_cap_model]]" \
               -include_res_model "[[include_res_model]]" \
               -include_parasitic_res_model "[[include_parasitic_res_model]]" \
-              -output_xy \
+[% if output_xy %]              -output_xy \
 [% for _item in output_xy %]              "[[ _item ]]" \
-[% endfor %]              -netlist_coupling_values "[[netlist_coupling_values]]" \
+[% endfor %][% endif %]              -netlist_coupling_values "[[netlist_coupling_values]]" \
               -add_bulk_terminal [[ "true" if add_bulk_terminal else "false" ]] \
               -sub_node_char "[[sub_node_char]]"
 output_setup \

@@ -723,6 +723,14 @@ class DspfOutput(Base):
     #: their CASE is not -- we emit uppercase because that is what the Cadence
     #: UI export wrote, the manual spells them lowercase, and closing the type
     #: would lock the user out of whichever spelling their tool wants.
+    #:
+    #: ``[]`` is a legal value and means "no XY coordinates": ``-output_xy`` is
+    #: optional to Quantus, and a command file without it writes a DSPF that
+    #: simply carries no coordinates. The template guards the option with
+    #: ``[% if output_xy %]`` and omits it whole, so an empty list can never
+    #: leave a switch standing without an operand -- which is what an earlier
+    #: build wrote, and why a recipe saved by it used to be refused on load.
+    #: The refusal cost the whole recipe; the guard costs nothing.
     output_xy: list[str] = Field(
         default_factory=lambda: [
             "CANONICAL_RES",
@@ -735,30 +743,6 @@ class DspfOutput(Base):
             "GENERIC",
         ]
     )
-
-    @field_validator("output_xy")
-    @classmethod
-    def _at_least_one_class(cls, value: list[str]) -> list[str]:
-        """Emptying the list writes a switch with no operand, not a smaller DSPF.
-
-        The template writes ``-output_xy`` once and then loops the values, so
-        an empty list leaves the option standing alone in front of the next
-        one. The form's control is a checkbox list, and unticking all eight is
-        one click; the failure lands hours later inside Quantus. Refused here
-        rather than guarded in the template, because silently dropping the
-        option would produce a *different* deck -- a DSPF with no coordinates
-        at all -- and quietly giving somebody a different extraction is the
-        failure mode this model exists to prevent.
-        """
-
-        if not value:
-            raise ValueError(
-                "output.dspf.output_xy needs at least one element class; an "
-                "empty list writes a bare -output_xy into the command file. "
-                "To ask for a smaller DSPF, untick the classes you do not "
-                "need and keep one."
-            )
-        return value
 
 
 class OutputSettings(Base):

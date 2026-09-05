@@ -535,12 +535,17 @@ def hint_text(spec: OptionSpec) -> str:
     parts: list[str] = []
     if spec.default is not None:
         parts.append(f"default {_format_value(spec.default)}")
-    if spec.nullable and spec.placeholder:
+    if spec.placeholder:
         # A row that has BOTH a default and a meaning for empty has to say
         # the second one out loud: temperature_c shows 55.0, and nothing told
         # the user that clearing the box hands the decision to the corner.
         # The fallback existed in the model and was unreachable in the only
         # place it could have been used.
+        #
+        # Not gated on ``nullable``: emptiable is not the same as nullable.
+        # ``output_xy`` takes no null and its empty list is still a real
+        # request -- a DSPF with no XY coordinates -- so the row has to say
+        # so here as well as on its closed control.
         parts.append(
             f"empty = {spec.placeholder}"
             if spec.default is not None
@@ -1443,6 +1448,17 @@ class MultiChoiceOptionEditor(OptionEditor):
     #: how many are on, and nothing else.
     SUMMARY = "{on} of {total}"
 
+    #: Text of the closed control when NOTHING is ticked and the catalog says
+    #: what the tool then does (``OptionSpec.placeholder``).
+    #:
+    #: ``0 of 8`` on its own is the one count that does not say what it means:
+    #: it reads as a value nobody has set yet, so the row that produced the
+    #: DSPF with no XY coordinates looks identical to one waiting to be
+    #: filled in. Only the rows whose empty state is legal carry a
+    #: placeholder, so a list the model still refuses empty keeps the bare
+    #: count and stays visibly wrong.
+    EMPTY_SUMMARY = "{summary}" + _DOT + "{note}"
+
     def __init__(self, spec: OptionSpec, parent: QWidget | None = None) -> None:
         super().__init__(spec, parent)
         self._row = QWidget(self)
@@ -1519,11 +1535,14 @@ class MultiChoiceOptionEditor(OptionEditor):
         self._summary.setFont(_mono_font(self._summary))
         digit = self._summary.fontMetrics().horizontalAdvance("0")
         total = len(spec.choices or [])
-        self._summary.setFixedWidth(
-            len(self.SUMMARY.format(on=total, total=total)) * digit
-            + _CONTROL_CHROME
-            + _COMBO_ARROW
+        # Fixed, and wide enough for BOTH texts. The width must not track the
+        # value -- that is the whole reason the members moved into a popup --
+        # so the zero case is measured here rather than resizing the row the
+        # moment somebody clicks ``none``.
+        widest = max(
+            len(self._summary_text(total, total)), len(self._summary_text(0, total))
         )
+        self._summary.setFixedWidth(widest * digit + _CONTROL_CHROME + _COMBO_ARROW)
         self._add_control(self._summary)
         self._add_trailing()
         self._refresh_summary()
@@ -1562,10 +1581,18 @@ class MultiChoiceOptionEditor(OptionEditor):
                 box.blockSignals(False)
         self._emit()
 
+    def _summary_text(self, on: int, total: int) -> str:
+        """What the closed control reads for ``on`` of ``total`` ticked."""
+
+        summary = self.SUMMARY.format(on=on, total=total)
+        if on or not self._spec.placeholder:
+            return summary
+        return self.EMPTY_SUMMARY.format(summary=summary, note=self._spec.placeholder)
+
     def _refresh_summary(self) -> None:
         on = len(self.value())
         total = len(self._boxes) + len(self._other_values())
-        self._summary.setText(self.SUMMARY.format(on=on, total=max(total, on)))
+        self._summary.setText(self._summary_text(on, max(total, on)))
 
     def _emit(self) -> None:
         self._refresh_summary()

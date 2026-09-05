@@ -508,13 +508,23 @@ def test_the_values_a_hand_written_file_changed_reach_the_recipe(
 def test_a_patch_too_big_to_be_a_patch_warns_and_exits_one(
     samples: dict[RenderTarget, Path], ext_root: Path
 ) -> None:
-    """Read an ext.cmd as if it were a dspf.cmd and a third of it becomes a
-    manual edit. The command must not call that a success."""
+    """Read a dspf.cmd as if it were an ext.cmd and a third of it becomes a
+    manual edit. The command must not call that a success.
+
+    The pairing is this way round on purpose. The dspf deck's nine-line
+    ``-output_xy`` block has no landing site in an extracted-view deck at all
+    -- the vendor documents a different option set under each ``output_db
+    -type`` -- so those nine lines can only go into the patch. The mirror
+    import is now *modelled*: an ext deck read as dspf carries no
+    ``-output_xy``, which is a value (``[]``, no XY coordinates) rather than a
+    difference, so it stays a patch of ordinary size and no longer proves
+    anything about the threshold.
+    """
 
     result = _import(
-        str(samples[RenderTarget.QUANTUS_EXT]),
+        str(samples[RenderTarget.QUANTUS_DSPF]),
         "--target",
-        "quantus.dspf.cmd",
+        "quantus.ext.cmd",
         "--as",
         "wrong-way-round",
         "--auto-ext-root",
@@ -529,17 +539,66 @@ def test_a_patch_too_big_to_be_a_patch_warns_and_exits_one(
 def test_the_warning_threshold_is_settable(
     samples: dict[RenderTarget, Path], ext_root: Path
 ) -> None:
-    quiet = _import(
+    """One import, two thresholds, and only the fork sentence moves.
+
+    The assertion is on that sentence and not on the exit code: this import
+    warns for four other reasons as well (an ext deck names a cell, a library
+    and two views; a dspf deck names none of them), so the command exits 1
+    either way. Asserting the code would pass for the wrong reason.
+    """
+
+    where = (
+        str(samples[RenderTarget.QUANTUS_DSPF]),
+        "--target",
+        "quantus.ext.cmd",
+        "--auto-ext-root",
+        str(ext_root),
+    )
+    loud = _import(*where, expect=1)
+    assert "a patch that large is a fork" in loud.output
+
+    quiet = _import(*where, "--warn-ratio", "0.9", expect=1)
+    assert "a patch that large is a fork" not in quiet.output
+
+
+def test_a_patch_under_the_threshold_is_silent_and_exits_zero(
+    samples: dict[RenderTarget, Path], ext_root: Path
+) -> None:
+    """The other side of the threshold, and the reason the pair above moved.
+
+    An ext.cmd read as a dspf.cmd is the mispairing that used to be the
+    fork-sized one. It is not any more, and the difference is a real gain
+    rather than a slackened bound: the ext deck carries no ``-output_xy``, the
+    dspf template writes that option only inside ``[% if output_xy %]``, so
+    the absence is now READ as a value -- ``[]``, a DSPF with no XY
+    coordinates -- instead of leaving nine lines of the baseline with nothing
+    to match. Nine lines out of sixty-six is the whole distance from 0.36 to
+    0.24, i.e. from one side of the default 0.25 to the other.
+
+    So this pins both halves that the re-pairing would otherwise have left
+    unasserted anywhere in this file: an import UNDER the threshold exits 0,
+    and it says nothing about forks while doing it.
+    """
+
+    result = _import(
         str(samples[RenderTarget.QUANTUS_EXT]),
         "--target",
         "quantus.dspf.cmd",
-        "--warn-ratio",
-        "0.9",
+        "--as",
+        "modelled-not-forked",
         "--auto-ext-root",
         str(ext_root),
         expect=0,
     )
-    assert "a patch that large is a fork" not in quiet.output
+    assert "a patch that large is a fork" not in result.output
+    assert "had to be kept as manual edits" not in result.output
+
+    # And the value that bought the difference is reported as a value that
+    # reached the recipe, not as a row left at the default and not as a hunk:
+    # the empty list is settable on the form afterwards, a frozen literal
+    # would not have been.
+    assert_in_output("output_xy (empty)", result)
+    assert_in_output("recipe.output.dspf.output_xy", result)
 
 
 # ---- import: which file is which target -------------------------------------

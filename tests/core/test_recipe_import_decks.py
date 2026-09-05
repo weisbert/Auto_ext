@@ -296,3 +296,56 @@ def test_importing_a_jivaro_xml_no_longer_pins_the_view_it_names(
     # The file still round-trips: the value comes from the DUT at render time,
     # so nothing about the generated XML changed.
     assert result.clean_roundtrip, [t.diff for t in result.roundtrip.values()]
+
+
+def test_a_ui_export_indented_with_tabs_keeps_all_eight_xy_classes(
+    raw_dir: Path,
+) -> None:
+    """The Cadence UI does not indent the way this project's templates do.
+
+    ``ui_export_tabs.dspf.cmd`` reproduces the whitespace of a real 18.21-s340
+    export byte for byte: a TAB then one space in front of every option, TWO
+    tabs in front of every value line, and -- on ``-output_xy`` alone -- two
+    spaces between the option and its continuation backslash. Our own template
+    writes fourteen spaces everywhere and exactly one space there, so every
+    rule in the reader that happened to be spelled with a literal space rather
+    than "any run of whitespace" would pass its own tests and fail the only
+    file it exists to read.
+
+    ``-output_xy`` is the one that would hurt: eight values on eight tab-
+    indented lines. Losing them reads back as the empty list -- which is now a
+    LEGAL value meaning "no XY coordinates" -- so the failure would not be an
+    error, it would be a recipe quietly asking for a different DSPF than the
+    deck it was imported from.
+
+    ``-technology_corner`` and ``-temperature`` are here for the same reason:
+    they are the other layout whose value sits on the following line.
+    """
+
+    result = ri.import_recipe(
+        [ri.ImportSource.from_path(raw_dir / "ui_export_tabs.dspf.cmd")],
+        recipe_id="tabs",
+    )
+    dspf = result.recipe.output.dspf
+    assert dspf.output_xy == [
+        "CANONICAL_RES",
+        "PARASITIC_RES",
+        "CANONICAL_CAP",
+        "PARASITIC_CAP",
+        "DIODE",
+        "MOS",
+        "BIPOLAR",
+        "GENERIC",
+    ]
+    # The value-on-the-next-line layout, twice, with two tabs in front of it.
+    assert result.recipe.extraction.corner == "typical"
+    assert float(result.recipe.extraction.temperature_c) == 55.0
+    # And three ordinary options from the same statement, to prove the tab
+    # indent did not cost the whole file.
+    assert dspf.hierarchy_delimiter == "/"
+    assert result.recipe.output.common.include_parasitic_res_model == "comment"
+    assert result.recipe.output.emit == [ri.OutputKind.DSPF]
+
+    assert result.roundtrip[RenderTarget.QUANTUS_DSPF].identical, result.roundtrip[
+        RenderTarget.QUANTUS_DSPF
+    ].diff

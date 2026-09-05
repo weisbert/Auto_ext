@@ -991,6 +991,58 @@ def test_all_and_none_tick_every_member_in_one_action(qtbot) -> None:
     assert len(seen) == 2
 
 
+def test_nothing_ticked_says_what_nothing_means_when_the_catalog_can(qtbot) -> None:
+    """``0 of 8`` alone reads as a value nobody has set yet.
+
+    Clicking ``none`` on ``output_xy`` is a legal, meaningful request -- a DSPF
+    with no XY coordinates -- and the closed row is the only place it is
+    visible once the popup shuts. A bare zero count cannot be told apart from
+    an unfilled control, so the row carries the catalog's own sentence about
+    what an empty value does to the tool.
+
+    Only rows whose empty state is legal have that sentence. A list the model
+    still refuses empty keeps the bare count and stays visibly wrong, which is
+    what the second half of this test pins.
+    """
+
+    catalog = builtin_catalog()
+    one = catalog.option("output_xy")
+    assert one.placeholder, "the catalog row has to say what empty means"
+
+    editor = build_option_editor(one)
+    qtbot.addWidget(editor)
+    assert editor.summary_button().text() == "8 of 8"
+
+    editor.none_button().click()
+    assert editor.value() == []
+    text = editor.summary_button().text()
+    assert text.startswith("0 of 8"), text
+    assert one.placeholder in text, text
+
+    # And the width was reserved up front: the row must not grow the moment
+    # somebody clicks ``none``, which is the whole reason the members live in
+    # a popup.
+    button = editor.summary_button()
+    assert button.fontMetrics().horizontalAdvance(text) <= button.width()
+
+    editor.all_button().click()
+    assert editor.summary_button().text() == "8 of 8"
+
+    # The same sentence reaches the row's hint, which is where a user looks
+    # BEFORE clicking. Emptiable is not nullable, so this row would have been
+    # silent under the old ``nullable and placeholder`` gate.
+    assert f"empty = {one.placeholder}" in hint_text(one)
+
+    # A list whose empty state the model refuses carries no such sentence, so
+    # its zero count stays bare.
+    plain = spec(type=OptionType.LIST, choices=["a", "b"], default=["a", "b"])
+    assert plain.placeholder is None
+    other = build_option_editor(plain)
+    qtbot.addWidget(other)
+    other.none_button().click()
+    assert other.summary_button().text() == "0 of 2"
+
+
 def test_the_popup_names_the_list_its_all_and_none_belong_to(qtbot) -> None:
     """Three ``all`` / ``none`` pairs on one screen and no way to tell them apart.
 

@@ -133,22 +133,31 @@ def test_emit_must_name_at_least_one_output_form() -> None:
         make_recipe(output={"emit": ["dspf", "dspf"]})
 
 
-def test_unticking_every_xy_class_is_refused_rather_than_written_as_a_bare_option() -> None:
-    """The DSPF form's checkbox list can be emptied in one click.
+def test_no_xy_class_at_all_is_a_recipe_that_loads() -> None:
+    """``[]`` means "no XY coordinates", and a recipe saying so has to open.
 
-    ``-output_xy`` is emitted outside the loop that writes its values, so an
-    empty list used to produce a bare ``-output_xy \\`` followed straight by
-    the next option -- an option with no operand, in a file Quantus reads
-    hours after the user clicked. Its two siblings, ``extraction.extract`` and
-    ``output.emit``, have refused an empty list from the start; this one was
-    the odd one out.
+    ``-output_xy`` is optional to Quantus: a command file without it writes a
+    DSPF that carries no coordinates, which is a smaller file somebody may
+    genuinely want. This list was briefly refused empty, on the reasoning that
+    the option name is written outside the loop and would be left standing
+    without an operand. The refusal cost more than the bug: a recipe already
+    on disk with ``output_xy: []`` -- and one was -- stopped loading at all,
+    so the DSPF it described could not be extracted by any means.
+
+    The guard belongs in the template, where ``[% if output_xy %]`` drops the
+    option name together with its values;
+    ``tests/core/test_render.py`` pins that the rendered deck then carries no
+    ``-output_xy`` and no blank line where it used to be. Unlike its two
+    siblings ``extraction.extract`` and ``output.emit``, whose empty state has
+    no legal rendering at all, this one does.
     """
 
-    with pytest.raises(ValidationError, match="output_xy"):
-        make_recipe(output={"dspf": {"output_xy": []}})
+    assert make_recipe(output={"dspf": {"output_xy": []}}).output.dspf.output_xy == []
     assert make_recipe(output={"dspf": {"output_xy": ["MOS"]}}).output.dspf.output_xy == [
         "MOS"
     ]
+    # The default is untouched: saying nothing still asks for all eight.
+    assert len(make_recipe().output.dspf.output_xy) == 8
 
 
 def test_a_fracture_length_under_five_is_refused_here_and_not_by_quantus() -> None:

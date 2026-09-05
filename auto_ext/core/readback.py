@@ -494,6 +494,9 @@ def read_back_from_templates(
         #: failure to read one. Without this, every import report grows a
         #: row saying a line that is supposed to be missing is missing.
         unset = 0
+        #: Where the first such absence was, so an empty list can still say
+        #: which file it was read out of.
+        unset_at: ReadSite | None = None
         for site in option.lands_in:
             if site.target is None or site.target not in parsed:
                 reasons.append(f"{site.target or site.stage}: file not part of this project")
@@ -503,6 +506,10 @@ def read_back_from_templates(
             if raw is None:
                 if site.optional:
                     unset += 1
+                    if unset_at is None:
+                        unset_at = ReadSite(
+                            target=site.target, section=site.section, option=site.option
+                        )
                 else:
                     reasons.append(f"{site.target}: {site.option} not found in the file")
                 continue
@@ -521,11 +528,27 @@ def read_back_from_templates(
                 reasons.append(f"{site.target}: {exc}")
         if not recovered:
             if unset:
-                # Leave it out of both maps: the recipe's own default is the
-                # unset value, so there is nothing to carry over and nothing
-                # went wrong. Same shape as a recovered value -- reasons from
-                # files that were not imported do not override an answer the
-                # files that WERE imported already gave.
+                if option.type is OptionType.LIST:
+                    # A LIST is the one type whose "unset" is a VALUE and not a
+                    # fallback. The template guards the whole option with
+                    # ``[% if list %]``, so the file having no such line is the
+                    # file saying the list is empty -- and for ``-output_xy``
+                    # the recipe default is eight classes, so treating the
+                    # absence as "unstated" would hand back a deck with
+                    # coordinates the user's file does not ask for. That is
+                    # the resurrection this branch exists to prevent, and it
+                    # is what keeps render -> read-back -> render faithful.
+                    values[option.key] = []
+                    if unset_at is not None:
+                        sites[option.key] = unset_at
+                    if option.default:
+                        diverged[option.key] = (option.default, [])
+                    continue
+                # Every other type: leave it out of both maps. The recipe's own
+                # default is the unset value, so there is nothing to carry over
+                # and nothing went wrong. Same shape as a recovered value --
+                # reasons from files that were not imported do not override an
+                # answer the files that WERE imported already gave.
                 continue
             unread[option.key] = "; ".join(reasons) or "no readable landing site"
             continue

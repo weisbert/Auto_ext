@@ -377,7 +377,13 @@ def test_a_value_on_the_next_line_is_replaced_there_not_on_the_option_line() -> 
 def test_one_value_per_line_becomes_a_hugging_for_loop() -> None:
     """The shape the whole "trim_blocks is off" rule exists for: eight value
     lines collapse into two, and ``[% endfor %]`` shares the line that follows
-    them so the render does not grow a blank line."""
+    them so the render does not grow a blank line.
+
+    Three tags, not two. ``[% if %]`` takes in the OPTION NAME as well, because
+    the name is written once outside the loop -- guarding only the values would
+    leave ``-output_xy`` in front of the next option with nothing after it,
+    which is a switch with no operand in a file Quantus reads hours later.
+    """
 
     spec = make_target(
         RenderTarget.QUANTUS_DSPF,
@@ -406,12 +412,17 @@ def test_one_value_per_line_becomes_a_hugging_for_loop() -> None:
     text, rewrite = rewrite_one(source, spec, opt)
     assert text == (
         "output_db -type dspf \\\n"
-        "              -output_xy \\\n"
+        "[% if output_xy %]              -output_xy \\\n"
         '[% for _item in output_xy %]              "[[ _item ]]" \\\n'
-        '[% endfor %]              -sub_node_char "#"\n'
+        '[% endfor %][% endif %]              -sub_node_char "#"\n'
     )
     assert rewrite.shape is Shape.LIST_PER_LINE
     assert rewrite.certainty is Certainty.REVIEW
+
+    # And the guard is not decoration: an empty list emits neither the option
+    # nor a blank line where the block used to be.
+    empty = make_jinja_env().from_string(text).render(output_xy=[])
+    assert empty == 'output_db -type dspf \\\n              -sub_node_char "#"\n'
 
 
 def test_the_generated_loop_renders_back_to_the_lines_it_replaced() -> None:
@@ -443,6 +454,56 @@ def test_the_generated_loop_renders_back_to_the_lines_it_replaced() -> None:
     text, _ = rewrite_one(source, spec, opt)
     rendered = make_jinja_env().from_string(text).render(output_xy=["DIODE", "MOS"])
     assert rendered == source
+
+
+def test_the_loop_survives_the_whitespace_the_cadence_ui_actually_writes() -> None:
+    """A site deck is not indented the way our shipped template is.
+
+    The Quantus UI writes a TAB then one space in front of an option, TWO tabs
+    in front of a value line, and -- on ``-output_xy`` alone -- two spaces
+    between the option and its continuation backslash. A rewriter that
+    recognised the block by "fourteen spaces" or by "one space then a
+    backslash" would refuse the only file it exists to read, and a site
+    importing its own template would silently get no loop at all.
+
+    The value lines' own indent is reproduced verbatim in the loop body: it is
+    the deck's shape, not ours, and byte fidelity is the acceptance test.
+    """
+
+    spec = make_target(
+        RenderTarget.QUANTUS_DSPF,
+        syntax="quantus_cmd",
+        quoting=Quoting.DOUBLE,
+        layout=Layout.VALUE_PER_LINE,
+        indent=14,
+        continuation=True,
+    )
+    opt = make_option(
+        "output_xy",
+        option="-output_xy",
+        line=1,
+        default=["DIODE", "MOS"],
+        otype=OptionType.LIST,
+        section="output_db",
+        target=RenderTarget.QUANTUS_DSPF,
+    )
+    source = (
+        "\t -output_xy  \\\n"
+        '\t\t"DIODE" \\\n'
+        '\t\t"MOS" \\\n'
+        '\t -sub_node_char "#"\n'
+    )
+    text, rewrite = rewrite_one(source, spec, opt)
+    assert text == (
+        "[% if output_xy %]\t -output_xy  \\\n"
+        '[% for _item in output_xy %]\t\t"[[ _item ]]" \\\n'
+        '[% endfor %][% endif %]\t -sub_node_char "#"\n'
+    )
+    assert rewrite.shape is Shape.LIST_PER_LINE
+
+    env = make_jinja_env()
+    assert env.from_string(text).render(output_xy=["DIODE", "MOS"]) == source
+    assert env.from_string(text).render(output_xy=[]) == '\t -sub_node_char "#"\n'
 
 
 def test_an_optional_line_is_wrapped_in_the_hugging_if_endif_form() -> None:

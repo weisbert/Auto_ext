@@ -547,6 +547,13 @@ def test_every_conditional_line_is_written_in_the_hugging_form(catalog: Catalog)
     # it is asserted rather than merely counted: its own line has to end in a
     # continuation and the line the [% endif %] hugs has to stay the last one
     # in the statement, or the deck Quantus reads is truncated mid-command.
+    #
+    # output_xy joined on 2026-09-05, and it is the odd one: a whole BLOCK is
+    # conditional rather than a line, because the option name is written once
+    # outside the per-value loop. Guarding only the values would leave the
+    # name standing with no operand, which is the bug the model briefly
+    # papered over by refusing an empty list -- and refusing it made every
+    # recipe already carrying one unloadable.
     optional = [
         (opt.key, site.target, site.line)
         for opt in catalog.options
@@ -556,6 +563,7 @@ def test_every_conditional_line_is_written_in_the_hugging_form(catalog: Catalog)
     assert sorted(optional) == sorted(
         [
             ("lvs_connect_by_name", RenderTarget.LVS_QCI, 31),
+            ("output_xy", RenderTarget.QUANTUS_DSPF, 52),
             ("parasitic_blocking_device_cells_type", RenderTarget.QUANTUS_EXT, 19),
             ("parasitic_blocking_device_cells_type", RenderTarget.QUANTUS_DSPF, 19),
         ]
@@ -575,6 +583,24 @@ def test_every_conditional_line_is_written_in_the_hugging_form(catalog: Catalog)
             f"{name}: -net_name_space is the last line of extraction_setup and "
             "must not continue into filter_cap"
         )
+
+    dspf = (
+        pathlib.Path("templates/quantus/dspf.cmd.j2")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    opened, body, closed = dspf[51], dspf[52], dspf[53]
+    assert opened.startswith("[% if output_xy %]"), "the option NAME must be inside the guard"
+    assert "-output_xy" in opened
+    assert body.startswith("[% for _item in output_xy %]"), "the values follow in the loop"
+    assert closed.startswith("[% endfor %][% endif %]"), (
+        "both closing tags hug the next line; either one on a line of its own "
+        "emits the blank line the tool never wrote"
+    )
+    assert opened.rstrip().endswith("\\") and body.rstrip().endswith("\\")
+    assert closed.rstrip().endswith("\\"), (
+        "-netlist_coupling_values is mid-statement and must keep continuing"
+    )
 
 
 def test_render_defaults_apply_to_a_target_less_site(catalog: Catalog) -> None:
