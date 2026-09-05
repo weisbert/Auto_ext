@@ -241,6 +241,7 @@ class MainWindow(QMainWindow):
             signal.connect(self._stage_current_recipe)
         recipes.patch_revert_all_requested.connect(self._stage_current_recipe)
         recipes.navigate_requested.connect(self._on_navigate_requested)
+        recipes.reload_requested.connect(self._reload_config)
 
         runs = self._runs
         runs.status_message.connect(self._set_status)
@@ -335,7 +336,7 @@ class MainWindow(QMainWindow):
             # broken-file rows: a file on disk is always represented, even
             # when it does not validate.
             self._recipes.set_broken_recipes(controller.broken_recipes)
-            self._recipes.set_recipes(controller.recipes)
+            self._publish_recipes()
             self._project.set_project(
                 workspace=controller.workspace,
                 profile=controller.profile,
@@ -531,7 +532,7 @@ class MainWindow(QMainWindow):
             return
         # load() inside save() re-pushed every screen and dropped the
         # selection back to the first row; put the user back where they were.
-        self._recipes.set_recipes(self._controller.recipes, select=recipe.recipe_id)
+        self._publish_recipes(select=recipe.recipe_id)
         self._set_status(f"saved {recipe.recipe_id}")
 
     def _on_recipe_revert_requested(self, recipe_id: str) -> None:
@@ -546,14 +547,14 @@ class MainWindow(QMainWindow):
         """
 
         self._controller.unstage_recipe(recipe_id)
-        self._recipes.set_recipes(self._controller.recipes, select=recipe_id)
+        self._publish_recipes(select=recipe_id)
 
     def _on_recipe_new_requested(self) -> None:
         recipe = recipe_from_catalog(
             recipe_id=self._unique_recipe_id("new-recipe"), name="New recipe"
         )
         self._controller.stage_recipe(recipe)
-        self._recipes.set_recipes(self._controller.recipes, select=recipe.recipe_id)
+        self._publish_recipes(select=recipe.recipe_id)
         self._push_recipe_choices()
 
     def _on_recipe_duplicate_requested(self, recipe_id: str) -> None:
@@ -569,12 +570,12 @@ class MainWindow(QMainWindow):
             }
         )
         self._controller.stage_recipe(clone)
-        self._recipes.set_recipes(self._controller.recipes, select=new_id)
+        self._publish_recipes(select=new_id)
         self._push_recipe_choices()
 
     def _on_recipe_delete_requested(self, recipe_id: str) -> None:
         self._controller.stage_recipe_deletion(recipe_id)
-        self._recipes.set_recipes(self._controller.recipes)
+        self._publish_recipes()
         self._push_recipe_choices()
 
     def _unique_recipe_id(self, stem: str) -> str:
@@ -603,6 +604,26 @@ class MainWindow(QMainWindow):
             return
         if screen == "cells":
             self._cells.focus_column_for(option_key)
+
+    def _publish_recipes(self, *, select: str | None = None) -> None:
+        """Push the library to the Recipes screen, and where each file lives.
+
+        The screen holds no controller, so "Open containing folder" / "Copy
+        file path" on its context menu can only know a path the host told it.
+        Only paths that exist go across: a recipe staged but never written has
+        no file yet, and the two actions disable themselves for it rather than
+        pointing at a file that is not there.
+        """
+
+        controller = self._controller
+        recipes = controller.recipes
+        paths: dict[str, Path] = {}
+        for recipe in recipes:
+            path = controller.recipe_path(recipe.recipe_id)
+            if path is not None and path.exists():
+                paths[recipe.recipe_id] = path
+        self._recipes.set_recipe_paths(paths)
+        self._recipes.set_recipes(recipes, select=select)
 
     def _push_recipe_choices(self) -> None:
         """``(recipe_id, name)`` to the Cells column and the run bar.
@@ -750,7 +771,7 @@ class MainWindow(QMainWindow):
         # "Store this edit" in a modal; that is the commit gesture, and the
         # screen's own Save button means write since this round.
         written = self.save()
-        self._recipes.set_recipes(self._controller.recipes, select=recipe_id)
+        self._publish_recipes(select=recipe_id)
         count = len(patch.hunks)
         self._set_status(
             f"stored {count} manual edit(s) on {recipe_id}"

@@ -955,6 +955,274 @@ def test_the_selected_recipe_is_reachable_from_the_list_widget(qtbot) -> None:
     assert screen.recipe_list.currentItem().data(0, Qt.UserRole) == "b"
 
 
+# ---- discoverability: reload and "open containing folder" ----------------
+#
+# The owner's report: no reload on the Recipes screen, and no right-click
+# route to the file a recipe or a broken row lives in. The whole-library
+# reload already existed at File -> Reload from disk / Ctrl+R -- it was
+# simply not reachable from this screen -- so what is tested here is
+# discoverability, not a new reload mechanism: the button and the menu item
+# both only ever emit ``reload_requested`` and leave reloading to the host.
+
+
+def _open_context_menu(qtbot, monkeypatch, screen, item) -> QMenu:
+    """Right-click ``item`` and return the menu it built, without a mouse.
+
+    Same deferred-popup dance as ``test_the_recipe_list_context_menu_is_
+    deferred_one_tick``: intercept ``QMenu.exec_`` so the popup never enters
+    a real modal loop, wait one tick for the ``QTimer.singleShot``, and hand
+    back the one menu that was built.
+    """
+
+    menus: list[QMenu] = []
+    monkeypatch.setattr(QMenu, "exec_", lambda self, *a, **k: menus.append(self))
+    rect = screen.recipe_list.visualItemRect(item)
+    screen.recipe_list.customContextMenuRequested.emit(rect.center())
+    qtbot.wait(10)
+    assert len(menus) == 1
+    return menus[0]
+
+
+def _menu_actions_by_text(menu: QMenu) -> dict[str, object]:
+    return {a.text(): a for a in menu.actions() if not a.isSeparator()}
+
+
+def test_the_loaded_recipe_menu_adds_open_copy_and_reload_after_a_separator(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    """Duplicate/Delete stay; the new actions ride behind a separator each."""
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.set_recipe_paths({"rc-typical-55c": tmp_path / "rc-typical-55c.yaml"})
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    labels = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert labels == [
+        "Duplicate",
+        "Delete",
+        "Open containing folder",
+        "Copy file path",
+        "Reload library from disk",
+    ]
+    separators = [a.isSeparator() for a in menu.actions()]
+    assert separators.count(True) == 2
+
+
+def test_the_broken_row_menu_has_no_duplicate_or_delete(qtbot, monkeypatch) -> None:
+    """A file that never became a recipe cannot be duplicated or deleted as one.
+
+    Before this, the context menu read the row's missing ``Qt.UserRole`` as
+    the literal string ``"None"`` and offered both anyway.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_broken_recipes({Path("/cfg/recipes/bad.yaml"): "3 validation errors for Recipe"})
+    screen.set_recipes([make_recipe()])
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    non_sep = [a for a in menu.actions() if not a.isSeparator()]
+    labels = [a.text() for a in non_sep]
+
+    assert "Duplicate" not in labels
+    assert "Delete" not in labels
+    assert labels[0] == "3 validation errors for Recipe"
+    assert not non_sep[0].isEnabled(), "the reason line is not itself an action"
+    assert labels[1:] == [
+        "Open containing folder",
+        "Copy file path",
+        "Reload library from disk",
+    ]
+
+
+def test_open_containing_folder_uses_the_loaded_recipe_s_known_path(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    target = tmp_path / "rc-typical-55c.yaml"
+    calls: list[object] = []
+    monkeypatch.setattr(recipes_screen_module, "open_containing_folder", calls.append)
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.set_recipe_paths({"rc-typical-55c": target})
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    _menu_actions_by_text(menu)["Open containing folder"].trigger()
+
+    assert calls == [target]
+
+
+def test_open_containing_folder_reads_the_broken_row_s_stored_path(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    """The path is read off the item (``Qt.UserRole + 2``), not the tooltip."""
+
+    bad = tmp_path / "broken.yaml"
+    calls: list[object] = []
+    monkeypatch.setattr(recipes_screen_module, "open_containing_folder", calls.append)
+
+    screen = _screen(qtbot)
+    screen.set_broken_recipes({bad: "boom"})
+    screen.set_recipes([make_recipe()])
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    broken_item = screen.recipe_list.topLevelItem(0)
+    assert broken_item.data(0, Qt.UserRole + 2) == bad
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, broken_item)
+    _menu_actions_by_text(menu)["Open containing folder"].trigger()
+
+    assert calls == [bad]
+
+
+def test_a_missing_file_reports_status_instead_of_raising(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    target = tmp_path / "gone.yaml"
+
+    def _raise(_path: object) -> None:
+        raise FileNotFoundError(str(_path))
+
+    monkeypatch.setattr(recipes_screen_module, "open_containing_folder", _raise)
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.set_recipe_paths({"rc-typical-55c": target})
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    with qtbot.waitSignal(screen.status_changed, timeout=1000) as blocker:
+        _menu_actions_by_text(menu)["Open containing folder"].trigger()
+    assert "no longer exists on disk" in blocker.args[0]
+
+
+def test_an_os_error_on_open_names_the_problem(qtbot, monkeypatch, tmp_path) -> None:
+    target = tmp_path / "rc-typical-55c.yaml"
+
+    def _raise(_path: object) -> None:
+        raise OSError("nothing on this host could open it")
+
+    monkeypatch.setattr(recipes_screen_module, "open_containing_folder", _raise)
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.set_recipe_paths({"rc-typical-55c": target})
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    with qtbot.waitSignal(screen.status_changed, timeout=1000) as blocker:
+        _menu_actions_by_text(menu)["Open containing folder"].trigger()
+    assert "nothing on this host could open it" in blocker.args[0]
+
+
+def test_a_connected_host_opens_the_folder_instead_of_the_screen(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    """Same contract as ``RunsScreen.handoff_requested``: a listening host takes over."""
+
+    target = tmp_path / "rc-typical-55c.yaml"
+    calls: list[object] = []
+    monkeypatch.setattr(recipes_screen_module, "open_containing_folder", calls.append)
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.set_recipe_paths({"rc-typical-55c": target})
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    received: list[object] = []
+    screen.open_folder_requested.connect(received.append)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    _menu_actions_by_text(menu)["Open containing folder"].trigger()
+
+    assert received == [target]
+    assert calls == [], "the screen opened it itself even though a host was listening"
+
+
+def test_an_unknown_path_disables_open_and_copy_with_a_tooltip(
+    qtbot, monkeypatch
+) -> None:
+    """No ``set_recipe_paths`` call at all is the same as "path not known"."""
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    by_text = _menu_actions_by_text(menu)
+    for label in ("Open containing folder", "Copy file path"):
+        action = by_text[label]
+        assert not action.isEnabled(), f"{label} should be disabled with no known path"
+        assert "No file path is known" in action.toolTip()
+
+
+def test_copy_file_path_puts_the_path_on_the_clipboard(
+    qtbot, monkeypatch, tmp_path
+) -> None:
+    target = tmp_path / "rc-typical-55c.yaml"
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.set_recipe_paths({"rc-typical-55c": target})
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    _menu_actions_by_text(menu)["Copy file path"].trigger()
+
+    assert QApplication.clipboard().text() == str(target)
+
+
+def test_the_reload_button_is_on_the_toolbar_and_names_its_shortcut(qtbot) -> None:
+    screen = _screen(qtbot)
+    tip = screen.reload_button().toolTip()
+    assert "Ctrl+R" in tip
+    assert "disk" in tip
+
+
+def test_the_reload_button_emits_reload_requested(qtbot) -> None:
+    screen = _screen(qtbot)
+    with qtbot.waitSignal(screen.reload_requested, timeout=1000):
+        screen.reload_button().click()
+
+
+def test_the_reload_menu_item_emits_reload_requested_on_a_loaded_row(
+    qtbot, monkeypatch
+) -> None:
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    with qtbot.waitSignal(screen.reload_requested, timeout=1000):
+        _menu_actions_by_text(menu)["Reload library from disk"].trigger()
+
+
+def test_the_reload_menu_item_emits_reload_requested_on_a_broken_row(
+    qtbot, monkeypatch
+) -> None:
+    screen = _screen(qtbot)
+    screen.set_broken_recipes({Path("/cfg/recipes/bad.yaml"): "boom"})
+    screen.set_recipes([make_recipe()])
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    menu = _open_context_menu(qtbot, monkeypatch, screen, screen.recipe_list.topLevelItem(0))
+    with qtbot.waitSignal(screen.reload_requested, timeout=1000):
+        _menu_actions_by_text(menu)["Reload library from disk"].trigger()
+
+
 # ---- the import entry ----------------------------------------------------
 #
 # The button is on the screen; what the dialog *shows* is asserted in

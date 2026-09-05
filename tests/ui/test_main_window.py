@@ -29,6 +29,7 @@ from auto_ext.ui.main_window import MainWindow  # noqa: E402
 from auto_ext.ui.screens.cells_screen import CellsScreen  # noqa: E402
 from auto_ext.ui.screens.project_screen import ProjectScreen  # noqa: E402
 from auto_ext.ui.screens.recipes_screen import RecipesScreen  # noqa: E402
+from auto_ext.ui.screens import recipes_screen as recipes_screen_module  # noqa: E402
 from auto_ext.ui.screens.runs_screen import RunsScreen  # noqa: E402
 from auto_ext.ui.screens.setup_drawer import SetupDrawer  # noqa: E402
 from auto_ext.ui.theme import WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH  # noqa: E402
@@ -1039,3 +1040,107 @@ def test_the_read_environment_button_needs_a_profile(window: MainWindow) -> None
     """Without one there is no expression to match the file's paths against."""
 
     assert window.project_screen._read_env_btn.isEnabled() is False
+
+
+# ---- the Recipes screen's Reload button and right-click file routes ---------
+#
+# The owner's report (2026-09-05): "没有 reload 的功能，也没有右键 recipe 直接打开
+# 目标文件夹的功能". File -> Reload from disk / Ctrl+R had existed since the
+# four-noun rebuild; the Recipes screen simply had no way to reach it. The
+# screen's own tests cover what the menu offers; these cover the two things
+# only the window can do -- route the request into the real reload, and tell
+# the screen where each recipe file lives.
+
+
+def _recipes_context_menu(qtbot, monkeypatch, window: MainWindow, recipe_id: str) -> QMenu:
+    """Right-click the row for ``recipe_id`` and return the menu it built."""
+
+    window.shell.set_current_page("recipes")
+    tree = window.recipes_screen.recipe_list
+    rows = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    matches = [item for item in rows if item.data(0, Qt.UserRole) == recipe_id]
+    assert len(matches) == 1, f"{recipe_id!r} is not exactly one row of the list"
+    menus: list[QMenu] = []
+    monkeypatch.setattr(QMenu, "exec_", lambda self, *a, **k: menus.append(self))
+    tree.customContextMenuRequested.emit(tree.visualItemRect(matches[0]).center())
+    qtbot.wait(10)
+    assert len(menus) == 1, "the right-click built no menu"
+    return menus[0]
+
+
+def _menu_action(menu: QMenu, text: str):
+    for action in menu.actions():
+        if not action.isSeparator() and action.text() == text:
+            return action
+    raise AssertionError(f"no action {text!r} in {[a.text() for a in menu.actions()]}")
+
+
+def test_the_recipes_reload_button_reaches_the_windows_reload_both_times(
+    loaded_window: MainWindow, monkeypatch
+) -> None:
+    """The button only asks; the window reloads, on the same path as Ctrl+R.
+
+    Pressed twice, because a reload is a stateful action and the second press
+    is the one that shows whether the first left the route intact.
+    """
+
+    window = loaded_window
+    monkeypatch.setattr(window, "_confirm_discard", lambda *_a, **_k: True)
+    loads: list[object] = []
+    monkeypatch.setattr(window.controller, "load", lambda config_dir: loads.append(config_dir))
+
+    button = window.recipes_screen.reload_button()
+    assert button.isEnabled()
+    button.click()
+    button.click()
+
+    assert loads == [window.controller.config_dir, window.controller.config_dir]
+
+
+def test_the_recipes_menu_opens_the_folder_the_controller_says_the_file_is_in(
+    qtbot, loaded_window: MainWindow, monkeypatch
+) -> None:
+    """The screen holds no controller; the window tells it where each file lives."""
+
+    window = loaded_window
+    opened: list[object] = []
+    monkeypatch.setattr(recipes_screen_module, "open_containing_folder", opened.append)
+
+    recipe_id = window.recipes_screen.current_recipe_id()
+    assert recipe_id is not None, "the fixture project loaded no recipe"
+    expected = window.controller.recipe_path(recipe_id)
+    assert expected is not None and expected.exists()
+
+    menu = _recipes_context_menu(qtbot, monkeypatch, window, recipe_id)
+    action = _menu_action(menu, "Open containing folder")
+    assert action.isEnabled(), "a saved recipe's folder must be openable"
+    assert action.toolTip() == str(expected)
+    action.trigger()
+
+    assert opened == [expected]
+
+
+def test_a_recipe_that_was_never_saved_has_no_folder_to_open(
+    qtbot, loaded_window: MainWindow, monkeypatch
+) -> None:
+    """New stages a recipe; until Save there is no file, and the menu says so.
+
+    The window pushes only paths that exist. A disabled action with a reason
+    beats one that opens a folder and leaves the user hunting for a file that
+    was never written.
+    """
+
+    window = loaded_window
+    before = set(window.controller.recipe_ids())
+    window.recipes_screen.new_button().click()
+    added = set(window.controller.recipe_ids()) - before
+    assert len(added) == 1, "New did not stage exactly one recipe"
+    (new_id,) = added
+    would_be = window.controller.recipe_path(new_id)
+    assert would_be is not None and not would_be.exists()
+
+    menu = _recipes_context_menu(qtbot, monkeypatch, window, new_id)
+    for text in ("Open containing folder", "Copy file path"):
+        action = _menu_action(menu, text)
+        assert action.isEnabled() is False, f"{text!r} is live for a file that does not exist"
+        assert action.toolTip().strip(), f"{text!r} is disabled without saying why"

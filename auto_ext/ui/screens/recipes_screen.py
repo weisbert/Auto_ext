@@ -114,6 +114,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -151,6 +152,7 @@ from auto_ext.catalog import (
 )
 from auto_ext.model.recipe import Recipe
 from auto_ext.ui import theme
+from auto_ext.ui.os_open import open_containing_folder
 from auto_ext.ui.widgets.elsewhere_band import ElsewhereBand
 from auto_ext.ui.widgets.extract_rules import ExtractRulesEditor
 from auto_ext.ui.widgets.focus_detail import FocusDetailBar
@@ -746,6 +748,20 @@ class RecipesScreen(QWidget):
     patch_revert_all_requested = pyqtSignal(str)
     #: ``recipe_id`` -- render this recipe and open the result in an editor.
     edit_rendered_requested = pyqtSignal(str)
+    #: The Reload button/menu item was pressed. The screen owns no config
+    #: directory and reloads nothing itself -- ``MainWindow._reload_config``
+    #: is the whole-library reload this asks for, same as ``Ctrl+R`` /
+    #: ``File -> Reload from disk``. Kept as a request, not a self-service
+    #: action, because discarding pending edits is a decision the confirm
+    #: dialog in that method makes, not this screen.
+    reload_requested = pyqtSignal()
+    #: Carries the absolute :class:`~pathlib.Path` whose containing folder the
+    #: user asked to see. Emitted only when a host is listening
+    #: (:meth:`_delegated`); otherwise the screen opens it itself with
+    #: :func:`~auto_ext.ui.os_open.open_containing_folder`, exactly the
+    #: ``handoff_requested`` contract in
+    #: :class:`~auto_ext.ui.screens.runs_screen.RunsScreen`.
+    open_folder_requested = pyqtSignal(object)
 
     def __init__(
         self, catalog: Catalog | None = None, parent: QWidget | None = None
@@ -791,6 +807,12 @@ class RecipesScreen(QWidget):
         #: not load. Drawn as rows of their own -- see
         #: :meth:`set_broken_recipes`.
         self._broken: dict[Any, str] = {}
+        #: ``recipe_id -> file path``, pushed by the host next to
+        #: :meth:`set_recipes` -- see :meth:`set_recipe_paths`. A loaded
+        #: recipe missing from this map has no known path yet (e.g. staged
+        #: but never persisted), and "Open containing folder" / "Copy file
+        #: path" disable themselves rather than guess.
+        self._recipe_paths: dict[str, Path] = {}
         self._original: Recipe | None = None
         self._working: Recipe | None = None
         self._usage: dict[str, int] = {}
@@ -927,6 +949,21 @@ class RecipesScreen(QWidget):
         )
         self._import_hint.setToolTip(self._import_button.toolTip())
         second.addWidget(self._import_hint, 1)
+
+        # Discoverability, not a new mechanism: the whole-library reload has
+        # lived at File -> Reload from disk / Ctrl+R since before this screen
+        # existed, and an owner running the GUI over X11 forwarding never
+        # found it there. This button and the matching context-menu item ask
+        # the host for exactly that reload -- the confirm-and-discard
+        # decision stays in ``MainWindow._reload_config``.
+        self._reload_button = QPushButton("Reload", toolbar)
+        self._reload_button.setToolTip(
+            "Re-read every recipe file from disk (Ctrl+R). Pending edits are "
+            "asked about first."
+        )
+        self._reload_button.clicked.connect(self.reload_requested)
+        _let_shrink(self._reload_button)
+        second.addWidget(self._reload_button, 0)
         rows.addLayout(second)
 
         column.addWidget(toolbar)
@@ -1697,6 +1734,20 @@ class RecipesScreen(QWidget):
         self._broken = dict(broken)
         self.set_recipes(self._recipes, select=self.current_recipe_id())
 
+    def set_recipe_paths(self, paths: Mapping[str, Path]) -> None:
+        """``recipe_id -> file path``, for "Open containing folder" / "Copy file path".
+
+        The screen holds no controller and reads no files -- see the module
+        docstring's Ownership section -- so it cannot answer "where does this
+        live" on its own; the host pushes the answer here the way it pushes
+        :meth:`set_broken_recipes`. A recipe_id missing from ``paths`` (staged
+        but never persisted, or the host has not called this yet) is not an
+        error: the two menu actions that need a path disable themselves and
+        say why rather than guess one.
+        """
+
+        self._recipe_paths = dict(paths)
+
     def set_recipes(
         self, recipes: Sequence[Recipe], *, select: str | None = None
     ) -> None:
@@ -1712,6 +1763,11 @@ class RecipesScreen(QWidget):
             item.setText(0, getattr(path, "name", str(path)))
             item.setText(1, "failed to load")
             item.setData(0, Qt.UserRole + 1, reason.splitlines()[0])
+            # The path lives here, not parsed back out of the tooltip: the
+            # context menu's "Open containing folder" / "Copy file path" read
+            # this role directly, for a row that -- unlike a loaded recipe --
+            # has no recipe_id to look up in ``_recipe_paths``.
+            item.setData(0, Qt.UserRole + 2, path)
             item.setToolTip(0, f"{path}\n\n{reason}")
             item.setToolTip(1, str(reason))
             item.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
@@ -1932,6 +1988,9 @@ class RecipesScreen(QWidget):
 
     def import_button(self) -> QPushButton:
         return self._import_button
+
+    def reload_button(self) -> QPushButton:
+        return self._reload_button
 
     def import_hint(self) -> ElidedLabel:
         """The grey line naming the file kinds Import accepts."""
@@ -2322,8 +2381,25 @@ class RecipesScreen(QWidget):
         # lists in the application disagreeing about what a right-click means
         # is worse than either convention.
         self._list.setCurrentItem(item)
-        recipe_id = str(item.data(0, Qt.UserRole))
+        recipe_id = item.data(0, Qt.UserRole)
         menu = QMenu(self._list)
+        if recipe_id is None:
+            # A row for a file that failed to load (:meth:`set_broken_recipes`)
+            # carries no recipe_id -- Duplicate/Delete act on a *recipe* and
+            # there isn't one here yet. Before this the fallback
+            # ``str(None)`` offered both anyway, on the literal string
+            # "None".
+            self._build_broken_recipe_menu(menu, item)
+        else:
+            self._build_loaded_recipe_menu(menu, str(recipe_id))
+
+        # X11 delivers the context-menu event on button *press*; a synchronous
+        # exec_() is dismissed by the following release, forcing a second
+        # right-click. Defer the popup one event-loop tick.
+        global_pos = self._list.viewport().mapToGlobal(pos)
+        QTimer.singleShot(0, lambda: menu.exec_(global_pos))
+
+    def _build_loaded_recipe_menu(self, menu: QMenu, recipe_id: str) -> None:
         duplicate = menu.addAction("Duplicate")
         duplicate.triggered.connect(
             lambda _checked=False, rid=recipe_id: self.duplicate_requested.emit(rid)
@@ -2332,12 +2408,98 @@ class RecipesScreen(QWidget):
         delete.triggered.connect(
             lambda _checked=False, rid=recipe_id: self.delete_requested.emit(rid)
         )
+        menu.addSeparator()
+        self._add_path_actions(menu, self._recipe_paths.get(recipe_id))
+        menu.addSeparator()
+        self._add_reload_action(menu)
 
-        # X11 delivers the context-menu event on button *press*; a synchronous
-        # exec_() is dismissed by the following release, forcing a second
-        # right-click. Defer the popup one event-loop tick.
-        global_pos = self._list.viewport().mapToGlobal(pos)
-        QTimer.singleShot(0, lambda: menu.exec_(global_pos))
+    def _build_broken_recipe_menu(self, menu: QMenu, item: QTreeWidgetItem) -> None:
+        """Duplicate/Delete act on a recipe; a file that never parsed is not one.
+
+        What is offered instead is a way to the file (so the user can fix it)
+        and a way back into the library (so they do not have to leave the
+        screen to see whether the fix took).
+        """
+
+        reason = str(item.data(0, Qt.UserRole + 1) or "")
+        if reason:
+            reason_action = menu.addAction(reason)
+            reason_action.setEnabled(False)
+            reason_action.setToolTip(str(item.toolTip(1)))
+            menu.addSeparator()
+        self._add_path_actions(menu, item.data(0, Qt.UserRole + 2))
+        menu.addSeparator()
+        self._add_reload_action(menu)
+
+    def _add_path_actions(self, menu: QMenu, path: object) -> None:
+        """"Open containing folder" and "Copy file path", or a disabled pair.
+
+        ``path`` is whatever :meth:`set_recipe_paths` or
+        :meth:`set_broken_recipes` handed back for this row -- ``None`` when
+        the host has not told the screen where the file is. A disabled action
+        with a tooltip says why the row cannot do this yet, rather than the
+        action silently doing nothing.
+        """
+
+        resolved = Path(str(path)) if path else None
+        no_path = "No file path is known for this recipe yet."
+
+        def _guarded(handler):
+            # Connected whether or not a path is known, so the action is
+            # never a control with nobody listening -- ``setEnabled(False)``
+            # below is what actually keeps a ``None`` path from reaching it.
+            return lambda _checked=False: None if resolved is None else handler(resolved)
+
+        open_action = menu.addAction("Open containing folder")
+        open_action.triggered.connect(_guarded(self._open_folder))
+        open_action.setEnabled(resolved is not None)
+        open_action.setToolTip(str(resolved) if resolved is not None else no_path)
+
+        copy_action = menu.addAction("Copy file path")
+        copy_action.triggered.connect(_guarded(self._copy_path))
+        copy_action.setEnabled(resolved is not None)
+        copy_action.setToolTip(str(resolved) if resolved is not None else no_path)
+
+    def _add_reload_action(self, menu: QMenu) -> None:
+        reload_action = menu.addAction("Reload library from disk")
+        reload_action.setShortcut(QKeySequence("Ctrl+R"))
+        # Display only: ``WidgetShortcut`` keeps this from becoming a second,
+        # window-wide Ctrl+R competing with ``File -> Reload from disk`` --
+        # this one only fires while the popup itself has focus, which is
+        # exactly when showing "Ctrl+R" next to the label is honest.
+        reload_action.setShortcutContext(Qt.WidgetShortcut)
+        reload_action.setShortcutVisibleInContextMenu(True)
+        reload_action.triggered.connect(self.reload_requested)
+
+    # -- opening and copying paths ---------------------------------------
+
+    def _delegated(self, signal: Any) -> bool:
+        """True when a host is listening, so the screen must not act itself.
+
+        Same contract as ``RunsScreen._delegated`` /
+        ``_on_handoff_requested``: a host that connects
+        :attr:`open_folder_requested` takes over the launch, and a screen
+        used on its own still opens the folder itself.
+        """
+
+        return self.receivers(signal) > 0
+
+    def _open_folder(self, path: Path) -> None:
+        if self._delegated(self.open_folder_requested):
+            self.open_folder_requested.emit(path)
+            return
+        try:
+            open_containing_folder(path)
+        except FileNotFoundError:
+            self.status_changed.emit(f"{path} no longer exists on disk")
+        except OSError as exc:
+            self.status_changed.emit(str(exc))
+
+    def _copy_path(self, path: Path) -> None:
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(str(path))
+        self.status_changed.emit(f"copied {path}")
 
     # -- state ---------------------------------------------------------
 
