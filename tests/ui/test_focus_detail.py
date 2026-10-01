@@ -142,6 +142,27 @@ def test_every_recipe_owned_row_fits_a_readable_button(qtbot) -> None:
     assert widest <= 940 // 4, f"the widest Reset label needs {widest}px"
 
 
+def test_a_wider_font_still_fits_the_budget(qtbot) -> None:
+    """The red-zone Linux font drew the 22-character label at 272px.
+
+    The test above passes on whatever font the host has; this one makes the
+    font wide on purpose, so the budget is held by the pixel loop and not by
+    the luck of a narrow default font.
+    """
+
+    bar = _bar(qtbot)
+    font = bar.font()
+    font.setPointSizeF(font.pointSizeF() * 1.6)
+    bar.setFont(font)
+    bar.resize(940, 42)
+    widest = 0
+    for one in builtin_catalog().by_owner(Owner.RECIPE):
+        bar.show_spec(one, value=None, at_default=False)
+        widest = max(widest, bar.reset_button().sizeHint().width())
+        assert one.key in bar.reset_button().toolTip()
+    assert widest <= 940 // 4, f"the widest Reset label needs {widest}px"
+
+
 def test_a_long_key_is_cut_in_the_middle_and_kept_whole_in_the_tooltip(
     qtbot,
 ) -> None:

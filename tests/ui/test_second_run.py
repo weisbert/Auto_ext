@@ -192,6 +192,11 @@ def screen(qtbot, controller) -> CellsScreen:
     # would refuse to guess. Picking one in the run bar is the step a user
     # takes; it is not what any test in this file is about.
     widget.run_bar.set_recipe_override("rc-default")
+    # A pinned size, at artboard 1a's 1280px. Left to Qt the default came out
+    # under RUN_BAR_COMPACT_BELOW on the Linux box, the bar folded its stage
+    # boxes into the "stages" menu -- as designed -- and the assertions about
+    # the wide strip failed there and nowhere else.
+    widget.resize(1280, 720)
     widget.show()
     qtbot.waitExposed(widget)
     _tick_row(qtbot, widget, 0)

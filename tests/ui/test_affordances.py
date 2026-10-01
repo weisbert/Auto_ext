@@ -60,6 +60,7 @@ import pytest
 pytest.importorskip("PyQt5")
 pytest.importorskip("pytestqt")
 
+from PyQt5 import sip  # noqa: E402
 from PyQt5.QtCore import QPoint, Qt  # noqa: E402
 from PyQt5.QtWidgets import (  # noqa: E402
     QAbstractButton,
@@ -364,6 +365,14 @@ def affordances(
     def add(obj: object, signal_names: tuple[str, ...]) -> None:
         if str(obj.objectName()).startswith("qt_"):  # type: ignore[attr-defined]
             return  # Qt's own furniture, e.g. the menu-bar overflow button
+        if not sip.ispycreated(obj):
+            # Furniture Qt built in C++ without a ``qt_`` name. Which pieces
+            # exist depends on the platform style -- the Linux box grows one
+            # this Windows run never sees -- and PyQt refuses ``receivers()``
+            # on them outright ("no access to protected functions ... for
+            # objects not created from Python"), which failed the audit there
+            # for a control nobody in this codebase wrote.
+            return
         getter = getattr(obj, "menu", None)
         if callable(getter) and getter() is not None:
             # A button that owns a menu cannot be dead: pressing it opens the

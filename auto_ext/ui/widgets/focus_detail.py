@@ -60,6 +60,15 @@ RESET_FOR = "Reset {key}"
 #: The full key stays in the tooltip.
 RESET_KEY_CHARS = 22
 
+#: The pixel budget the label is then held to: a quarter of the 940px window
+#: floor. A character cap alone is a font-dependent promise -- 22 characters
+#: drew 272px on the red-zone Linux box -- so the key keeps eliding until the
+#: button fits, whatever the font.
+RESET_MAX_WIDTH = 940 // 4
+
+#: Fewest key characters the label elides down to before it stops trying.
+_RESET_MIN_KEY_CHARS = 9
+
 OBJ_DETAIL_BAR = "focusDetailBar"
 OBJ_DETAIL_PATH = "focusDetailPath"
 OBJ_DETAIL_PROSE = "focusDetailProse"
@@ -129,7 +138,15 @@ class FocusDetailBar(QFrame):
         # or a stray click three rows away moves what this button writes to,
         # and until it said so a person who had just changed the temperature
         # could reach over and reset something else without seeing it happen.
-        self._reset.setText(RESET_FOR.format(key=_short_key(spec.key)))
+        chars = RESET_KEY_CHARS
+        while True:
+            self._reset.setText(RESET_FOR.format(key=_short_key(spec.key, chars)))
+            if (
+                self._reset.sizeHint().width() <= RESET_MAX_WIDTH
+                or chars <= _RESET_MIN_KEY_CHARS
+            ):
+                break
+            chars -= 1
         self._reset.setVisible(True)
         # Disabled rather than hidden when the row is already at its default:
         # a button that comes and goes as focus moves is a button people stop
@@ -160,7 +177,7 @@ class FocusDetailBar(QFrame):
             self.reset_requested.emit(self._key)
 
 
-def _short_key(key: str) -> str:
+def _short_key(key: str, limit: int = RESET_KEY_CHARS) -> str:
     """``parasitic_blocking_device_cells_type`` -> ``parasitic_b...cells_type``.
 
     Elided in the MIDDLE, for the same reason the recipe list elides
@@ -169,9 +186,9 @@ def _short_key(key: str) -> str:
     that tells two of them apart. The full key is in the tooltip.
     """
 
-    if len(key) <= RESET_KEY_CHARS:
+    if len(key) <= limit:
         return key
-    keep = RESET_KEY_CHARS - 3
+    keep = limit - 3
     head = (keep + 1) // 2
     return f"{key[:head]}...{key[len(key) - (keep - head):]}"
 

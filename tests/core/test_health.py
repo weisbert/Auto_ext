@@ -25,6 +25,7 @@ import pytest
 from auto_ext.core import health
 from auto_ext.core.health import (
     DEFAULT_TOOL_EXECUTABLES,
+    FILE_OPENERS,
     OPTIONAL_TOOLS,
     cached_or_check,
     check_profile,
@@ -49,7 +50,14 @@ from auto_ext.model.pdk import (
     QrcDeck,
 )
 
-ALL_TOOLS_PRESENT = {name: f"/opt/eda/bin/{name}" for name in DEFAULT_TOOL_EXECUTABLES.values()}
+ALL_TOOLS_PRESENT = {
+    **{name: f"/opt/eda/bin/{name}" for name in DEFAULT_TOOL_EXECUTABLES.values()},
+    # The file-opener row exists only on Linux. Without these the stand-in
+    # answered "not on PATH" for it, so on the red-zone box -- where
+    # doctor.sh --test runs this suite -- a "complete" profile came back with
+    # a warning and three tests failed that Windows never ran into.
+    **{name: f"/usr/bin/{name}" for name in FILE_OPENERS},
+}
 
 
 def _which(table: dict[str, str] | None = None):
@@ -381,7 +389,11 @@ def test_tool_lookup_never_executes_anything(healthy):
         return f"/opt/eda/{name}"
 
     _report(healthy, which=spy)
-    assert sorted(seen) == sorted(DEFAULT_TOOL_EXECUTABLES.values())
+    # Plus the first file opener where that row exists (Linux): alternatives
+    # stop at the first one found, and the spy finds everything.
+    has_opener = any(c.check_id == "tool.file_opener" for c in default_checks(healthy))
+    expected = [*DEFAULT_TOOL_EXECUTABLES.values(), *(FILE_OPENERS[:1] if has_opener else [])]
+    assert sorted(seen) == sorted(expected)
 
 
 def test_a_missing_required_tool_blocks_the_run(healthy):
