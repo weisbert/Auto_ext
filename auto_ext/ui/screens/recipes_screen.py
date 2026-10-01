@@ -1562,6 +1562,9 @@ class RecipesScreen(QWidget):
                 hint.setVisible(override is None)
             if override is not None:
                 editor.set_row_state("patched", was=was, why=override_text(override))
+                why = editor.why_label()
+                if why is not None:
+                    why.setToolTip(override_tooltip(override))
             elif path is not None and path in changed:
                 editor.set_row_state("changed", was=was)
             elif key in promoted:
@@ -2590,11 +2593,26 @@ class RecipesScreen(QWidget):
 
 
 def override_text(override: FormOverride) -> str:
-    """The on-row line for a row a manual edit rewrites."""
+    """The on-row line for a row a manual edit rewrites.
+
+    Value first, and only the value: the row's own label already names the
+    option, so ``manual edit 91675215 writes: -exclude_floating_nets_limit
+    8000 \\`` spent its width repeating it and was elided before the number
+    on a 1600px window. :func:`override_tooltip` carries the whole line.
+    """
 
     if override.writes:
-        return f"manual edit {override.hunk_id} writes: {override.writes}"
-    return f"manual edit {override.hunk_id} deletes this line"
+        return f"runs write {override.value} (manual edit)"
+    return "a manual edit deletes this line"
+
+
+def override_tooltip(override: FormOverride) -> str:
+    """The full story behind :func:`override_text`, for the row's tooltip."""
+
+    where = f"manual edit {override.hunk_id} in {override.template_id}"
+    if override.writes:
+        return f"{where} writes:\n{override.writes}\n\nThe value on the form is not used."
+    return f"{where} deletes the line this row writes.\n\nThe value on the form is not used."
 
 
 def import_status_text(result: Any) -> str:

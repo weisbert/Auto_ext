@@ -1645,13 +1645,35 @@ def test_a_row_a_manual_edit_rewrites_says_what_runs_write(qtbot) -> None:
     editor = screen.editor("exclude_floating_nets_limit")
     assert editor.row_state() == "patched"
     assert editor.why_label() is not None
-    assert "822694c5" in editor.why_label().full_text()
     assert "8000" in editor.why_label().full_text()
     assert set(screen.form_overrides()) == {"exclude_floating_nets_limit"}
     # Readable, not elided beside the catalog hint: the hint steps aside on
     # a patched row, and the full sentence is on hover either way.
     assert editor.hint_label() is None or not editor.hint_label().isVisibleTo(editor)
-    assert "8000" in editor.why_label().toolTip()
+    tip = editor.why_label().toolTip()
+    assert "-exclude_floating_nets_limit 8000" in tip and "822694c5" in tip
+    # The on-row line leads with the value and does not repeat the option the
+    # row's label already names -- that repetition is what got it elided.
+    assert editor.why_label().full_text().startswith("runs write 8000")
+    assert "-exclude_floating_nets_limit" not in editor.why_label().full_text()
+
+
+def test_the_override_line_fits_a_1600px_window(qtbot) -> None:
+    """The video round measured 353px of text in a 277px label at 1600x1000."""
+
+    screen = _screen(qtbot)
+    recipe = make_recipe()
+    recipe.patches = [_rewriting_patch("-exclude_floating_nets_limit", "5000", "8000")]
+    screen.set_recipes([recipe])
+    screen.resize(1600, 1000)
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    why = screen.editor("exclude_floating_nets_limit").why_label()
+    needed = why.fontMetrics().horizontalAdvance(why.full_text())
+    assert needed <= why.width(), (
+        f"{why.full_text()!r} needs {needed}px in a {why.width()}px label"
+    )
 
 
 def test_a_rewritten_row_is_drawn_in_common_density_too(qtbot) -> None:

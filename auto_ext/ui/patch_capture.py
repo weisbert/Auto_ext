@@ -431,6 +431,26 @@ class FormOverride:
     #: The edited line as runs write it (masked, stripped); ``""`` when the
     #: edit deletes the line outright.
     writes: str
+    #: The option token the line was matched on (``-exclude_floating_nets_limit``).
+    option: str = ""
+
+    @property
+    def value(self) -> str:
+        """What the line sets, without the option token the row already names.
+
+        ``-exclude_floating_nets_limit 8000 \\`` -> ``8000``; ``simLibName =
+        "X"`` -> ``"X"``. Falls back to the whole line when the token is not
+        in it, and is ``""`` for a deleted line.
+        """
+
+        text = self.writes
+        if not text:
+            return ""
+        if text.endswith("\\"):
+            text = text[:-1].rstrip()
+        if self.option and self.option in text:
+            text = text.split(self.option, 1)[1].strip().lstrip("=:").strip()
+        return text or self.writes
 
 
 def _token_pattern(option: str) -> re.Pattern[str]:
@@ -527,6 +547,7 @@ def form_overrides(
                                     hunk_id=hunk.id,
                                     template_id=patch.template_id,
                                     writes=writes,
+                                    option=option,
                                 ),
                             )
     return out
