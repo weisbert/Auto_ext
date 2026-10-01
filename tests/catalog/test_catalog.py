@@ -13,8 +13,6 @@ at once, a range somebody invented that later got read as a spec.
 
 from __future__ import annotations
 
-import pathlib
-
 from pathlib import Path
 
 import pytest
@@ -41,6 +39,8 @@ from auto_ext.catalog.spec import (
 from auto_ext.core.readback import parse_by_syntax
 from auto_ext.core.template import scan_placeholders
 from auto_ext.model.common import RenderTarget, Stage
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture(scope="module")
@@ -571,7 +571,7 @@ def test_every_conditional_line_is_written_in_the_hugging_form(catalog: Catalog)
 
     for name in ("ext", "dspf"):
         lines = (
-            pathlib.Path(f"templates/quantus/{name}.cmd.j2")
+            (_REPO_ROOT / f"templates/quantus/{name}.cmd.j2")
             .read_text(encoding="utf-8")
             .splitlines()
         )
@@ -585,7 +585,7 @@ def test_every_conditional_line_is_written_in_the_hugging_form(catalog: Catalog)
         )
 
     dspf = (
-        pathlib.Path("templates/quantus/dspf.cmd.j2")
+        (_REPO_ROOT / "templates/quantus/dspf.cmd.j2")
         .read_text(encoding="utf-8")
         .splitlines()
     )
