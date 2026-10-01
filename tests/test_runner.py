@@ -2266,3 +2266,43 @@ def test_preflight_passes_quietly_on_a_config_run_tasks_accepts(
     assert preflight(
         project, tasks, stages=["si", "strmout"], recipe=_recipe(), profile=_profile(workarea)
     ) is None
+
+
+def test_preflight_refuses_a_path_pattern_key_the_runner_cannot_fill(
+    project_tools_config: Path, workarea: Path
+) -> None:
+    """A bad key in dspf_out_path is refused at the press, not mid-run.
+
+    1e4ecf9 put {layout_view} in the demo's DSPF pattern: it loaded, passed
+    the pre-flight, and then every row ended "not run". The pre-flight now
+    formats all three patterns for every task.
+    """
+
+    from auto_ext.core.errors import ConfigError
+    from auto_ext.core.runner import preflight
+
+    project, tasks = _load(project_tools_config)
+    broken = project.model_copy(update={"dspf_out_path": "/out/{cell}_{nope}.dspf"})
+
+    with pytest.raises(ConfigError, match="dspf_out_path uses unknown format key 'nope'"):
+        preflight(broken, tasks, stages=["si"], recipe=_recipe(), profile=_profile(workarea))
+
+
+def test_every_workspace_key_resolves_in_all_three_patterns(
+    project_tools_config: Path, workarea: Path
+) -> None:
+    """One key set: what WorkspaceConfig accepts, the runner fills everywhere."""
+
+    from auto_ext.core.runner import preflight
+    from auto_ext.model.workspace import FORMAT_KEYS
+
+    project, tasks = _load(project_tools_config)
+    suffix = "_".join("{" + key + "}" for key in sorted(FORMAT_KEYS))
+    every = project.model_copy(
+        update={
+            "extraction_output_dir": f"/w/{suffix}",
+            "intermediate_dir": f"/i/{suffix}",
+            "dspf_out_path": f"/d/{suffix}.dspf",
+        }
+    )
+    preflight(every, tasks, stages=["si"], recipe=_recipe(), profile=_profile(workarea))

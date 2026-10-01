@@ -439,6 +439,9 @@ def _preflight(
     # gone before ``str.format`` runs (Python would otherwise interpret
     # ``{WORK_ROOT}`` as a missing format key). Runs after env resolution
     # but before any subprocess; env errors are more fundamental anyway.
+    _validate_path_patterns(
+        project, tasks, resolved_env, recipe_id=pipeline.recipe.recipe_id
+    )
     _validate_task_outputs(
         tasks, project, resolved_env, parallel=parallel, pipeline=pipeline
     )
@@ -1478,8 +1481,13 @@ def _recipe_context(
         run_id=run_id,
         recipe_id=pipeline.recipe.recipe_id,
     )
-    intermediate_tpl = substitute_env(project.intermediate_dir, resolved_env)
-    intermediate_dir = intermediate_tpl.format(cell=task.cell, library=task.library)
+    intermediate_dir = _format_path_pattern(
+        "intermediate_dir",
+        substitute_env(project.intermediate_dir, resolved_env),
+        _path_format_keys(
+            task, recipe_id=pipeline.recipe.recipe_id, run_slug=slug, run_id=run_id
+        ),
+    )
 
     # Same two-step as the workspace patterns: env first (so ${WORK_ROOT} is
     # gone before str.format could read {WORK_ROOT} as a format key), then the
@@ -1535,7 +1543,13 @@ def _recipe_context(
 
     first = build(None)
     dspf_out_path = _resolve_dspf_out_path(
-        project, task, resolved_env, _recipe_path_tokens(first)
+        project,
+        task,
+        resolved_env,
+        _recipe_path_tokens(first),
+        recipe_id=pipeline.recipe.recipe_id,
+        run_slug=slug,
+        run_id=run_id,
     )
     return build(dspf_out_path)
 
@@ -1973,6 +1987,8 @@ def _build_path_token_env(
     return merged
 
 
+#: The keys :func:`resolve_dspf_path` formats when the caller passes no
+#: ``extra_keys`` -- what it accepted before the runner passed the full set.
 _DSPF_FORMAT_KEYS: frozenset[str] = frozenset({"cell", "library", "task_id"})
 
 # Match ``{name}`` / ``${name}`` so we can selectively escape the ones
@@ -2000,6 +2016,7 @@ def resolve_dspf_path(
     cell: str,
     library: str,
     task_id: str,
+    extra_keys: Mapping[str, str] | None = None,
 ) -> tuple[str, str | None]:
     """Two-phase resolve a ``dspf_out_path`` template — shared by runner + GUI.
 
@@ -2009,7 +2026,9 @@ def resolve_dspf_path(
 
     Step 2: pre-escape unresolved ``${X}`` brace pairs so they don't
     poison ``str.format``; then format with ``cell`` / ``library`` /
-    ``task_id``.
+    ``task_id`` plus ``extra_keys`` -- the runner passes
+    :func:`_path_format_keys`, so the DSPF pattern accepts the same keys as
+    the workspace and intermediate patterns (``{layout_view}`` among them).
 
     Returns ``(text, error_msg_or_None)``:
 
@@ -2042,9 +2061,12 @@ def resolve_dspf_path(
         unresolved_names.update(pat.findall(after_env))
     unresolved = [f"${n}" for n in sorted(unresolved_names)]
 
+    keys: dict[str, str] = {"cell": cell, "library": library, "task_id": task_id}
+    keys.update(extra_keys or {})
+
     def _escape_unknown(m: re.Match[str]) -> str:
         name = m.group(1)
-        if name in _DSPF_FORMAT_KEYS:
+        if name in keys:
             return m.group(0)
         # Was this brace pair part of an unresolved ``${X}``? If so,
         # restore the literal by doubling the braces so str.format emits
@@ -2057,7 +2079,7 @@ def resolve_dspf_path(
     safe = _DSPF_BRACE_PATTERN.sub(_escape_unknown, after_env)
 
     try:
-        formatted = safe.format(cell=cell, library=library, task_id=task_id)
+        formatted = safe.format(**keys)
     except KeyError as exc:
         return safe, f"unknown format key {{{exc.args[0]}}}"
     except (IndexError, ValueError) as exc:
@@ -2073,6 +2095,10 @@ def _resolve_dspf_out_path(
     task: TaskConfig,
     resolved_env: dict[str, str],
     ctx_so_far: dict[str, Any],
+    *,
+    recipe_id: str | None = None,
+    run_slug: str | None = None,
+    run_id: str | None = None,
 ) -> str:
     """Resolve the workspace's ``dspf_out_path`` pattern for one task.
 
@@ -2091,6 +2117,9 @@ def _resolve_dspf_out_path(
         cell=task.cell,
         library=task.library,
         task_id=task.task_id,
+        extra_keys=_path_format_keys(
+            task, recipe_id=recipe_id, run_slug=run_slug, run_id=run_id
+        ),
     )
     if error is None or error.startswith("unresolved:"):
         return text
@@ -2100,7 +2129,7 @@ def _resolve_dspf_out_path(
         key = error.removeprefix("unknown format key {").rstrip("}")
         raise ConfigError(
             f"dspf_out_path uses unknown format key {key!r}; "
-            "supported: cell, library, task_id"
+            f"supported: {', '.join(_OUTPUT_DIR_FORMAT_KEYS)}"
         )
     raise ConfigError(f"dspf_out_path {error}")
 
@@ -2316,6 +2345,88 @@ _OUTPUT_DIR_FORMAT_KEYS: tuple[str, ...] = (
 )
 
 
+def _path_format_keys(
+    task: TaskConfig,
+    *,
+    recipe_id: str | None = None,
+    run_slug: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, str]:
+    """The format keys every workspace path pattern may use, for one task.
+
+    One answer for all three patterns. ``WorkspaceConfig`` validates
+    ``output_dir_pattern``, ``intermediate_dir`` and ``dspf_out_pattern``
+    against one key set, and the runner used to format them with three
+    different ones -- so ``{layout_view}`` loaded fine in the DSPF pattern and
+    then aborted every run ("unknown format key 'layout_view'"). Keys are
+    :data:`_OUTPUT_DIR_FORMAT_KEYS`; the legacy spellings stay accepted.
+    """
+
+    return {
+        "cell": task.cell,
+        "library": task.library,
+        "task_id": task.task_id,
+        "layout_view": task.lvs_layout_view,
+        "source_view": task.lvs_source_view,
+        "lvs_layout_view": task.lvs_layout_view,
+        "lvs_source_view": task.lvs_source_view,
+        "recipe": recipe_id or "",
+        "run_slug": run_slug or "",
+        "run_id": run_id or "",
+    }
+
+
+def _format_path_pattern(field: str, pattern: str, keys: Mapping[str, str]) -> str:
+    """``pattern.format(**keys)``, with an unknown key as a :class:`ConfigError`."""
+
+    try:
+        return pattern.format(**keys)
+    except KeyError as exc:
+        raise ConfigError(
+            f"{field} uses unknown format key {exc.args[0]!r}; "
+            f"supported: {', '.join(_OUTPUT_DIR_FORMAT_KEYS)}"
+        ) from exc
+
+
+def _validate_path_patterns(
+    project: ProjectConfig,
+    tasks: list[TaskConfig],
+    resolved_env: dict[str, str],
+    *,
+    recipe_id: str,
+) -> None:
+    """Format all three workspace patterns for every task, before anything runs.
+
+    A pattern naming a key the runner cannot fill used to surface only from
+    inside the run, after the rows had been marked queued. The run id and
+    slug do not exist yet, so a placeholder stands in: what is checked here is
+    that every key resolves, not where the path lands.
+    """
+
+    for task in tasks:
+        keys = _path_format_keys(
+            task, recipe_id=recipe_id, run_slug="preflight", run_id="preflight"
+        )
+        _format_path_pattern(
+            "extraction_output_dir",
+            substitute_env(project.extraction_output_dir, resolved_env),
+            keys,
+        )
+        _format_path_pattern(
+            "intermediate_dir", substitute_env(project.intermediate_dir, resolved_env), keys
+        )
+        if project.dspf_out_path:
+            _resolve_dspf_out_path(
+                project,
+                task,
+                resolved_env,
+                {},
+                recipe_id=recipe_id,
+                run_slug="preflight",
+                run_id="preflight",
+            )
+
+
 def _resolve_output_dir(
     project: ProjectConfig,
     task: TaskConfig,
@@ -2367,24 +2478,11 @@ def _resolve_output_dir(
             "allocated in this context"
         )
 
-    try:
-        return tpl.format(
-            cell=task.cell,
-            library=task.library,
-            task_id=task.task_id,
-            layout_view=task.lvs_layout_view,
-            source_view=task.lvs_source_view,
-            lvs_layout_view=task.lvs_layout_view,
-            lvs_source_view=task.lvs_source_view,
-            recipe=recipe_id or "",
-            run_slug=run_slug or "",
-            run_id=run_id or "",
-        )
-    except KeyError as exc:
-        raise ConfigError(
-            f"extraction_output_dir uses unknown format key {exc.args[0]!r}; "
-            f"supported: {list(_OUTPUT_DIR_FORMAT_KEYS)}"
-        ) from exc
+    return _format_path_pattern(
+        "extraction_output_dir",
+        tpl,
+        _path_format_keys(task, recipe_id=recipe_id, run_slug=run_slug, run_id=run_id),
+    )
 
 
 def _validate_task_outputs(
