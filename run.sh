@@ -188,11 +188,33 @@ fi
 # Escape hatch for "what did run.sh actually pass?" -- the question this
 # rewriting exists to answer, asked on a box with no debugger. Prints and
 # exits before any interpreter is picked, so it works even on a broken install.
+# ---- headless test runs ------------------------------------------------------
+#
+# The suite builds Qt widgets, and Qt aborts the whole interpreter ("Fatal
+# Python error: Aborted") when it has no display to connect to -- which is a
+# plain ssh session, the very place `bash deploy/doctor.sh --test` is run. A
+# sound install then reported FAIL at ~61%. So `test`, and only `test`, falls
+# back to Qt's offscreen platform when there is no display and the caller has
+# not chosen a platform. Linux only: on Windows (git-bash has no $DISPLAY
+# either) offscreen is the platform that crashes, and the native one works.
+# AUTO_EXT_UNAME stands in for `uname -s` so tests/test_run_sh.py can reach
+# the Linux branch from any host.
+if [ "${1:-}" = "test" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] \
+   && [ -z "${QT_QPA_PLATFORM:-}" ]; then
+    case "${AUTO_EXT_UNAME:-$(uname -s 2>/dev/null)}" in
+        Linux*)
+            export QT_QPA_PLATFORM=offscreen
+            echo "[run.sh] no \$DISPLAY: running the tests with QT_QPA_PLATFORM=offscreen" >&2
+            ;;
+    esac
+fi
+
 if [ -n "${AUTO_EXT_ARGV_DEBUG:-}" ]; then
     printf 'here=%s\n' "${here}"
     printf 'workarea=%s\n' "${workarea}"
     printf 'invocation_cwd=%s\n' "${invocation_cwd}"
     printf 'pythonpath=%s\n' "${auto_ext_pythonpath}"
+    printf 'qt_qpa_platform=%s\n' "${QT_QPA_PLATFORM:-}"
     if [ "$#" -gt 0 ]; then
         printf 'argv=%s\n' "$@"
     fi

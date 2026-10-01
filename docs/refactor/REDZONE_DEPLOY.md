@@ -273,6 +273,10 @@ OK  self-test passed -- the package landed intact and this interpreter runs it.
 **判据只有两条**：`tier 1 ... AVAILABLE`，以及最后那句
 `OK  self-test passed`（`echo $status` 是 `0`）。
 
+> **纯 ssh 会话（没有 `$DISPLAY`）里**，自测开头会多一行
+> `[run.sh] no $DISPLAY: running the tests with QT_QPA_PLATFORM=offscreen` —— 这是预期的：
+> GUI 测试改用 Qt 的离屏模式跑，否则 Qt 会在没有显示器时直接把整个进程 abort，把好的安装误报成 FAIL。
+
 > **测试条数会随版本变**，别拿数字当判据。`skipped` 里有一部分是「这里不是 git 检出」
 > —— 那是对的：包里没有 `.gitattributes` / `pack.ps1`，那几条开发侧的检查会优雅跳过。
 

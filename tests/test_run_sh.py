@@ -453,3 +453,49 @@ def test_an_unset_variable_is_recorded_as_unset_not_empty(tmp_path: Path) -> Non
     proc = _launch(_install(tmp_path, vendor=True), "check-env")
     assert _value(proc.stdout, "FAKE_CALLER_PYTHONPATH") == "0:"
     assert _value(proc.stdout, "FAKE_CALLER_LD_LIBRARY_PATH") == "0:"
+
+
+# ---- headless `test`: Qt needs a platform it can open ------------------------
+
+
+def _qpa(tmp_path: Path, **env: str) -> str:
+    """What ``QT_QPA_PLATFORM`` run.sh would hand pytest, for ``env``."""
+
+    proc = subprocess.run(
+        ["bash", str(RUN_SH), "test"],
+        cwd=tmp_path,
+        env={"AUTO_EXT_ARGV_DEBUG": "1", "PATH": "/usr/bin:/bin", **env},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for line in proc.stdout.splitlines():
+        if line.startswith("qt_qpa_platform="):
+            return line[len("qt_qpa_platform=") :]
+    raise AssertionError(f"run.sh printed no qt_qpa_platform:\n{proc.stdout}")
+
+
+@bash_required
+def test_a_headless_linux_test_run_falls_back_to_offscreen(tmp_path: Path) -> None:
+    """The video round: doctor.sh --test aborted at ~61% over plain ssh.
+
+    No $DISPLAY is what a plain ssh session has, and Qt aborted the whole
+    interpreter creating the first QApplication -- a sound install reported
+    FAIL.
+    """
+
+    assert _qpa(tmp_path, AUTO_EXT_UNAME="Linux") == "offscreen"
+
+
+@bash_required
+def test_a_display_or_a_chosen_platform_is_left_alone(tmp_path: Path) -> None:
+    assert _qpa(tmp_path, AUTO_EXT_UNAME="Linux", DISPLAY=":0") == ""
+    assert _qpa(tmp_path, AUTO_EXT_UNAME="Linux", WAYLAND_DISPLAY="wayland-0") == ""
+    assert _qpa(tmp_path, AUTO_EXT_UNAME="Linux", QT_QPA_PLATFORM="xcb") == "xcb"
+
+
+@bash_required
+def test_windows_keeps_the_native_platform(tmp_path: Path) -> None:
+    """Offscreen is the platform that crashes there; git-bash has no $DISPLAY."""
+
+    assert _qpa(tmp_path, AUTO_EXT_UNAME="MINGW64_NT-10.0") == ""
