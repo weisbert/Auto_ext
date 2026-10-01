@@ -7,7 +7,10 @@
 schema_version: 1
 pdk_profile: hn001
 # Location only -- no longer part of a run's identity.
-output_dir_pattern: ${WORK_ROOT}/cds/verify/QCI_PATH_{cell}
+# {layout_view} is in both patterns because cells.yaml runs inv twice (layout
+# and layout_test): without it the two rows share one Cadence workspace, and
+# any run with jobs >= 2 is refused for exactly that.
+output_dir_pattern: ${WORK_ROOT}/cds/verify/QCI_PATH_{cell}_{layout_view}
 intermediate_dir: ${WORK_ROOT2}
-dspf_out_pattern: ${WORK_ROOT2}/{cell}.dspf
+dspf_out_pattern: ${WORK_ROOT2}/{cell}_{layout_view}.dspf
 keep_runs: 0

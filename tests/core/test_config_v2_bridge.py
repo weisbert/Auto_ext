@@ -292,6 +292,36 @@ def test_load_v2_config_reads_the_repository_sample() -> None:
     ]
 
 
+def test_the_sample_gives_every_row_its_own_workspace_and_dspf() -> None:
+    """The video round: the shipped demo was refused at jobs >= 2.
+
+    It runs ``inv`` twice (``layout`` and ``layout_test``) and its patterns
+    named only ``{cell}``, so both rows shared one Cadence workspace -- which
+    the runner rightly refuses to hand two concurrent tasks.
+    """
+
+    demo = Path(__file__).resolve().parents[2] / "examples" / "demo" / "config"
+    project, book = load_v2_config(demo)
+    tasks = tasks_from_cells(book)
+
+    from auto_ext.core.env import substitute_env
+
+    env = {"WORK_ROOT": "/w", "WORK_ROOT2": "/w2"}
+
+    def _expand(pattern: str, task) -> str:
+        return substitute_env(pattern, env).format(
+            cell=task.cell,
+            library=task.library,
+            layout_view=task.lvs_layout_view,
+            source_view=task.lvs_source_view,
+        )
+
+    workspaces = {_expand(project.extraction_output_dir, t) for t in tasks}
+    dspfs = {_expand(project.dspf_out_path, t) for t in tasks}
+    assert len(workspaces) == len(tasks), workspaces
+    assert len(dspfs) == len(tasks), dspfs
+
+
 def test_a_missing_half_of_the_pair_names_the_file(tmp_path: Path) -> None:
     (tmp_path / "workspace.yaml").write_text(
         "schema_version: 1\npdk_profile: hn001\n", encoding="utf-8"
