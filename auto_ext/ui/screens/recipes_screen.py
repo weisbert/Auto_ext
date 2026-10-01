@@ -1553,6 +1553,13 @@ class RecipesScreen(QWidget):
                 )
                 continue
             override = overrides.get(key)
+            hint = editor.hint_label()
+            if hint is not None:
+                # The catalog hint ("default 5000 · advisory range ...") and
+                # the override line both stretch, and on a patched row the
+                # override is the one sentence that must survive -- it was
+                # being elided to "manual edit 57841b0..." beside the hint.
+                hint.setVisible(override is None)
             if override is not None:
                 editor.set_row_state("patched", was=was, why=override_text(override))
             elif path is not None and path in changed:

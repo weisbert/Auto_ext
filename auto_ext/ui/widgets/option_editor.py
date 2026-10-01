@@ -1108,6 +1108,10 @@ class OptionEditor(QWidget):
                 self._why.setObjectName(OBJ_WHY_DISABLED)
                 self._layout.addWidget(self._why, 1)
             self._why.set_full_text(why)
+            # The whole sentence on hover: the label elides, and the part
+            # it drops ("... writes: -exclude_floating_nets_limit 8000") is
+            # usually the part the row is there to say.
+            self._why.setToolTip(why)
             self._why.setVisible(True)
         elif self._why is not None:
             self._why.setVisible(False)

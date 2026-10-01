@@ -1648,6 +1648,10 @@ def test_a_row_a_manual_edit_rewrites_says_what_runs_write(qtbot) -> None:
     assert "822694c5" in editor.why_label().full_text()
     assert "8000" in editor.why_label().full_text()
     assert set(screen.form_overrides()) == {"exclude_floating_nets_limit"}
+    # Readable, not elided beside the catalog hint: the hint steps aside on
+    # a patched row, and the full sentence is on hover either way.
+    assert editor.hint_label() is None or not editor.hint_label().isVisibleTo(editor)
+    assert "8000" in editor.why_label().toolTip()
 
 
 def test_a_rewritten_row_is_drawn_in_common_density_too(qtbot) -> None:
