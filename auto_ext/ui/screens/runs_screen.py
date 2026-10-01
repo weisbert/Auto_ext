@@ -246,6 +246,15 @@ class _RunRowDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+#: What Re-run does, said plainly: it prepares the run, the Run button starts
+#: it. It used to promise "queue this cell again with the same recipe" while
+#: queueing nothing and using whatever recipe the row had by then.
+_RERUN_TIP = (
+    "Tick this cell on the Cells screen with the recipe, stages and LVS "
+    "policy this run used. Press Run there to start it."
+)
+
+
 class RunsScreen(QWidget):
     """Run history browser plus the result card for the selected run."""
 
@@ -272,6 +281,9 @@ class RunsScreen(QWidget):
     annotations_saved = pyqtSignal(str)
     #: Emitted with the one line the shell status bar should show.
     status_message = pyqtSignal(str)
+    #: ``list[RunIndexEntry]``, newest first -- the whole history, every time
+    #: it is re-read. The Cells table's ``last run`` column is fed from it.
+    entries_changed = pyqtSignal(object)
 
     def __init__(
         self,
@@ -384,6 +396,7 @@ class RunsScreen(QWidget):
         self._listing_error = error
         self._sync_cell_filter()
         self._repopulate()
+        self.entries_changed.emit(list(self._entries))
 
     def select_run(self, run_id: str) -> bool:
         """Select the row for ``run_id``. Returns False when it is not listed."""
@@ -398,10 +411,15 @@ class RunsScreen(QWidget):
     def status_text(self) -> str:
         """The status-bar line for this screen (canvas 1c).
 
-        "Nothing is ever overwritten" is a promise, so the count of
-        directories that could not be read is part of the same sentence: the
-        survivors on their own are not the whole history, and the warnings the
-        store logs reach nobody in a GUI.
+        "Every record kept" is a promise, so the count of directories that
+        could not be read is part of the same sentence: the survivors on
+        their own are not the whole history, and the warnings the store logs
+        reach nobody in a GUI.
+
+        The promise is about the records only. It used to read "nothing is
+        ever overwritten", which the Cadence workspace contradicts: it is
+        shared per cell and the next run of that cell rewrites it, which is
+        exactly what a card's "Gone - a later run ... overwrote" says.
         """
 
         if self._listing_error is not None:
@@ -410,7 +428,10 @@ class RunsScreen(QWidget):
         skipped = self._unreadable_text()
         if total == 0:
             return skipped or "no runs recorded yet"
-        line = f"{total} run{'s' if total != 1 else ''} kept - nothing is ever overwritten"
+        line = (
+            f"{total} run{'s' if total != 1 else ''} kept - every run's record and "
+            "logs are its own; the Cadence workspace is shared per cell"
+        )
         return f"{line} - {skipped}" if skipped else line
 
     def _unreadable_text(self) -> str:
@@ -658,7 +679,7 @@ class RunsScreen(QWidget):
             label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self._tally_chip = Chip("", CHIP_TONE_MUTED, band)
         self._rerun_btn = QPushButton("Re-run this cell", band)
-        self._rerun_btn.setToolTip("Queue this cell again with the same recipe.")
+        self._rerun_btn.setToolTip(_RERUN_TIP)
         self._rerun_btn.clicked.connect(self._emit_rerun)
         self._refresh_btn = QPushButton("Refresh", band)
         self._refresh_btn.setToolTip("Re-read the runs directory.")
@@ -866,7 +887,7 @@ class RunsScreen(QWidget):
         self._rerun_btn.setToolTip(
             f"Gone: {entry.run_dir}\nPress Refresh to re-read the history."
             if gone
-            else "Queue this cell again with the same recipe."
+            else _RERUN_TIP
         )
 
     # ---- context menu ---------------------------------------------------

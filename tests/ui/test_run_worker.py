@@ -116,17 +116,15 @@ def test_the_worker_carries_continue_on_lvs_fail_into_the_run(
 ) -> None:
     """M-133/E-1. RunRequest had the value; nothing between it and the runner did.
 
-    ``CellsScreen._dispatch`` read the run bar's checkbox into ``RunRequest``
-    and then built a ``RunWorker`` without it, so the flag stopped there. The
-    worker takes it now, which is the half of the wiring that lives outside
-    the three files another session is rewriting -- see
-    ``scratchpad/handover_runbar.md`` for the caller's side.
+    ``CellsScreen`` read the run bar's checkbox into ``RunRequest`` and then
+    built a ``RunWorker`` without it, so the flag stopped there. The worker
+    takes it and hands it to the runner; the screen's side is asserted in
+    ``test_failure_journeys.test_continue_on_lvs_fail_reaches_the_runner``.
     """
 
     from auto_ext.core.run_store import read_record
 
     project, tasks, recipe, profile = worker_inputs
-    assert recipe.policy.continue_on_lvs_fail is False, "the fixture must differ"
 
     root = tmp_path / "pr"
     worker = RunWorker(

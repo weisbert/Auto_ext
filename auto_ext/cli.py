@@ -164,8 +164,8 @@ def run(
     continue_on_lvs_fail: bool = typer.Option(
         False,
         "--continue-on-lvs-fail",
-        help="Keep going past an LVS mismatch, whatever the recipe's policy "
-        "says. Omitted, the recipe decides.",
+        help="Keep going past an LVS mismatch. A decision about this run, "
+        "so no recipe stores it; omitted, a failed LVS stops the cell.",
     ),
     layout_out: Optional[str] = typer.Option(
         None,
@@ -247,9 +247,9 @@ def run(
 
     Every stage renders through :mod:`auto_ext.core.render`: templates from the
     catalog, values from the ``--recipe`` and the ``--profile``, manual edits
-    from ``Recipe.patches``. The recipe also owns the stage set (intersected
-    with ``--stage``), whether jivaro runs, and ``continue_on_lvs_fail``;
-    ``--continue-on-lvs-fail`` overrides the last of those for one invocation.
+    from ``Recipe.patches``. Decisions about this one invocation are not the
+    recipe's: ``--stage`` picks the stages (jivaro included) and
+    ``--continue-on-lvs-fail`` says whether a failed LVS stops the cell.
 
     ``--config-dir`` holds ``workspace.yaml`` (where the Cadence work lands)
     and ``cells.yaml`` (the DUT table). A directory still holding the v1
@@ -419,13 +419,11 @@ def run(
             workarea=wa,
             verbose=verbose,
             dry_run=dry_run,
-            # A bare --flag cannot say "leave the recipe alone", so absent is
-            # None rather than False. Passed straight through since
-            # 2026-09-04; it used to be forced into a model_copy of the recipe
-            # because the runner read nothing else -- which also meant the
-            # recipe fingerprint on the run record described a recipe that is
-            # not the one on disk.
-            continue_on_lvs_fail=True if continue_on_lvs_fail else None,
+            # The only owner since the recipe's copy was retired. It used to
+            # be forced into a model_copy of the recipe because the runner
+            # read nothing else -- which also meant the recipe fingerprint on
+            # the run record described a recipe that is not the one on disk.
+            continue_on_lvs_fail=continue_on_lvs_fail,
             max_workers=jobs if jobs >= 2 else None,
             layout_export_path=layout_out,
             reporter=reporter,

@@ -480,6 +480,9 @@ QWidget#{OBJ_OPTION_ROW}[state="promoted"] {{
     border-left: {SELECTED_BAR_WIDTH}px solid {ACCENT};
     background: {ACCENT_TINT};
 }}
+QWidget#{OBJ_OPTION_ROW}[state="patched"] {{
+    border-left: {SELECTED_BAR_WIDTH}px solid {ACCENT};
+}}
 QWidget#{OBJ_OPTION_ROW}[state="inapplicable"] {{
     border-left: {SELECTED_BAR_WIDTH}px solid transparent;
     background: transparent;

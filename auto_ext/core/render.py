@@ -300,6 +300,9 @@ class RunFacts:
     started_at: datetime | None = None
     batch_id: str | None = None
     dry_run: bool = False
+    #: Keep going past a failed LVS. Set per dispatch on the run bar or with
+    #: ``--continue-on-lvs-fail``; no recipe carries it.
+    continue_on_lvs_fail: bool = False
     max_workers: int = 1
     #: Stage keys actually scheduled for this run.
     stages: tuple[str, ...] = ()
@@ -596,6 +599,7 @@ def build_context(
             "slug": run.run_slug,
             "started_at": run.started_at.isoformat() if run.started_at else None,
             "dry_run": run.dry_run,
+            "continue_on_lvs_fail": run.continue_on_lvs_fail,
             "batch_id": run.batch_id,
             "stages": list(run.stages),
             "max_workers": run.max_workers,

@@ -185,7 +185,10 @@ def test_history_lists_newest_first_and_selects_the_newest(qtbot, history) -> No
     assert screen.result_card.record is not None
     assert screen.result_card.record.run_id == newest.run_id
     assert "3 runs kept" in screen.status_text()
-    assert "nothing is ever overwritten" in screen.status_text()
+    # Not "nothing is ever overwritten": the Cadence workspace is shared per
+    # cell and the next run rewrites it, so the line promises the records only.
+    assert "nothing is ever overwritten" not in screen.status_text()
+    assert "record" in screen.status_text()
 
 
 def test_one_unreadable_directory_does_not_empty_the_history(

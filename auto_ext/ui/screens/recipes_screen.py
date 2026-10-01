@@ -61,15 +61,14 @@ Assumptions
   would ask the user which copy is the real one, and moving a row between
   modes would break the toggle's promise to keep the focused row.
 * ``Flow`` is the bucket for a row with no landing site, and it is down to
-  **one** row. It was built for five -- which stages, reduction on or off,
-  and two policy flags -- but three of those were decisions about *this run*
+  **none**. It was built for five -- which stages, reduction on or off, and
+  two policy flags -- but three of those were decisions about *this run*
   rather than about this recipe, and the owner ruled on 2026-09-04 that the
   run bar owns those: ``stages`` and ``reduction_enabled`` were deleted from
   the catalog outright, and ``fail_on_unparsable_lvs_report`` lost its
   ``context_path`` the same day for being a control nothing read.
-  ``policy.continue_on_lvs_fail`` is the one left, and it is transitional --
-  the run bar's tick box has to be wired into the dispatch before the row can
-  go (``docs/refactor/UX_VALIDATION.md`` section 5.7).
+  ``policy.continue_on_lvs_fail`` followed on 2026-10-01, once the run bar's
+  tick box reached the dispatch (``docs/refactor/UX_VALIDATION.md`` 5.7).
   ``extraction.corner`` used to sit here too, for the same "no landing site"
   reason, and it was the case that forced ``groups_with``: what reaches
   Quantus is the profile-owned ``technology_corner`` literal, so the row
@@ -126,6 +125,7 @@ from PyQt5.QtWidgets import (
     QAbstractItemView,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMenu,
@@ -153,6 +153,7 @@ from auto_ext.catalog import (
 from auto_ext.model.recipe import Recipe
 from auto_ext.ui import theme
 from auto_ext.ui.os_open import open_containing_folder
+from auto_ext.ui.patch_capture import FormOverride, form_overrides
 from auto_ext.ui.widgets.elsewhere_band import ElsewhereBand
 from auto_ext.ui.widgets.extract_rules import ExtractRulesEditor
 from auto_ext.ui.widgets.focus_detail import FocusDetailBar
@@ -453,6 +454,12 @@ def form_layout(catalog: Catalog | None = None) -> list[FormTool]:
         seen = templates.setdefault(tool, [])
         for site in spec.lands_in:
             if site.target is None:
+                continue
+            # Only this tool's files. A Quantus row that also lands in
+            # jivaro.xml (the extracted view's name, say) is drawn under
+            # Quantus, and listing jivaro/default.xml.j2 in the Quantus
+            # heading put the Jivaro template under the wrong tool.
+            if cat.tool_of(site.target) != tool:
                 continue
             try:
                 template_id = cat.target(site.target).template_id
@@ -815,6 +822,7 @@ class RecipesScreen(QWidget):
         self._recipe_paths: dict[str, Path] = {}
         self._original: Recipe | None = None
         self._working: Recipe | None = None
+        self._override_cache: tuple[Any, dict[str, FormOverride]] | None = None
         self._usage: dict[str, int] = {}
         self._dirty = False
         self._loading = False
@@ -888,7 +896,14 @@ class RecipesScreen(QWidget):
         self._list.setContextMenuPolicy(Qt.CustomContextMenu)
         self._list.customContextMenuRequested.connect(self._on_list_context_menu)
         self._list.currentItemChanged.connect(self._on_current_item_changed)
-        self._list.header().setStretchLastSection(False)
+        # The name column takes the panel; the badge column takes only what
+        # its text needs. Left at Qt's defaults the name sat in a fixed
+        # ~100px column beside an empty one, so "rc_coupled, corner typical"
+        # wrapped onto three lines in a panel wide enough for it on one.
+        header = self._list.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         column.addWidget(self._list, 1)
 
         toolbar = QFrame(panel)
@@ -1390,10 +1405,32 @@ class RecipesScreen(QWidget):
         # user finds and flips a density toggle is not an answer -- the
         # person who needs it is the one who does not yet know the setting
         # is on another page. Spec ``M`` section 3 says Common draws them.
+        # A row a manual edit rewrites is drawn for the same reason a moved
+        # one is: hiding it would hide the only place that says so.
         return (
             spec.tier in (Tier.COMMON, Tier.ELSEWHERE)
             or self._is_promoted(spec)
+            or spec.key in self.form_overrides()
         )
+
+    def form_overrides(self) -> dict[str, FormOverride]:
+        """Rows whose value a stored manual edit rewrites, by catalog key.
+
+        Cached on the hunks themselves: density asks once per row, and the
+        answer only moves when a patch does.
+        """
+
+        if self._working is None:
+            return {}
+        stamp = tuple(
+            (p.template_id, tuple((h.id, h.enabled, h.before, h.after) for h in p.hunks))
+            for p in self._working.patches
+        )
+        cached = self._override_cache
+        if cached is None or cached[0] != stamp:
+            cached = (stamp, form_overrides(self._working, catalog=self._catalog))
+            self._override_cache = cached
+        return cached[1]
 
     def visible_option_keys(self) -> list[str]:
         """Rows the current density draws, in form order."""
@@ -1486,15 +1523,18 @@ class RecipesScreen(QWidget):
         split promises -- "anything you changed is still in front of you" --
         was true and invisible.
 
-        Only two states are drawn here, and both mean *a person did this*:
-        ``promoted`` (in Common because its value left the default) and
-        ``changed`` (dirty against what was loaded). The amber channel --
-        unverified, out of advisory range -- is drawn by the editors
-        themselves at the far right, and the two must not meet.
+        Three states are drawn here, and all mean *a person did this*:
+        ``promoted`` (in Common because its value left the default),
+        ``changed`` (dirty against what was loaded) and ``patched`` (a stored
+        manual edit rewrites the line this row writes, so runs do not use the
+        value shown). The amber channel -- unverified, out of advisory range
+        -- is drawn by the editors themselves at the far right, and the two
+        must not meet.
         """
 
         changed = set(self.changed_field_paths())
         promoted = set(self.promoted_keys())
+        overrides = self.form_overrides()
         for key, editor in self._editors.items():
             spec = self._specs.get(key)
             if spec is None:
@@ -1512,7 +1552,10 @@ class RecipesScreen(QWidget):
                     why=f"{', '.join(spec.requires_emit)} only",
                 )
                 continue
-            if path is not None and path in changed:
+            override = overrides.get(key)
+            if override is not None:
+                editor.set_row_state("patched", was=was, why=override_text(override))
+            elif path is not None and path in changed:
                 editor.set_row_state("changed", was=was)
             elif key in promoted:
                 editor.set_row_state("promoted")
@@ -2537,6 +2580,14 @@ class RecipesScreen(QWidget):
 
     def _refresh_status(self) -> None:
         self.status_changed.emit(self.status_text())
+
+
+def override_text(override: FormOverride) -> str:
+    """The on-row line for a row a manual edit rewrites."""
+
+    if override.writes:
+        return f"manual edit {override.hunk_id} writes: {override.writes}"
+    return f"manual edit {override.hunk_id} deletes this line"
 
 
 def import_status_text(result: Any) -> str:

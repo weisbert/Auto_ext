@@ -420,8 +420,15 @@ class RunBar(QFrame):
         outer.setSpacing(0)
         self._idle = self._build_idle()
         self._panel = self._build_panel()
-        outer.addWidget(self._idle)
-        outer.addWidget(self._panel)
+        # The idle strip never grows past its own height; any extra height
+        # the splitter hands the bar goes to the run panel (its log), or is
+        # left empty below the strip when no job is running. Without this the
+        # strip took its share mid-run and the Run button floated in the
+        # middle of a tall empty band above the panel.
+        self._idle.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        outer.addWidget(self._idle, 0)
+        outer.addWidget(self._panel, 1)
+        outer.addStretch(0)
         self._panel.hide()
 
         self.setStyleSheet(_RUN_BAR_QSS)

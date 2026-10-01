@@ -462,7 +462,7 @@ def test_the_status_bar_counts_the_queue_and_says_idle_only_when_it_drains(
 
     _FakeWorker.instances[1].finished.emit()
     qtbot.wait(10)
-    assert window.shell.status_left() == "idle"
+    assert window.shell.status_left().startswith("idle")  # then how the last job ended
 
 
 def test_the_log_path_the_screen_publishes_reaches_the_viewer(
@@ -484,16 +484,42 @@ def test_the_run_bars_follow_checkbox_drives_the_viewer(
 
 
 def test_a_rerun_request_navigates_to_the_cell_and_arms_it(
-    loaded_window: MainWindow,
+    loaded_window: MainWindow, make_run_record
 ) -> None:
+    """A REAL history row, read back from disk.
+
+    This test used to hand in a stand-in carrying ``task_id``, which no
+    history row has -- so it passed while the button ticked nothing for
+    every real run (the video round, rerun.png -> rerun_cells.png).
+    """
+
+    from auto_ext.core.run_store import write_record
+    from auto_ext.model.run import allocate_run_dir
+
     window = loaded_window
+    entry_row = window.controller.cells.cells[0]
+    key = entry_row.key
+    recipe_id = window.controller.recipe_ids()[0]
+    run_dir = allocate_run_dir(window.controller.runs_root, f"{entry_row.cell}-ext")
+    write_record(
+        run_dir,
+        make_run_record(
+            run_dir=run_dir,
+            library=entry_row.library,
+            cell=entry_row.cell,
+            layout_view=entry_row.layout_view,
+            source_view=entry_row.source_view,
+            recipe_id=recipe_id,
+            requested_stages=["si", "strmout", "calibre"],
+            continue_on_lvs_fail=True,
+        ),
+    )
+    window.runs_screen.refresh()
     window.shell.set_current_page("runs")
-    key = window.controller.cells.cells[0].key
+    history = [e for e in window.runs_screen.entries if e.run_dir == run_dir]
+    assert history, "the run did not list"
 
-    class _Entry:
-        task_id = key
-
-    window.runs_screen.rerun_requested.emit(_Entry())
+    window.runs_screen.rerun_requested.emit(history[0])
 
     assert window.shell.current_page_key() == "cells"
     assert window.cells_screen.selected_keys() == (key,)
@@ -502,6 +528,24 @@ def test_a_rerun_request_navigates_to_the_cell_and_arms_it(
     # user was sent to in order to press it.
     assert window.cells_screen.checked_keys() == (key,)
     assert window.cells_screen.run_bar.run_button_text() == "Run 1 cell"
+    # "With the same settings" is now true: that run's recipe, stages and
+    # LVS policy are what the bar will dispatch.
+    bar = window.cells_screen.run_bar
+    assert bar.recipe_override() == recipe_id
+    assert bar.selected_stages() == ("si", "strmout", "calibre")
+    assert bar.continue_on_lvs_fail() is True
+
+
+def test_a_rerun_of_a_cell_no_longer_in_the_table_says_so(
+    loaded_window: MainWindow,
+) -> None:
+    from types import SimpleNamespace
+
+    window = loaded_window
+    window.runs_screen.rerun_requested.emit(
+        SimpleNamespace(dut_key="GONE__gone__layout__schematic", cell="gone")
+    )
+    assert window.cells_screen.checked_keys() == ()
 
 
 # ---- the setup drawer -------------------------------------------------------

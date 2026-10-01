@@ -816,9 +816,13 @@ class ReductionSettings(Base):
 
 
 class RunPolicy(Base):
-    """How the run behaves when something goes wrong."""
+    """How the run behaves when something goes wrong.
 
-    continue_on_lvs_fail: bool = False
+    ``continue_on_lvs_fail`` lived here until 2026-10-01. Whether to keep
+    going past a failed LVS is a decision about one attempt, so the run bar's
+    tick box and CLI ``--continue-on-lvs-fail`` own it, and
+    :func:`upgrade_retired_fields` drops the old key from recipes on disk.
+    """
     #: NOT HONOURED YET, and the field says so rather than the form pretending
     #: otherwise. An unparsable LVS report fails the run whatever this says:
     #: the verdict is made in ``CalibreTool.parse_result``, whose only input is
@@ -1183,8 +1187,8 @@ def load_recipe_with_raw(path: Path) -> tuple[Recipe, Any]:
     retired = upgrade_retired_fields(payload)
     if retired:
         logger.info(
-            "%s: dropped %s -- 2026-09-04 ownership ruling, the run bar and "
-            "the cell row own these now",
+            "%s: dropped %s -- one concept, one owner: the run bar and the "
+            "cell row own these now",
             path,
             ", ".join(f"{key} ({_shown(value)})" for key, value in retired.items()),
         )
@@ -1317,6 +1321,10 @@ RETIRED_RECIPE_FIELDS: tuple[tuple[str, str], ...] = (
     ("stages", "the run bar's stage tick boxes / CLI --stage"),
     ("reduction.enabled", "the run bar's jivaro tick box"),
     ("reduction.views_to_reduce", "the cell row's out_file"),
+    (
+        "policy.continue_on_lvs_fail",
+        "the run bar's 'continue on LVS fail' tick box / CLI --continue-on-lvs-fail",
+    ),
 )
 
 #: The same, for :class:`ResourceProfile`. ``max_workers`` had zero owners --

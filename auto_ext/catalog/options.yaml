@@ -4388,21 +4388,26 @@ options:
     why: A property of one invocation.
 
   - key: continue_on_lvs_fail
-    tier: common
     template_var: continue_on_lvs_fail
-    context_path: recipe.policy.continue_on_lvs_fail
-    owner: recipe
+    context_path: run.continue_on_lvs_fail
+    owner: run
     type: bool
     choices_confidence: certain
     default: false
     currently: config_field
     observed: true
-    source_ref: auto_ext/core/config.py:258
+    source_ref: auto_ext/core/runner.py:822
     notes: >-
-      Filed on the Recipe per 01-schema.md section 1.2. There is a defensible
-      argument for calling it a Run policy instead (it describes this attempt,
-      not the extraction conditions); if that wins, it is a one-field move.
-    why: Whether extraction proceeds after LVS fails. A real strategy switch, and nowhere today.
+      Recorded per run in RunRecord.continue_on_lvs_fail.
+      SOLE OWNER since 2026-10-01: the run bar's tick box and CLI
+      --continue-on-lvs-fail. It used to be filed on the Recipe as
+      policy.continue_on_lvs_fail, and the runner fell back to that copy
+      whenever the caller said nothing -- while the GUI said nothing every
+      time, because the run bar's box was read into RunRequest and dropped, so
+      the box changed nothing and the result card reported the recipe's value
+      back. The Recipe field is gone; auto_ext.model.recipe.upgrade_retired_fields
+      drops it from recipes on disk.
+    why: A property of one attempt. Ticked on the run bar or passed as --continue-on-lvs-fail, never stored.
 
   - key: fail_on_unparsable_lvs_report
     template_var: fail_on_unparsable_lvs_report

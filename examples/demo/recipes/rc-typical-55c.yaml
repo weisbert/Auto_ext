@@ -145,7 +145,6 @@ reduction:
   log_verbose_level: trace
   output_view_suffix: _red
 policy:
-  continue_on_lvs_fail: false
   fail_on_unparsable_lvs_report: true
 patches: []
 updated_at: '2026-08-21T18:00:25.285269Z'

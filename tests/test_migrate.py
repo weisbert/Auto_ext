@@ -172,7 +172,9 @@ def assert_semantics_preserved(config_dir: Path, report: MigrationReport) -> Non
             assert recipe.reduction.frequency_limit_ghz == task.jivaro.frequency_limit
         if task.jivaro.error_max is not None:
             assert recipe.reduction.error_max_pct == task.jivaro.error_max
-        assert recipe.policy.continue_on_lvs_fail == task.continue_on_lvs_fail
+        # Same for ``task.continue_on_lvs_fail``: a decision about one run,
+        # ticked on the run bar, so the recipe has nowhere to put it.
+        assert "continue_on_lvs_fail" not in recipe.policy.model_dump()
 
     # ---- same PDK paths
     assert report.profile.lvs_decks.dir_expr == project.paths.get("calibre_lvs_dir")

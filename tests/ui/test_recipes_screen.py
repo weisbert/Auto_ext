@@ -222,8 +222,27 @@ def test_level_one_is_the_tool_in_pipeline_order(qtbot) -> None:
     """
 
     tools = [tool.tool for tool in form_layout()]
-    assert tools == ["si", "calibre", "quantus", "jivaro", FLOW_TOOL]
+    # No FLOW_TOOL: it is drawn only when some row lands nowhere, and since
+    # 2026-10-01 none does -- see test_flow_is_empty_and_therefore_not_drawn.
+    assert tools == ["si", "calibre", "quantus", "jivaro"]
     assert [tool.label for tool in form_layout()][:3] == ["si", "Calibre LVS", "Quantus"]
+
+
+def test_a_tool_heading_lists_only_that_tools_templates(qtbot) -> None:
+    """The video round: the Quantus heading listed ``jivaro/default.xml.j2``.
+
+    A row drawn under Quantus that also lands in ``jivaro.xml`` dragged the
+    Jivaro template into the Quantus heading, right above the Jivaro group
+    that names it again.
+    """
+
+    for tool in form_layout():
+        if tool.tool == FLOW_TOOL:
+            continue
+        assert tool.templates, f"{tool.tool} names no template"
+        assert all(t.startswith(f"{tool.tool}/") for t in tool.templates), (
+            f"{tool.tool} heading lists {tool.templates}"
+        )
 
 
 def test_a_row_landing_in_two_files_is_drawn_once(qtbot) -> None:
@@ -280,21 +299,23 @@ def test_output_db_splits_by_the_format_it_writes(qtbot) -> None:
     assert all(spec.requires_emit == ["dspf"] for spec in dspf.specs)
 
 
-def test_rows_with_no_landing_site_collect_under_flow(qtbot) -> None:
-    """Flow is down to one row, and that is the point of the 2026-09-04 round.
+def test_flow_is_empty_and_therefore_not_drawn(qtbot) -> None:
+    """Flow is down to no rows, and that is the point of the ownership rounds.
 
     It was built for five -- which stages, reduction on or off, and two policy
-    flags -- all "decisions about the run rather than lines in a file". Three
-    of them were decisions about *this run*, which is the run bar's question,
-    so ``stages`` and ``reduction_enabled`` were deleted outright and
-    ``fail_on_unparsable_lvs_report`` lost its control the same day.
-    ``continue_on_lvs_fail`` is the last one standing, and it is transitional:
-    the run bar's tick box is not wired yet (see UX_VALIDATION 5.7).
+    flags -- all "decisions about the run rather than lines in a file". They
+    were decisions about *this run*, which is the run bar's question:
+    ``stages`` and ``reduction_enabled`` were deleted outright on 2026-09-04
+    and ``fail_on_unparsable_lvs_report`` lost its control the same day.
+    ``continue_on_lvs_fail`` was the last one standing; on 2026-10-01 the run
+    bar's tick box reached the dispatch and the row became ``owner: run``.
+
+    A recipe row that reaches no file and names no sibling would bring the
+    heading back, which is the regression this pins.
     """
 
-    flow = next(tool for tool in form_layout() if tool.tool == FLOW_TOOL)
-    assert not any(spec.lands_in for spec in flow.specs)
-    assert {spec.key for spec in flow.specs} == {"continue_on_lvs_fail"}
+    assert FLOW_TOOL not in {tool.tool for tool in form_layout()}
+    assert "continue_on_lvs_fail" not in {spec.key for spec in recipe_specs()}
 
 
 def test_a_profile_backed_list_says_where_it_came_from(qtbot, tmp_path) -> None:
@@ -347,8 +368,7 @@ def test_a_landless_row_can_be_drawn_where_its_sibling_lands(qtbot) -> None:
         "whole point of putting it here"
     )
 
-    flow = next(tool for tool in form_layout() if tool.tool == FLOW_TOOL)
-    assert "extraction_corner" not in {spec.key for spec in flow.specs}
+    assert FLOW_TOOL not in {tool.tool for tool in form_layout()}
 
 
 def test_groups_with_is_refused_when_it_cannot_resolve() -> None:
@@ -1587,6 +1607,73 @@ def test_a_changed_row_wears_the_accent_and_says_what_it_left(qtbot) -> None:
     assert "was 55.0" in editor.was_label().text()
 
 
+def _rewriting_patch(option: str, old: str, new: str) -> TemplatePatch:
+    """A stored manual edit on ``quantus/ext.cmd.j2`` that retypes one option."""
+
+    return TemplatePatch(
+        stage=Stage.QUANTUS,
+        template_id="quantus/ext.cmd.j2",
+        base=BaseFingerprint(
+            template_sha256="0" * 64,
+            masked_sha256="0" * 64,
+            captured_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+        ),
+        hunks=[
+            PatchHunk(
+                id="822694c5",
+                before=f"              {option} {old} \
+",
+                after=f"              {option} {new} \
+",
+            )
+        ],
+    )
+
+
+def test_a_row_a_manual_edit_rewrites_says_what_runs_write(qtbot) -> None:
+    """The video round: the form said 5000 while every run wrote 8000.
+
+    Storing the edit was legitimate. Showing 5000 with nothing beside it was
+    the form telling the user something false about the next run.
+    """
+
+    screen = _screen(qtbot)
+    recipe = make_recipe()
+    recipe.patches = [_rewriting_patch("-exclude_floating_nets_limit", "5000", "8000")]
+    screen.set_recipes([recipe])
+
+    editor = screen.editor("exclude_floating_nets_limit")
+    assert editor.row_state() == "patched"
+    assert editor.why_label() is not None
+    assert "822694c5" in editor.why_label().full_text()
+    assert "8000" in editor.why_label().full_text()
+    assert set(screen.form_overrides()) == {"exclude_floating_nets_limit"}
+
+
+def test_a_rewritten_row_is_drawn_in_common_density_too(qtbot) -> None:
+    """Hiding the row would hide the only place that says it is overridden."""
+
+    screen = _screen(qtbot)
+    recipe = make_recipe()
+    recipe.patches = [_rewriting_patch("-decoupling_factor", "1.0", "0.5")]
+    screen.set_recipes([recipe])
+    screen.set_density(DENSITY_COMMON)
+
+    assert "decoupling_factor" in screen.visible_option_keys()
+    assert screen.editor("decoupling_factor").row_state() == "patched"
+
+
+def test_disabling_the_hunk_clears_the_mark(qtbot) -> None:
+    screen = _screen(qtbot)
+    recipe = make_recipe()
+    patch = _rewriting_patch("-exclude_floating_nets_limit", "5000", "8000")
+    patch.hunks[0].enabled = False
+    recipe.patches = [patch]
+    screen.set_recipes([recipe])
+
+    assert screen.editor("exclude_floating_nets_limit").row_state() == ""
+
+
 def test_a_row_disabled_by_emit_gating_says_why_on_the_row(qtbot) -> None:
     """A reason you have to hover to find is a reason most people never read."""
 
@@ -1927,3 +2014,21 @@ def test_unticking_every_xy_class_stages_and_reloads(qtbot) -> None:
 
     reloaded = Recipe.model_validate(saved.model_dump(mode="json"))
     assert reloaded.output.dspf.output_xy == []
+
+
+def test_the_recipe_name_gets_the_width_of_the_list(qtbot) -> None:
+    """The video round: "rc_coupled, corner" wrapped in a half-empty panel.
+
+    The name column was a fixed default width next to an empty badge column.
+    """
+
+    screen = _screen(qtbot)
+    screen.set_recipes([make_recipe()])
+    screen.resize(1200, 700)
+    screen.show()
+    qtbot.waitExposed(screen)
+
+    tree = screen._list
+    viewport = tree.viewport().width()
+    assert tree.columnWidth(0) + tree.columnWidth(1) >= viewport - 2
+    assert tree.columnWidth(0) > tree.columnWidth(1)

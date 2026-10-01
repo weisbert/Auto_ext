@@ -264,3 +264,77 @@ def test_with_patch_replaces_rather_than_appends_for_the_same_file(
 
     assert len(final.patches) == 1
     assert final.patches[0] is second
+
+
+# ---- form_overrides: an edit that rewrites a row the form also sets ----------
+
+
+@pytest.fixture
+def quantus_preview(recipe, pdk_profile, tmp_path: Path):
+    plan = next(
+        p for p in patch_capture.editable_targets(recipe) if p.target.value == "quantus.ext.cmd"
+    )
+    return patch_capture.build_preview(
+        plan,
+        recipe=recipe,
+        profile=pdk_profile,
+        workspace=make_workspace(),
+        cell=make_cell(),
+        resolved_env=ENV,
+        workarea=tmp_path / "wa",
+    )
+
+
+def _retype(text: str, option: str, value: str) -> str:
+    out = []
+    for line in text.splitlines(keepends=True):
+        if option in line:
+            head, _, _ = line.partition(option)
+            tail = " \\n" if line.rstrip().endswith("\\") else "\n"
+            line = f"{head}{option} {value}{tail}"
+        out.append(line)
+    return "".join(out)
+
+
+def test_an_edit_to_a_form_managed_line_is_named_with_the_value_runs_write(
+    quantus_preview, recipe, pdk_profile
+) -> None:
+    """The video round's finding: the form said 5000, every run wrote 8000.
+
+    The edit is legitimate -- that is what the escape hatch is for -- but the
+    row has to be findable from the patch, or nothing can tell the user.
+    """
+
+    edited = _retype(quantus_preview.base_text, "-exclude_floating_nets_limit", "8000")
+    assert edited != quantus_preview.base_text, "the premise: the line is in the file"
+    patch = patch_capture.capture(quantus_preview, edited, recipe=recipe, profile=pdk_profile)
+    assert patch is not None
+
+    overrides = patch_capture.form_overrides(patch_capture.with_patch(recipe, patch))
+
+    assert set(overrides) == {"exclude_floating_nets_limit"}
+    override = overrides["exclude_floating_nets_limit"]
+    assert override.hunk_id == patch.hunks[0].id
+    assert override.template_id == "quantus/ext.cmd.j2"
+    assert "8000" in override.writes
+
+
+def test_an_edit_the_catalog_has_no_row_for_overrides_nothing(
+    quantus_preview, recipe, pdk_profile
+) -> None:
+    patch = patch_capture.capture(
+        quantus_preview,
+        _edit(quantus_preview.base_text, "# typed by hand"),
+        recipe=recipe,
+        profile=pdk_profile,
+    )
+    assert patch is not None
+    assert patch_capture.form_overrides(patch_capture.with_patch(recipe, patch)) == {}
+
+
+def test_a_disabled_hunk_overrides_nothing(quantus_preview, recipe, pdk_profile) -> None:
+    edited = _retype(quantus_preview.base_text, "-exclude_floating_nets_limit", "8000")
+    patch = patch_capture.capture(quantus_preview, edited, recipe=recipe, profile=pdk_profile)
+    assert patch is not None
+    patch.hunks[0].enabled = False
+    assert patch_capture.form_overrides(patch_capture.with_patch(recipe, patch)) == {}

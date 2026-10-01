@@ -189,6 +189,10 @@ class FakeWorker(QObject):
 def fake_worker(monkeypatch) -> type[FakeWorker]:
     FakeWorker.instances = []
     monkeypatch.setattr(cells_mod, "RunWorker", FakeWorker)
+    # The press-time pre-flight is the runner's own check, and the recipes in
+    # this file's fake controller are stand-ins it cannot read. What it
+    # refuses is asserted where the controller is real (test_failure_journeys).
+    monkeypatch.setattr(cells_mod, "preflight", lambda *a, **k: None)
     return FakeWorker
 
 
@@ -923,6 +927,7 @@ def test_context_menu_is_deferred_and_lists_its_actions(qtbot) -> None:
         "Disable rows",
         "Check rows",
         "Clear all checks",
+        "Show last result",
         "Export GDS…",
         "Copy row key",
     ]

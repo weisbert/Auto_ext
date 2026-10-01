@@ -478,7 +478,6 @@ class _GroupKey:
     #: Resolved rather than raw, so a task that says nothing and a task that
     #: says the default do not become two indistinguishable recipes.
     jivaro: tuple[float, float]
-    continue_on_lvs_fail: bool
     templates: tuple[tuple[str, str], ...]
 
 
@@ -635,7 +634,6 @@ def _discriminators(recipe: Recipe) -> list[str]:
         "cbn" if recipe.lvs.connect_by_name else "nocbn",
         _number_token(recipe.reduction.frequency_limit_ghz, "ghz"),
         _number_token(recipe.reduction.error_max_pct, "pct"),
-        "lenient" if recipe.policy.continue_on_lvs_fail else "strict",
         f"fl{recipe.extraction.exclude_floating_nets_limit}",
     ]
 
@@ -1487,7 +1485,6 @@ def _group_tasks(
         key = _GroupKey(
             knobs=_freeze_knobs(knobs),
             jivaro=_jivaro_key(task),
-            continue_on_lvs_fail=task.continue_on_lvs_fail,
             templates=template_set.fingerprint,
         )
         group = groups.get(key)
@@ -1627,10 +1624,18 @@ def _recipe_from_group(
         )
     )
 
-    recipe.policy.continue_on_lvs_fail = group.members[0].continue_on_lvs_fail
+    # Not a grouping key any more, so one group can carry both answers.
+    was_continue = " / ".join(
+        sorted({repr(member.continue_on_lvs_fail) for member in group.members})
+    )
     dispositions.append(
         FieldDisposition(
-            "tasks.yaml:continue_on_lvs_fail", "moved", "recipe:policy.continue_on_lvs_fail"
+            "tasks.yaml:continue_on_lvs_fail",
+            "dropped",
+            "run bar / --continue-on-lvs-fail",
+            f"was {was_continue}; keeping going past a failed LVS is a decision "
+            f"about one dispatch, so it is ticked per run rather than stored "
+            f"(cells [{member_ids}])",
         )
     )
 

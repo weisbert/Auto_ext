@@ -88,7 +88,7 @@ class RunWorker(QThread):
         templates_root: Path | None = None,
         max_workers: int | None = None,
         dry_run: bool = False,
-        continue_on_lvs_fail: bool | None = None,
+        continue_on_lvs_fail: bool = False,
         layout_export_path: str | None = None,
     ) -> None:
         super().__init__()

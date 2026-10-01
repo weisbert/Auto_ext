@@ -795,16 +795,7 @@ def _worker_kwargs_the_gui_passes() -> set[str]:
         "stage_check",
         "jobs",
         "is_dry_run",
-        pytest.param(
-            "continue_on_lvs_fail",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "M-133/E-1: the bar's box is not passed by "
-                    "cells_screen._start_job until the other session wires it"
-                ),
-            ),
-        ),
+        "continue_on_lvs_fail",
     ],
 )
 def test_every_run_bar_control_reaches_one_runner_input_with_no_recipe_twin(
@@ -822,9 +813,9 @@ def test_every_run_bar_control_reaches_one_runner_input_with_no_recipe_twin(
       there are two owners and the runner has to combine them, which it did
       for ``stages`` in silence, twice.
 
-    Every case passes today except the LVS one, which is pinned ``xfail
-    (strict=True)`` per UX_VALIDATION section 5.4: the session finishing the
-    wiring has to flip its own xfail.
+    Every case passes. The LVS one was pinned ``xfail(strict=True)`` until
+    2026-10-01, when the bar's box reached the dispatch and the recipe row
+    moved to ``owner: run``.
     """
 
     import inspect

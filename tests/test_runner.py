@@ -363,11 +363,12 @@ def test_calibre_fail_with_continue_runs_downstream(
         stages=["si", "strmout", "calibre", "quantus", "jivaro"],
         auto_ext_root=tmp_path / "project_root",
         workarea=workarea,
-        # The switch used to be ``TaskConfig.continue_on_lvs_fail``. It is a
-        # Recipe policy now: "keep going past a mismatch" is a property of how
-        # you are extracting, not of which cell you point at.
-        recipe=_recipe(policy={"continue_on_lvs_fail": True}),
+        # The switch was ``TaskConfig.continue_on_lvs_fail``, then a Recipe
+        # policy. It is a dispatch argument now: "keep going past a mismatch"
+        # is a decision about this attempt, ticked on the run bar.
+        recipe=_recipe(),
         profile=_profile(workarea),
+        continue_on_lvs_fail=True,
     )
 
     stage_status = {s.stage: s.status for s in summary.tasks[0].stages}
@@ -2096,7 +2097,7 @@ def _si_context(project, task, profile, run_dir, workarea, env):
 
 
 
-# ---- continue_on_lvs_fail: the caller's answer, with the recipe underneath ---
+# ---- continue_on_lvs_fail: the caller's answer, and nothing underneath it ----
 
 
 def test_the_record_reports_the_continue_on_lvs_fail_that_was_actually_used(
@@ -2109,9 +2110,8 @@ def test_the_record_reports_the_continue_on_lvs_fail_that_was_actually_used(
     "continue_on_lvs_fail: off" about a run where they had ticked it on. A
     fake action plus a card that lies about it is worse than no control.
 
-    ``continue_on_lvs_fail`` is a parameter now. ``None`` keeps the recipe as
-    the fallback, and whatever was resolved is what the record reports, so the
-    card cannot disagree with the run.
+    ``continue_on_lvs_fail`` is a parameter now, and what was passed is what
+    the record reports, so the card cannot disagree with the run.
     """
 
     project, tasks = _load(project_tools_config)
@@ -2120,7 +2120,7 @@ def test_the_record_reports_the_continue_on_lvs_fail_that_was_actually_used(
     run_tasks(
         project, tasks, stages=["calibre"],
         auto_ext_root=on, workarea=workarea,
-        recipe=_recipe(policy={"continue_on_lvs_fail": False}),
+        recipe=_recipe(),
         profile=_profile(workarea), dry_run=True,
         continue_on_lvs_fail=True,
     )
@@ -2130,34 +2130,45 @@ def test_the_record_reports_the_continue_on_lvs_fail_that_was_actually_used(
     run_tasks(
         project, tasks, stages=["calibre"],
         auto_ext_root=off, workarea=workarea,
-        recipe=_recipe(policy={"continue_on_lvs_fail": True}),
+        recipe=_recipe(),
         profile=_profile(workarea), dry_run=True,
         continue_on_lvs_fail=False,
     )
     assert read_record(_only_run_dir(off)).continue_on_lvs_fail is False
 
 
-def test_not_asking_leaves_the_recipe_policy_in_charge(
+def test_a_recipe_still_carrying_the_old_policy_key_loads_and_decides_nothing(
     project_tools_config: Path, workarea: Path, tmp_path: Path
 ) -> None:
-    """The transitional half, and it has to keep working.
+    """The retirement, end to end: an old recipe file is not refused.
 
-    The run bar's box is not wired into the dispatch yet (the screen that owns
-    it is being rewritten elsewhere), and the CLI flag is a bare ``--flag``
-    that cannot express "no opinion". ``None`` is what both of those pass
-    while they mean nothing in particular, and it must not silently overrule
-    a recipe that says True.
+    Recipes on the red-zone disk say ``policy: {continue_on_lvs_fail: ...}``.
+    ``Base`` forbids extra keys, so without the load-time drop every one of
+    them would fail to load -- the 2026-08-28 outage shape. Dropped, the key
+    must also stop deciding: a recipe saying True and a caller saying nothing
+    is a run that stops at a failed LVS.
     """
+
+    import json
+
+    from auto_ext.model.recipe import load_recipe
+
+    payload = _recipe().model_dump(mode="json")
+    payload["policy"]["continue_on_lvs_fail"] = True
+    old_file = tmp_path / "old-recipe.yaml"
+    # JSON is YAML, and it keeps this test off a second YAML library.
+    old_file.write_text(json.dumps(payload), encoding="utf-8")
+    recipe = load_recipe(old_file)
 
     project, tasks = _load(project_tools_config)
     root = tmp_path / "no_opinion"
     run_tasks(
         project, tasks, stages=["calibre"],
         auto_ext_root=root, workarea=workarea,
-        recipe=_recipe(policy={"continue_on_lvs_fail": True}),
+        recipe=recipe,
         profile=_profile(workarea), dry_run=True,
     )
-    assert read_record(_only_run_dir(root)).continue_on_lvs_fail is True
+    assert read_record(_only_run_dir(root)).continue_on_lvs_fail is False
 
 
 def test_eda_tools_get_the_callers_environment_not_run_sh_s(
@@ -2210,3 +2221,48 @@ def test_eda_tools_get_the_callers_environment_not_run_sh_s(
         assert "PYTHONSAFEPATH" not in env
         assert not [k for k in env if k.startswith("AUTO_EXT_CALLER_")]
         assert env["WORK_ROOT"] == workarea.as_posix(), "profile env_overrides still apply"
+
+
+# ---- preflight: the refusals, without a run ---------------------------------
+
+
+def test_preflight_names_a_missing_env_var_and_writes_nothing(
+    project_tools_config: Path, workarea: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """The GUI calls this at the Run press; it must raise what run_tasks would.
+
+    And only raise: no run directory, nothing under the root -- a refused
+    press that left an empty run behind would be a history row for nothing.
+    """
+
+    from auto_ext.core.errors import EnvResolutionError
+    from auto_ext.core.runner import preflight
+
+    monkeypatch.delenv("AUTO_EXT_TEST_UNSET_ROOT", raising=False)
+    project, tasks = _load(project_tools_config)
+    profile = _profile(workarea).model_copy(
+        update={"layer_map": "${AUTO_EXT_TEST_UNSET_ROOT}/layers.map"}
+    )
+
+    with pytest.raises(EnvResolutionError, match="AUTO_EXT_TEST_UNSET_ROOT"):
+        preflight(project, tasks, stages=["si", "strmout"], recipe=_recipe(), profile=profile)
+
+    root = tmp_path / "root"
+    with pytest.raises(EnvResolutionError):
+        run_tasks(
+            project, tasks, stages=["si", "strmout"],
+            auto_ext_root=root, workarea=workarea,
+            recipe=_recipe(), profile=profile,
+        )
+    assert not root.exists() or not any(root.rglob("run.json"))
+
+
+def test_preflight_passes_quietly_on_a_config_run_tasks_accepts(
+    project_tools_config: Path, workarea: Path
+) -> None:
+    from auto_ext.core.runner import preflight
+
+    project, tasks = _load(project_tools_config)
+    assert preflight(
+        project, tasks, stages=["si", "strmout"], recipe=_recipe(), profile=_profile(workarea)
+    ) is None

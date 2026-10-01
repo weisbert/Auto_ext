@@ -486,12 +486,6 @@ def test_a_run_with_no_stages_at_all_does_not_read_as_passed(
 # ============================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M-24: the checkbox is read into RunRequest and then dropped -- "
-    "_start_job builds RunWorker without it, RunWorker has no such "
-    "parameter, and the runner takes the value from the recipe only",
-)
 def test_continue_on_lvs_fail_reaches_the_runner(
     qtbot, window: MainWindow, workers: list[_FakeWorker]
 ) -> None:
@@ -672,12 +666,6 @@ def test_the_runs_screen_says_how_many_directories_it_could_not_read(
 # ============================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M-29: _on_task_finished passes neither when= nor code=, so "
-    "COL_LAST_RUN is redrawn as an em dash for a run that just ended, and the "
-    "row menu offers no route to the result although _live.run_dirs has it",
-)
 def test_a_cell_that_just_failed_can_be_followed_to_its_result(
     qtbot, window: MainWindow, runs_root: Path, workers: list[_FakeWorker]
 ) -> None:
@@ -721,6 +709,143 @@ def test_a_cell_that_just_failed_can_be_followed_to_its_result(
         "the row that just failed offers no route to its result: "
         + repr([a.text() for a in actions if a.text()])
     )
+
+
+def test_a_run_made_outside_this_window_shows_in_the_cells_table(
+    qtbot, window: MainWindow, runs_root: Path, make_run_record, monkeypatch
+) -> None:
+    """The video round: CLI runs read "never run" in the Cells table.
+
+    The two columns knew only what this window had dispatched since it
+    opened. The history the Runs screen already lists is the same answer, so
+    it feeds them -- and the row menu then reaches that run.
+    """
+
+    from auto_ext.model.run import TaskStatus
+
+    cells = window.shell.page("cells")
+    entry = cells.cells().cells[0]
+    run_dir, _record = _write_run(
+        runs_root,
+        make_run_record,
+        slug=f"{entry.cell}-ext",
+        library=entry.library,
+        cell=entry.cell,
+        layout_view=entry.layout_view,
+        source_view=entry.source_view,
+        overall=TaskStatus.FAILED,
+    )
+    window.shell.page("runs").refresh()
+
+    row = cells.row_of_key(entry.key)
+    assert row is not None
+    assert cells.row_status(entry.key).status == "failed"
+    assert cells.table.item(row, COL_LAST_RUN).text().strip() not in ("", "—", "-")
+    assert cells.result_dir(entry.key) == run_dir
+
+    with qtbot.waitSignal(cells.result_requested, timeout=2000) as blocker:
+        cells.result_requested.emit(cells.result_dir(entry.key))
+    assert window.shell.current_page_key() == "runs"
+    selected = window.shell.page("runs").selected_entry
+    assert selected is not None and selected.run_dir == blocker.args[0]
+
+
+def test_the_runs_screen_shows_the_run_that_just_finished(
+    qtbot, window: MainWindow, runs_root: Path, make_run_record, workers
+) -> None:
+    """The video round: the previous card stayed up after a failed run.
+
+    ``refresh`` keeps the selection, so the Runs screen went on showing the
+    run the user had looked at last until they found the new row by hand.
+    """
+
+    from datetime import datetime, timezone
+
+    from auto_ext.model.run import TaskStatus
+
+    older, _ = _write_run(
+        runs_root, make_run_record, slug="amp2-old",
+        created_at=datetime(2026, 8, 20, 9, 0, tzinfo=timezone.utc),
+    )
+    runs = window.shell.page("runs")
+    runs.refresh()
+    assert runs.select_run(older.name)
+
+    cells = window.shell.page("cells")
+    keys = _tick_cells(qtbot, cells, (0,))
+    cells.run_bar.run_button().click()
+    assert workers, "the Run click dispatched nothing"
+
+    fresh, _ = _write_run(
+        runs_root, make_run_record, slug="amp2-new", overall=TaskStatus.FAILED,
+        created_at=datetime(2026, 8, 21, 9, 0, tzinfo=timezone.utc),
+    )
+    workers[0].summary = SimpleNamespace(
+        tasks=[SimpleNamespace(task_id=keys[0], run_dir=fresh, overall=TaskStatus.FAILED)],
+        runs=[],
+    )
+    workers[0].finished.emit()
+
+    selected = runs.selected_entry
+    assert selected is not None and selected.run_id == fresh.name, (
+        f"the Runs screen still shows {selected and selected.run_id!r}"
+    )
+
+
+def test_a_missing_env_var_is_refused_when_run_is_pressed(
+    qtbot, window: MainWindow, workers, monkeypatch
+) -> None:
+    """The video round: "Run failed: EnvResolutionError" from the worker.
+
+    It arrived as a small non-blocking box after the rows had been marked
+    queued, and the status line then said "idle". The runner's own pre-flight
+    now runs at the press, so nothing is queued and the answer is in front of
+    the user with its fix.
+    """
+
+    from auto_ext.core.errors import EnvResolutionError
+
+    # The fixture project references no env var (healthy_profile), so the
+    # runner's own refusal is injected; that the pre-flight raises it for a
+    # real missing variable is tests/test_runner.py's to assert.
+    def _refuse(*_a, **_k):
+        raise EnvResolutionError("unresolved env vars: WORK_ROOT")
+
+    monkeypatch.setattr(cells_mod, "preflight", _refuse)
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cells_mod.QMessageBox, "warning",
+        staticmethod(lambda _parent, title, text, *a, **k: shown.append((title, text))),
+    )
+
+    cells = window.shell.page("cells")
+    keys = _tick_cells(qtbot, cells, (0,))
+    cells.run_bar.run_button().click()
+
+    assert not workers, "a worker was started for a run the runner would refuse"
+    assert shown and shown[0][0] == "Environment not set up", shown
+    assert "WORK_ROOT" in shown[0][1]
+    assert cells.row_status(keys[0]).text != "queued"
+    assert cells.is_running() is False
+
+
+def test_a_worker_that_raises_leaves_no_row_reading_queued(
+    qtbot, window: MainWindow, workers, monkeypatch
+) -> None:
+    """Whatever the pre-flight cannot see still must not strand the rows."""
+
+    monkeypatch.setattr(cells_mod.QMessageBox, "show", lambda self: None)
+    cells = window.shell.page("cells")
+    keys = _tick_cells(qtbot, cells, (0,))
+    cells.run_bar.run_button().click()
+    assert workers, "the Run click dispatched nothing"
+
+    workers[0].error.emit("RuntimeError: deck directory vanished")
+    workers[0].finished.emit()
+
+    assert cells.row_status(keys[0]).status == "failed"
+    assert cells.row_status(keys[0]).text == "not run"
+    assert "run failed" in window.shell.status_left().lower()
 
 
 # ============================================================================

@@ -675,10 +675,9 @@ MATRIX: tuple[MatrixCell, ...] = (
         site="Recipe import dialog",
         transition="confirm the import",
         expected="preserved",
-        today="discarded",
+        today="preserved",
         master="M-06",
-        symptom="recipe_imported has no receiver; the status line reports the "
-        "import as done anyway",
+        symptom="",
         check=cell_r10_c1_import,
     ),
     MatrixCell(

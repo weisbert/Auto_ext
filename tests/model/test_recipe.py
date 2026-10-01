@@ -94,7 +94,9 @@ def test_a_default_recipe_is_grouped_and_complete() -> None:
     assert recipe.extraction.metal_fill is MetalFill.VIRTUAL
     assert recipe.output.emit == [OutputKind.EXTRACTED_VIEW]
     assert recipe.lvs.deck_variant == "wodio"
-    assert recipe.policy.continue_on_lvs_fail is False
+    assert "continue_on_lvs_fail" not in recipe.policy.model_dump(), (
+        "a decision about one run is the run bar's, not the recipe's"
+    )
     assert recipe.patches == []
 
 

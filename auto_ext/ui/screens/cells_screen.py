@@ -143,6 +143,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -183,7 +184,8 @@ from PyQt5.QtWidgets import (
 )
 
 from auto_ext.core.progress import CancelToken
-from auto_ext.core.runner import STAGE_ORDER
+from auto_ext.core.errors import AutoExtError, EnvResolutionError
+from auto_ext.core.runner import STAGE_ORDER, preflight
 from auto_ext.model.cells import CellBook, CellEntry
 from auto_ext.ui import theme
 from auto_ext.ui.qt_reporter import QtProgressReporter
@@ -828,6 +830,9 @@ class CellsScreen(QWidget):
     status_message = pyqtSignal(str)
     log_path_changed = pyqtSignal(object)
     open_log_requested = pyqtSignal(object)
+    #: ``Path`` -- the run directory of a row's latest result, from the row
+    #: menu's "Show last result". The host opens it on the Runs screen.
+    result_requested = pyqtSignal(object)
 
     #: Set ``False`` to drive :meth:`set_column_mode` yourself.
     auto_compact: bool = True
@@ -843,6 +848,8 @@ class CellsScreen(QWidget):
         self._controller = controller
         self._book = book if book is not None else CellBook()
         self._statuses: dict[str, RowStatus] = {}
+        #: row key -> run directory of its newest result, live or from history.
+        self._result_dirs: dict[str, Path] = {}
         self._recipe_choices: list[tuple[str, str]] = []
         self._row_keys: list[str] = []
         #: The run set. Independent of the selection highlight -- see the
@@ -854,6 +861,10 @@ class CellsScreen(QWidget):
         self._compact_toolbar = False
         self._syncing = False
         self._worker: RunWorker | None = None
+        #: The message of the job in flight's worker error, until it retires.
+        self._worker_error: str | None = None
+        #: How the last job ended, as the status line said it.
+        self._outcome: str | None = None
         self._reporter: QtProgressReporter | None = None
         #: The job in flight, and the presses waiting behind it. Exactly one
         #: worker at a time; see the module docstring.
@@ -1090,6 +1101,7 @@ class CellsScreen(QWidget):
         self._book = book
         keys = set(book.keys)
         self._statuses = {k: v for k, v in self._statuses.items() if k in keys}
+        self._result_dirs = {k: v for k, v in self._result_dirs.items() if k in keys}
         self._reload_table()
         self.cells_changed.emit(self._book)
 
@@ -1124,6 +1136,7 @@ class CellsScreen(QWidget):
         # the user had just removed or renamed in the dict. A row that later
         # took the same key inherited a result it never produced.
         self._statuses = {k: v for k, v in self._statuses.items() if k in keys}
+        self._result_dirs = {k: v for k, v in self._result_dirs.items() if k in keys}
         self._syncing = True
         try:
             self._table.clearContents()
@@ -1620,6 +1633,8 @@ class CellsScreen(QWidget):
         if replacement.key != key:
             if key in self._statuses:
                 self._statuses[replacement.key] = self._statuses.pop(key)
+            if key in self._result_dirs:
+                self._result_dirs[replacement.key] = self._result_dirs.pop(key)
             # The tick belongs to the row, not to the spelling of its key:
             # retyping a cell name must not quietly drop it out of the batch.
             if key in self._checked:
@@ -1733,6 +1748,7 @@ class CellsScreen(QWidget):
         remaining = [entry for entry in self._book if entry.key not in keys]
         for key in keys:
             self._statuses.pop(key, None)
+            self._result_dirs.pop(key, None)
             self._checked.discard(key)
         self._apply_book(
             CellBook(schema_version=self._book.schema_version, cells=remaining)
@@ -1844,6 +1860,46 @@ class CellsScreen(QWidget):
                 when=record.when,
                 code=record.code,
             )
+
+    def set_history(self, entries: Sequence[Any]) -> None:
+        """Fill ``last run`` / ``status`` from the run history, newest first.
+
+        The columns used to know only what this window had dispatched since it
+        opened, so a cell run yesterday -- or from the CLI a minute ago --
+        read ``never run``. ``entries`` are
+        :class:`~auto_ext.core.run_store.RunIndexEntry` rows; the first one per
+        row key wins. A row the job in flight is still working on keeps its
+        live status: the history cannot know more than the reporter does.
+        """
+
+        newest: dict[str, Any] = {}
+        for entry in entries:
+            newest.setdefault(entry.dut_key, entry)
+        for key in self._book.keys:
+            entry = newest.get(key)
+            if entry is None or self._is_live(key):
+                continue
+            status = str(entry.overall)
+            text = status
+            if entry.dry_run and status == "passed":
+                status, text = "dry_run", "dry run"
+            code = "LVS" if status == "failed" and entry.lvs_passed is False else None
+            self._result_dirs[key] = Path(entry.run_dir)
+            self.set_row_status(key, status, text=text, when=_when(entry.created_at), code=code)
+
+    def _is_live(self, key: str) -> bool:
+        """In the job in flight and not finished yet."""
+
+        return (
+            self._worker is not None
+            and key in self._live.keys
+            and key not in self._live.finished
+        )
+
+    def result_dir(self, key: str) -> Path | None:
+        """The run directory of ``key``'s newest known result, or ``None``."""
+
+        return self._result_dirs.get(key)
 
     def stage_strip(self, key: str) -> StageChipStrip | None:
         row = self.row_of_key(key)
@@ -1975,6 +2031,19 @@ class CellsScreen(QWidget):
         menu.addAction(act_clear)
 
         menu.addSeparator()
+        result = self._result_dirs.get(keys[0]) if len(keys) == 1 else None
+        act_result = QAction("Show last result", menu)
+        act_result.setEnabled(result is not None)
+        if result is None:
+            act_result.setToolTip(
+                "Select one row that has run" if len(keys) != 1 else "This row has not run yet"
+            )
+        act_result.triggered.connect(
+            lambda _checked=False, path=result: self.result_requested.emit(path)
+        )
+        menu.addAction(act_result)
+
+        menu.addSeparator()
         act_export = QAction("Export GDS…", menu)
         act_export.setEnabled(bool(keys))
         act_export.setToolTip(
@@ -2005,6 +2074,11 @@ class CellsScreen(QWidget):
         """
 
         return self._worker is not None or bool(self._queue)
+
+    def last_outcome(self) -> str | None:
+        """How the last job ended (``"idle — 2/3 passed"``, ``"run failed: ..."``)."""
+
+        return self._outcome
 
     def queued_jobs(self) -> int:
         """How many Run presses are waiting behind the one in flight."""
@@ -2226,6 +2300,13 @@ class CellsScreen(QWidget):
             return None
         if not batches:
             return None
+        resources = getattr(controller, "resources", None)
+        refusal = self._preflight_refusal(request, batches, project, profile, resources)
+        if refusal is not None:
+            title, text = refusal
+            QMessageBox.warning(self, title, text)
+            self._say(f"not started: {_first_line(text)}")
+            return None
         return _Resolved(
             batches=batches,
             project=project,
@@ -2234,6 +2315,46 @@ class CellsScreen(QWidget):
             profile=profile,
             resources=getattr(controller, "resources", None),
         )
+
+    def _preflight_refusal(
+        self,
+        request: RunRequest,
+        batches: list[RunBatch],
+        project: Any,
+        profile: Any,
+        resources: Any,
+    ) -> tuple[str, str] | None:
+        """``(title, text)`` when the runner would refuse this press, else ``None``.
+
+        The same checks ``run_tasks`` makes before any process starts, made
+        here, at press time. They used to surface only from the worker
+        thread: a small "Run failed: EnvResolutionError" box, rows left
+        reading "queued" and a status line saying "idle" -- three answers, and
+        the right one the least visible.
+        """
+
+        for batch in batches:
+            try:
+                preflight(
+                    project,
+                    list(batch.tasks),
+                    stages=list(request.stages),
+                    recipe=batch.recipe,
+                    profile=profile,
+                    max_workers=request.jobs if request.jobs >= 2 else None,
+                    resources=resources,
+                    layout_export_path=request.layout_export_path,
+                )
+            except EnvResolutionError as exc:
+                return (
+                    "Environment not set up",
+                    f"{exc}\n\nNothing was started. Source the Cadence / PDK "
+                    "setup that exports these variables and restart Auto_ext, "
+                    "or pin them in the Setup drawer (top right).",
+                )
+            except AutoExtError as exc:
+                return ("Run refused", f"{exc}\n\nNothing was started.")
+        return None
 
     def _enqueue(self, request: RunRequest) -> _Job | None:
         """Resolve a press into a job and put it at the back of the queue."""
@@ -2304,6 +2425,7 @@ class CellsScreen(QWidget):
             resources=resolved.resources,
             max_workers=request.jobs if request.jobs >= 2 else None,
             dry_run=request.dry_run,
+            continue_on_lvs_fail=request.continue_on_lvs_fail,
             layout_export_path=request.layout_export_path,
         )
         self._worker.error.connect(self._on_worker_error)
@@ -2587,7 +2709,14 @@ class CellsScreen(QWidget):
 
     def _on_task_finished(self, task_id: str, status: str) -> None:
         self._live.finished[task_id] = status
-        self.set_row_status(task_id, status, text=status)
+        run_dir = self._live.run_dirs.get(task_id)
+        if run_dir is not None:
+            self._result_dirs[task_id] = run_dir
+        # M-29: the time, not an em dash. A run that ended a second ago is the
+        # one row whose "last run" the user is certain to read.
+        self.set_row_status(
+            task_id, status, text=status, when=_when(datetime.now(timezone.utc))
+        )
         self._update_counts()
 
     def _on_worker_error(self, message: str) -> None:
@@ -2601,6 +2730,7 @@ class CellsScreen(QWidget):
         A modeless box says the same sentence and lets the queue move.
         """
 
+        self._worker_error = message
         box = QMessageBox(QMessageBox.Critical, "Run failed", message, QMessageBox.Ok, self)
         box.setAttribute(Qt.WA_DeleteOnClose)
         box.setModal(False)
@@ -2620,6 +2750,13 @@ class CellsScreen(QWidget):
         worker = self._worker
         summary = worker.summary if worker is not None else None
         finished = dict(self._live.finished)
+        error, self._worker_error = self._worker_error, None
+        # Rows the job spoke for and never reported on: the dispatch raised
+        # before reaching them. Left alone they read "queued" forever under an
+        # idle status line.
+        for key in self._live.keys:
+            if key not in finished:
+                self.set_row_status(key, "failed", text="not run")
         self._disconnect_reporter(self._reporter)
         self._worker = None
         self._reporter = None
@@ -2632,12 +2769,15 @@ class CellsScreen(QWidget):
         else:
             self._leave_running_state()
         passed = sum(1 for status in finished.values() if status == "passed")
-        if self._queue:
+        if error is not None:
+            self._outcome = f"run failed: {_first_line(error)}"
+        elif self._queue:
             # Not "idle": there is a press the user made and has not seen
             # run, and ``_say`` puts the count of them on the end.
-            self._say(f"{passed}/{len(finished)} passed")
+            self._outcome = f"{passed}/{len(finished)} passed"
         else:
-            self._say(f"idle — {passed}/{len(finished)} passed")
+            self._outcome = f"idle — {passed}/{len(finished)} passed"
+        self._say(self._outcome)
         self.run_finished.emit(summary)
         QTimer.singleShot(0, self._advance)
 
@@ -2717,6 +2857,18 @@ def _applied_width(column: int, artboard_width: int) -> int:
     return artboard_width + 2 * theme.CELL_PADDING_H
 
 
+def _when(moment: datetime) -> str:
+    """``MM-DD HH:MM``, on the same clock as the Runs list's subtitles.
+
+    Both columns name a run the user will then look for on the Runs screen,
+    so they must read the same instant the same way.
+    """
+
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc)
+    return moment.strftime("%m-%d %H:%M")
+
+
 def _mono_font() -> QFont:
     font = QFont()
     apply_families(font, theme.FONT_MONO_FAMILIES)
@@ -2733,7 +2885,7 @@ def _column_of_field(field_name: str) -> int:
     raise KeyError(field_name)
 
 
-def _first_line(exc: Exception) -> str:
+def _first_line(exc: object) -> str:
     text = str(exc).strip()
     for line in text.splitlines():
         line = line.strip()

@@ -381,7 +381,7 @@ class RunListing:
     history with no trace, because the warnings below go to a logger that
     nothing in ``auto_ext/`` ever attaches a handler to. Ten runs vanished
     that way on the first launch against a real ``runs/`` directory, under a
-    status line promising that nothing is ever overwritten.
+    status line promising that every run is kept.
     """
 
     #: The runs that could be indexed, newest first.

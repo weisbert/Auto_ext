@@ -350,15 +350,15 @@ Recipes 表单能在「set per cell, not per recipe」这句话旁边画出一�
 （见 `scratchpad/handover_runbar.md`）。`config/resources.yaml` 的
 `max_workers` 同理，因为 migrate 和新建项目向导都写过它。
 
-**`continue_on_lvs_fail` 是半成品，而且它自己说了。** 它是关于**这一次尝试**的决定，
-所以概念上完全归 run bar。今天：`run_tasks` / `RunWorker` 都收
-`continue_on_lvs_fail: bool | None` 了，`None` 表示「调用方没有意见」，回退到
-`recipe.policy`；解析出来的那个值就是 `RunRecord` 记下的值，所以**结果卡片不可能再和
-这次运行说的不一样** —— 而在此之前，run bar 的勾选框被读进 `RunRequest` 然后被丢掉，
-卡片再回过头告诉用户「continue_on_lvs_fail 是关的」。剩下的一步在
-`cells_screen._dispatch` 里，那个文件另一个会话正在重写，所以 recipe 上那一行**暂时留着**，
-`tests/ui/test_reachability.py` 用 `xfail(strict=True, reason="M-133/E-1: …")` 钉住这一格
-—— **接手的会话必须翻掉自己的 xfail**，这是 5.4 的规矩。
+**`continue_on_lvs_fail` 2026-10-01 收尾。** 它是关于**这一次尝试**的决定，所以完全归
+run bar（和 CLI `--continue-on-lvs-fail`）。`cells_screen._start_job` 现在把勾选框传进
+`RunWorker`，`run_tasks` 只认调用方给的值（`bool`，默认 `False`），不再回退到 recipe；
+`Recipe.policy.continue_on_lvs_fail` 进了 `RETIRED_RECIPE_FIELDS`，加载时丢掉并打一行日志；
+catalog 那一行改成 `owner: run` / `context_path: run.continue_on_lvs_fail`，Recipes 表单的
+Flow 组因此清空、不再画出来。migrate 把 v1 `tasks.yaml` 的这个字段记成 `dropped`，
+也不再按它拆 recipe。`test_reachability.py` 和 `test_failure_journeys.py` 里钉住这一格的两条
+strict xfail 已翻掉。**注意**：红区 recipe 若写着 `true`，升级后 GUI 和 CLI 都不会再
+自动继续跑 —— 要在 run bar 上勾，或给 CLI 加 `--continue-on-lvs-fail`。
 
 **机械半**（`tests/ui/test_reachability.py`，两条断言就是整把尺子）：
 

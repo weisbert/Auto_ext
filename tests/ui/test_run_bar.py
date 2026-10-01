@@ -629,3 +629,24 @@ def test_visible_glyphs_stay_inside_the_dejavu_vocabulary(qtbot) -> None:
     for text in texts:
         for char in text:
             assert char.isascii() or char in allowed, (char, text)
+
+
+def test_mid_run_the_extra_height_goes_to_the_panel_not_the_idle_strip(qtbot) -> None:
+    """The video round: the Run button floated in a tall empty band mid-run.
+
+    The splitter hands the bar more height while a job runs, and the idle
+    strip took half of it. It keeps its own height; the panel gets the rest.
+    """
+
+    bar = RunBar()
+    qtbot.addWidget(bar)
+    bar.resize(1200, 600)
+    bar.show()
+    qtbot.waitExposed(bar)
+    strip = bar._idle.sizeHint().height()
+
+    bar.set_running(True)
+    qtbot.wait(10)
+
+    assert bar._idle.height() <= strip + 2
+    assert bar._panel.height() > bar.height() // 2

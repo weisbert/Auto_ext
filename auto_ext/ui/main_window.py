@@ -66,12 +66,14 @@ from PyQt5.QtWidgets import (
 )
 
 from auto_ext.core.errors import AutoExtError
+from auto_ext.core.run_store import read_record
+from auto_ext.core.runner import STAGE_ORDER
 from auto_ext.model.recipe import Recipe, recipe_from_catalog
 from auto_ext.ui.config_controller import ConfigController
 from auto_ext.ui.os_open import open_in_os
 from auto_ext.ui.screens.cells_screen import CellsScreen
 from auto_ext.ui.screens.project_screen import ProjectScreen
-from auto_ext.ui.screens.recipes_screen import RecipesScreen
+from auto_ext.ui.screens.recipes_screen import RecipesScreen, import_status_text
 from auto_ext.ui.screens.runs_screen import RunsScreen
 from auto_ext.ui.screens.setup_drawer import SetupDrawer
 from auto_ext.ui.shell import Shell
@@ -216,6 +218,7 @@ class MainWindow(QMainWindow):
         cells.run_finished.connect(self._on_run_finished)
         cells.log_path_changed.connect(self._log_view.set_active_log)
         cells.open_log_requested.connect(self._open_path)
+        cells.result_requested.connect(self._show_run_result)
         cells.run_bar.follow_changed.connect(self._log_view.set_follow)
         cells.selection_changed.connect(self._on_cells_selection_changed)
         cells.checked_changed.connect(self._on_cells_checked_changed)
@@ -232,6 +235,7 @@ class MainWindow(QMainWindow):
         recipes.new_requested.connect(self._on_recipe_new_requested)
         recipes.duplicate_requested.connect(self._on_recipe_duplicate_requested)
         recipes.delete_requested.connect(self._on_recipe_delete_requested)
+        recipes.recipe_imported.connect(self._on_recipe_imported)
         recipes.status_changed.connect(self._set_status)
         recipes.edit_rendered_requested.connect(self._on_edit_rendered_requested)
         for signal in (
@@ -245,6 +249,7 @@ class MainWindow(QMainWindow):
 
         runs = self._runs
         runs.status_message.connect(self._set_status)
+        runs.entries_changed.connect(self._cells.set_history)
         runs.log_requested.connect(self._open_path)
         runs.artifact_requested.connect(self._open_path)
         runs.setup_requested.connect(self._open_setup_at)
@@ -416,7 +421,9 @@ class MainWindow(QMainWindow):
         """
 
         if not self._cells.is_running():
-            return "idle"
+            # How the last job ended, when there was one: "run failed: ..."
+            # must not be overwritten by a bare "idle" a line later.
+            return self._cells.last_outcome() or "idle"
         waiting = self._cells.queued_jobs()
         if not waiting:
             return "running"
@@ -428,11 +435,36 @@ class MainWindow(QMainWindow):
     def _on_run_requested(self, _request: object) -> None:
         self._shell.set_status(left=self._run_status_text())
 
-    def _on_run_finished(self, _summary: object) -> None:
-        """A run that just ended is the one the user wants to look at."""
+    def _on_run_finished(self, summary: object) -> None:
+        """A run that just ended is the one the user wants to look at.
+
+        So it is selected, not merely listed. ``refresh`` keeps whatever was
+        selected before, which left the Runs screen showing the previous card
+        for as long as it took the user to find the new row -- the stale card
+        the video round caught on the way to a failed run. A failed run wins
+        over a passed one: it is the one with a question attached.
+        """
 
         self._runs.refresh()
+        tasks = [
+            task for task in getattr(summary, "tasks", None) or [] if task.run_dir is not None
+        ]
+        if tasks:
+            failed = [task for task in tasks if str(task.overall) == "failed"]
+            pick = (failed or tasks)[-1]
+            self._runs.select_run(Path(pick.run_dir).name)
         self._shell.set_status(left=self._run_status_text())
+
+    def _show_run_result(self, run_dir: object) -> None:
+        """A Cells row's "Show last result": that run, on the Runs screen."""
+
+        run_id = Path(str(run_dir)).name
+        self._shell.set_current_page("runs")
+        if not self._runs.select_run(run_id):
+            # Written after the Runs screen last listed the directory.
+            self._runs.refresh()
+            if not self._runs.select_run(run_id):
+                self._set_status(f"run {run_id} is no longer in the history")
 
     def _on_cells_selection_changed(self, keys: object) -> None:
         """The highlight. Reported only while nothing is ticked.
@@ -468,11 +500,45 @@ class MainWindow(QMainWindow):
         highlighted too, which is how the user finds it in the table.
         """
 
-        key = getattr(entry, "task_id", None) or getattr(entry, "cell", None)
-        if isinstance(key, str) and key:
-            self._cells.set_selected_keys([key])
-            self._cells.set_checked_keys([key])
         self._shell.set_current_page("cells")
+        # The history row carries the DUT as ``dut_key``; it never had a
+        # ``task_id``. Looking that up fell back to the bare cell name, which
+        # matches no row key, so nothing was ticked and Run stayed grey.
+        key = getattr(entry, "dut_key", None)
+        if not isinstance(key, str) or key not in set(self._cells.cells().keys):
+            cell = getattr(entry, "cell", "") or "this cell"
+            self._set_status(f"{cell} is no longer in the Cells table - nothing to re-run")
+            return
+        self._cells.set_selected_keys([key])
+        self._cells.set_checked_keys([key])
+
+        # "Again with the same settings": the recipe, stages and LVS policy
+        # that run used go onto the run bar. Each one only where it still can:
+        # a recipe deleted since is left to the row, and a record that cannot
+        # be read leaves the bar as it is.
+        bar = self._cells.run_bar
+        said: list[str] = []
+        recipe_id = getattr(entry, "recipe_id", "") or ""
+        if recipe_id and recipe_id in set(self._controller.recipe_ids()):
+            bar.set_recipe_override(recipe_id)
+            said.append(f"recipe {recipe_id}")
+        elif recipe_id:
+            said.append(f"recipe {recipe_id} is gone, the row's own recipe applies")
+        try:
+            record = read_record(Path(str(entry.run_dir)))
+        except (AutoExtError, OSError, ValueError):
+            record = None
+        if record is not None:
+            stages = {stage.split(".", 1)[0] for stage in record.requested_stages}
+            if stages:
+                bar.set_selected_stages(sorted(stages))
+                said.append("stages " + ", ".join(s for s in STAGE_ORDER if s in stages))
+            bar.set_continue_on_lvs_fail(record.continue_on_lvs_fail)
+        self._set_status(
+            f"ticked {key} with this run's settings"
+            + (f" ({'; '.join(said)})" if said else "")
+            + " - press Run to start it"
+        )
 
     # ---- recipe slots ----------------------------------------------------
 
@@ -572,6 +638,29 @@ class MainWindow(QMainWindow):
         self._controller.stage_recipe(clone)
         self._publish_recipes(select=new_id)
         self._push_recipe_choices()
+
+    def _on_recipe_imported(self, result: Any) -> None:
+        """An import was confirmed: it joins the library like New and Duplicate.
+
+        Staged, not written. Every other way a recipe appears in this window
+        waits for File -> Save, and an import that wrote straight to disk
+        would be the one recipe Revert could not take back. The id is made
+        unique again here because the dialog checked it against the library
+        as it stood when the dialog opened.
+        """
+
+        recipe: Recipe = result.recipe
+        if recipe.recipe_id in set(self._controller.recipe_ids()):
+            recipe = recipe.model_copy(
+                update={"recipe_id": self._unique_recipe_id(recipe.recipe_id)}
+            )
+        self._controller.stage_recipe(recipe)
+        self._publish_recipes(select=recipe.recipe_id)
+        self._push_recipe_choices()
+        self._set_status(
+            f"{import_status_text(result)} -- not written yet: "
+            f"File -> Save writes recipes/{recipe.recipe_id}.yaml"
+        )
 
     def _on_recipe_delete_requested(self, recipe_id: str) -> None:
         self._controller.stage_recipe_deletion(recipe_id)
@@ -773,9 +862,21 @@ class MainWindow(QMainWindow):
         written = self.save()
         self._publish_recipes(select=recipe_id)
         count = len(patch.hunks)
+        mine = {hunk.id for hunk in patch.hunks}
+        rewritten = sorted(
+            key
+            for key, override in patch_capture.form_overrides(updated).items()
+            if override.template_id == patch.template_id and override.hunk_id in mine
+        )
         self._set_status(
             f"stored {count} manual edit(s) on {recipe_id}"
             + ("" if written else " - File -> Save writes them to the recipe file")
+            + (
+                f" - it rewrites {', '.join(rewritten)}, which the form also sets; "
+                f"runs use the edit, and the form row says so"
+                if rewritten
+                else ""
+            )
         )
 
     @staticmethod

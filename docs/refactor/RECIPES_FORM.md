@@ -112,7 +112,7 @@ than lines in a file. It was built for five, and four of them have left.
 | `reduction_enabled` | **deleted 2026-09-04.** The same decision wearing a second face: an AND across two sections of this form, either half of which skipped the whole reduction without a word. Jivaro runs iff jivaro is ticked. |
 | `fail_on_unparsable_lvs_report` | **control retired 2026-09-04** (§5, and `UX_VALIDATION.md` §5.6): the row kept a `context_path` while nothing read the policy, so the form drew a live tick box that changed nothing. |
 | `extraction_corner` | moved out under `groups_with: technology_corner` (§1.1). It still has no landing site; it is drawn beside the temperature, where a person looks for it. |
-| `continue_on_lvs_fail` | **still here, transitionally.** It is a run-time decision too, so the run bar should own it outright — `run_tasks` and `RunWorker` take it as an argument since 2026-09-04, and the recipe is only the fallback when the caller passes `None`. The row goes when `cells_screen._dispatch` passes the bar's checkbox; `UX_VALIDATION.md` §5.7 carries the cut-over. |
+| `continue_on_lvs_fail` | **gone (2026-10-01).** A run-time decision, owned by the run bar's tick box and CLI `--continue-on-lvs-fail`; the catalog row is `owner: run` and the Recipe field is dropped on load. With it, Flow has no rows and is not drawn. `UX_VALIDATION.md` §5.7. |
 
 The general rule behind all four is `UX_VALIDATION.md` §5.7 — **one concept,
 one owner**. A run-time decision belongs to the run bar, a per-cell fact to

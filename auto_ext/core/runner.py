@@ -53,8 +53,8 @@ Failure handling (identical in both modes):
   remaining stages for the task are skipped, runner continues with the
   next task (or the other workers, in parallel mode).
 - ``calibre`` stage returning ``success=False``: if this dispatch's
-  ``continue_on_lvs_fail`` is True -- the caller's argument, falling back to
-  ``recipe.policy.continue_on_lvs_fail`` when the caller passes ``None`` --
+  ``continue_on_lvs_fail`` is True -- the caller's argument and nothing else;
+  no recipe carries the decision since it moved to the run bar --
   log a warning and proceed to the next stage. Otherwise skip remaining
   stages for this task (same as a generic failure). The resolved value is
   what ``RunRecord.continue_on_lvs_fail`` reports.
@@ -359,6 +359,92 @@ class _TaskExecCtx:
 # ---- entry point -----------------------------------------------------------
 
 
+def preflight(
+    project: ProjectConfig,
+    tasks: list[TaskConfig],
+    *,
+    stages: list[str],
+    recipe: Recipe,
+    profile: PdkProfile,
+    max_workers: int | None = None,
+    resources: ResourceProfile | None = None,
+    catalog: Catalog | None = None,
+    templates_root: Path | None = None,
+    layout_export_path: str | None = None,
+) -> None:
+    """Every refusal :func:`run_tasks` makes before a process starts, alone.
+
+    Raises the same :class:`~auto_ext.core.errors.AutoExtError` the dispatch
+    would -- an unresolved env var, a stage set Quantus cannot run from, two
+    concurrent tasks sharing one Cadence workspace -- and touches nothing. The
+    GUI calls it when Run is pressed, so the answer arrives while the user is
+    still looking at what they asked for, instead of as an error from a worker
+    thread after the rows have been marked queued.
+    """
+
+    _preflight(
+        project,
+        tasks,
+        stages=stages,
+        recipe=recipe,
+        profile=profile,
+        max_workers=max_workers,
+        resources=resources,
+        catalog=catalog,
+        templates_root=templates_root,
+        layout_export_path=layout_export_path,
+    )
+
+
+def _preflight(
+    project: ProjectConfig,
+    tasks: list[TaskConfig],
+    *,
+    stages: list[str],
+    recipe: Recipe,
+    profile: PdkProfile,
+    max_workers: int | None,
+    resources: ResourceProfile | None,
+    catalog: Catalog | None,
+    templates_root: Path | None,
+    layout_export_path: str | None,
+) -> tuple[RecipePipeline, str | None, dict[str, str], EnvResolution]:
+    """``(pipeline, layout export path, env overrides, env resolution)``, or raise."""
+
+    pipeline = _build_pipeline(
+        recipe=recipe,
+        profile=profile,
+        resources=resources,
+        catalog=catalog,
+        templates_root=templates_root,
+    )
+
+    _validate_stages(stages)
+    _validate_qrc_query_feeds_quantus(stages, pipeline=pipeline)
+    _validate_tasks(tasks, stages, pipeline=pipeline)
+    if layout_export_path is not None:
+        layout_export_path = _validate_layout_export(layout_export_path, stages, tasks)
+
+    required_env = _discover_env_vars(project, tasks, pipeline)
+    # The workspace patterns still come from project.yaml / workspace.yaml, so
+    # its overrides stay underneath; the profile's win, because env resolution
+    # is a PDK fact now.
+    env_overrides = {**project.env_overrides, **pipeline.profile.env_overrides}
+    resolution = resolve_env(required_env, env_overrides)
+    resolved_env = resolution.require()
+
+    parallel = max_workers is not None and max_workers >= 2
+
+    # The workspace-sharing check needs resolved env so ``${WORK_ROOT}`` is
+    # gone before ``str.format`` runs (Python would otherwise interpret
+    # ``{WORK_ROOT}`` as a missing format key). Runs after env resolution
+    # but before any subprocess; env errors are more fundamental anyway.
+    _validate_task_outputs(
+        tasks, project, resolved_env, parallel=parallel, pipeline=pipeline
+    )
+    return pipeline, layout_export_path, env_overrides, resolution
+
+
 def run_tasks(
     project: ProjectConfig,
     tasks: list[TaskConfig],
@@ -370,7 +456,7 @@ def run_tasks(
     profile: PdkProfile,
     verbose: bool = False,
     dry_run: bool = False,
-    continue_on_lvs_fail: bool | None = None,
+    continue_on_lvs_fail: bool = False,
     max_workers: int | None = None,
     reporter: ProgressReporter | None = None,
     cancel_token: CancelToken | None = None,
@@ -405,15 +491,13 @@ def run_tasks(
     task isolated under its own ``runs/<run_id>/work/``.
 
     ``continue_on_lvs_fail`` is this dispatch's answer to "keep going past an
-    LVS mismatch". ``None`` means the caller has no opinion and
-    ``recipe.policy.continue_on_lvs_fail`` decides, which is the transitional
-    state: it is a decision about *this attempt*, so the run bar should own
-    it outright, and the recipe row survives only until the bar's checkbox is
-    wired into the dispatch (``docs/refactor/UX_VALIDATION.md`` section 5.7).
-    Whatever is resolved here is what ``RunRecord.continue_on_lvs_fail``
-    records, so the result card cannot report a different answer from the one
-    the run used -- which is precisely what it did while the GUI checkbox was
-    read into ``RunRequest`` and then dropped.
+    LVS mismatch", and the only one: it is a decision about *this attempt*,
+    so the run bar's tick box and CLI ``--continue-on-lvs-fail`` own it
+    outright (``docs/refactor/UX_VALIDATION.md`` section 5.7). The recipe's
+    ``policy.continue_on_lvs_fail`` was a second copy that won whenever the
+    caller said nothing; it is retired and dropped on load. The value given
+    here is what ``RunRecord.continue_on_lvs_fail`` records, so the result
+    card cannot report a different answer from the one the run used.
 
     ``reporter`` / ``cancel_token`` default to a :class:`NullReporter`
     and a fresh :class:`CancelToken` that is never set — same blocking
@@ -427,42 +511,25 @@ def run_tasks(
     default to a stock :class:`~auto_ext.model.recipe.ResourceProfile`, the
     built-in catalog and the checkout's ``templates/``.
     """
-    pipeline = _build_pipeline(
+    pipeline, layout_export_path, env_overrides, resolution = _preflight(
+        project,
+        tasks,
+        stages=stages,
         recipe=recipe,
         profile=profile,
+        max_workers=max_workers,
         resources=resources,
         catalog=catalog,
         templates_root=templates_root,
+        layout_export_path=layout_export_path,
     )
-
-    _validate_stages(stages)
-    _validate_qrc_query_feeds_quantus(stages, pipeline=pipeline)
-    _validate_tasks(tasks, stages, pipeline=pipeline)
-    if layout_export_path is not None:
-        layout_export_path = _validate_layout_export(layout_export_path, stages, tasks)
+    resolved_env = resolution.resolved
+    parallel = max_workers is not None and max_workers >= 2
 
     if reporter is None:
         reporter = NullReporter()
     if cancel_token is None:
         cancel_token = CancelToken()
-
-    required_env = _discover_env_vars(project, tasks, pipeline)
-    # The workspace patterns still come from project.yaml / workspace.yaml, so
-    # its overrides stay underneath; the profile's win, because env resolution
-    # is a PDK fact now.
-    env_overrides = {**project.env_overrides, **pipeline.profile.env_overrides}
-    resolution = resolve_env(required_env, env_overrides)
-    resolved_env = resolution.require()
-
-    parallel = max_workers is not None and max_workers >= 2
-
-    # The workspace-sharing check needs resolved env so ``${WORK_ROOT}`` is
-    # gone before ``str.format`` runs (Python would otherwise interpret
-    # ``{WORK_ROOT}`` as a missing format key). Runs after env resolution
-    # but before any subprocess; env errors are more fundamental anyway.
-    _validate_task_outputs(
-        tasks, project, resolved_env, parallel=parallel, pipeline=pipeline
-    )
 
     # child_env() first: run.sh's PYTHONPATH (_vendor), PYTHONSAFEPATH and Qt
     # LD_LIBRARY_PATH are for this interpreter, not for si/calibre/qrc and
@@ -748,7 +815,7 @@ def _run_single_task(
     pipeline: RecipePipeline,
     verbose: bool,
     dry_run: bool,
-    continue_on_lvs_fail: bool | None = None,
+    continue_on_lvs_fail: bool = False,
     parallel: bool = False,
     max_workers: int,
     batch_id: str | None,
@@ -788,6 +855,7 @@ def _run_single_task(
             batch_id=batch_id,
             layout_export_path=layout_export_path,
             dry_run=dry_run,
+            continue_on_lvs_fail=bool(continue_on_lvs_fail),
             max_workers=max_workers,
             parallel=parallel,
             steps=steps,
@@ -817,15 +885,10 @@ def _run_single_task(
 
     exec_ctx = _TaskExecCtx(cwd=cwd, run_dir=run_dir, paths=paths, parallel=parallel)
     active_stages = [step.key for step in steps]
-    # The caller's answer wins; the recipe is the fallback while the run bar's
-    # checkbox is still being wired up. Resolved once, here, so the value the
-    # stage loop honours and the value the record reports are the same object
+    # The caller's answer and nothing else. One name for the value the stage
+    # loop honours and the value the record reports, so the two cannot drift
     # -- the card used to read the recipe while the user had ticked the bar.
-    effective_continue = (
-        pipeline.recipe.policy.continue_on_lvs_fail
-        if continue_on_lvs_fail is None
-        else continue_on_lvs_fail
-    )
+    effective_continue = bool(continue_on_lvs_fail)
 
     base_fields: dict[str, Any] = {
         "run_id": run_id,
@@ -1390,6 +1453,7 @@ def _recipe_context(
     parallel: bool,
     steps: list[_Step],
     layout_export_path: str | None = None,
+    continue_on_lvs_fail: bool = False,
 ) -> dict[str, Any]:
     """Build the recipe path's render context, workspace paths included.
 
@@ -1441,6 +1505,7 @@ def _recipe_context(
             started_at=created_at,
             batch_id=batch_id,
             dry_run=dry_run,
+            continue_on_lvs_fail=continue_on_lvs_fail,
             max_workers=max_workers,
             stages=tuple(step.key for step in steps),
         )

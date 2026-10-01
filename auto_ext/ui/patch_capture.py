@@ -53,6 +53,7 @@ report ``review`` on the next DUT rather than being refused here.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -94,11 +95,13 @@ from auto_ext.model.workspace import WorkspaceConfig
 __all__ = [
     "PREVIEW_RUN_ID",
     "CaptureError",
+    "FormOverride",
     "RenderPreview",
     "WorkspacePaths",
     "build_preview",
     "capture",
     "editable_targets",
+    "form_overrides",
     "resolve_render_env",
     "resolve_workspace_paths",
     "with_patch",
@@ -406,3 +409,124 @@ def with_patch(recipe: Recipe, patch: TemplatePatch) -> Recipe:
     ]
     payload: dict[str, Any] = {"patches": [*kept, patch], "updated_at": utcnow()}
     return recipe.model_copy(update=payload)
+
+
+# ---- manual edits that rewrite a form row ------------------------------------
+
+
+@dataclass(frozen=True)
+class FormOverride:
+    """One form row whose value a stored manual edit rewrites.
+
+    The form keeps showing the recipe's value, and the run writes the edit's.
+    Nothing is wrong with either half -- a manual edit exists precisely to say
+    what the catalog cannot -- but a form that shows ``5000`` while every run
+    writes ``8000`` is a screen telling the user something false, and saying
+    so on the row is the cheapest honest answer.
+    """
+
+    option_key: str
+    hunk_id: str
+    template_id: str
+    #: The edited line as runs write it (masked, stripped); ``""`` when the
+    #: edit deletes the line outright.
+    writes: str
+
+
+def _token_pattern(option: str) -> re.Pattern[str]:
+    # Bounded on both sides so ``-type`` does not match ``-type_x`` and
+    # ``simLibName`` does not match ``simLibNameX``.
+    return re.compile(r"(?<![\w-])" + re.escape(option) + r"(?![\w-])")
+
+
+def _section_of(lines: Sequence[str], index: int) -> str | None:
+    """The column-0 command a Quantus argument line sits under, if visible.
+
+    Quantus command files put each command on column 0 and its arguments on
+    indented continuation lines, so the nearest column-0 line above is the
+    section. ``None`` when the hunk's context does not reach that far up.
+    """
+
+    for line in reversed(lines[: index + 1]):
+        if line.strip() and not line[0].isspace():
+            return line.split()[0]
+    return None
+
+
+def form_overrides(
+    recipe: Recipe, *, catalog: Catalog | None = None
+) -> dict[str, FormOverride]:
+    """``catalog key -> FormOverride`` for every form row an enabled hunk rewrites.
+
+    A hunk rewrites a row when a line it removes or adds carries the option
+    token the catalog says that row lands as (``-exclude_floating_nets_limit``,
+    ``*lvsLayoutPaths``, ``simLibName``) in a file the patch's template
+    produces. Three tokens are shared by two rows each in the DSPF command
+    file (``-type``, ``-net_name_space``, ``-hierarchy_delimiter``); those are
+    told apart by the column-0 command above the line, and when the hunk's
+    context does not reach that command both rows are reported rather than a
+    guess at one.
+    """
+
+    cat = catalog if catalog is not None else builtin_catalog()
+    out: dict[str, FormOverride] = {}
+    for patch in recipe.patches:
+        targets = {spec.id for spec in cat.targets if spec.template_id == patch.template_id}
+        if not targets:
+            continue
+        #: option token -> [(catalog key, section)]
+        claims: dict[str, list[tuple[str, str | None]]] = {}
+        for spec in cat.options:
+            if spec.recipe_field_path is None:
+                continue
+            for site in spec.lands_in:
+                if site.target in targets and site.option:
+                    entry = (spec.key, site.section)
+                    bucket = claims.setdefault(site.option, [])
+                    if entry not in bucket:
+                        bucket.append(entry)
+        if not claims:
+            continue
+        patterns = {option: _token_pattern(option) for option in claims}
+        for hunk in patch.hunks:
+            if not hunk.enabled:
+                continue
+            context = hunk.context_before.splitlines()
+            before = hunk.before.splitlines()
+            after = hunk.after.splitlines()
+            kept_before, kept_after = set(before), set(after)
+            # A line the edit removes, then a line it adds; either one
+            # carrying the token means the row's value is not what runs write.
+            sides = ((context + before, kept_after), (context + after, kept_before))
+            for lines, other in sides:
+                for index in range(len(context), len(lines)):
+                    line = lines[index]
+                    if line in other:
+                        continue  # unchanged by this hunk
+                    for option, pattern in patterns.items():
+                        if not pattern.search(line):
+                            continue
+                        owners = claims[option]
+                        if len(owners) > 1:
+                            section = _section_of(lines, index)
+                            narrowed = [o for o in owners if o[1] == section]
+                            owners = narrowed or owners
+                        writes = next(
+                            (
+                                added.strip()
+                                for added in after
+                                if added not in kept_before and pattern.search(added)
+                            ),
+                            "",
+                        )
+                        for key, _section in owners:
+                            out.setdefault(
+                                key,
+                                FormOverride(
+                                    option_key=key,
+                                    hunk_id=hunk.id,
+                                    template_id=patch.template_id,
+                                    writes=writes,
+                                ),
+                            )
+    return out
