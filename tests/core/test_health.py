@@ -507,6 +507,33 @@ def test_editing_the_profile_invalidates_the_cache(healthy, tmp_path):
     assert report.result("pdk.corners").status is CheckStatus.FAIL
 
 
+def test_a_changed_shell_invalidates_the_cache(healthy, tmp_path, monkeypatch):
+    """The video round: ``unsetenv WORK_ROOT``, and the drawer still said ✓.
+
+    The cache keyed on the profile alone, and unsetting a variable changes
+    no file. It keys on the shell too now.
+    """
+
+    profile_path = tmp_path / "hn001.yaml"
+    name = sorted(health.profile_env_refs(healthy) | {"PATH"})[0]
+    monkeypatch.setenv(name, "/one/value")
+    cached_or_check(profile_path, healthy, which=_which())
+    _, from_cache = cached_or_check(profile_path, healthy, which=_which())
+    assert from_cache, "the premise: an unchanged shell is served from the cache"
+
+    monkeypatch.delenv(name)
+    _, from_cache = cached_or_check(profile_path, healthy, which=_which())
+    assert not from_cache, f"unsetting {name} was answered from the cache"
+
+
+def test_the_cache_records_a_hash_not_the_shell_values(healthy, tmp_path, monkeypatch):
+    profile_path = tmp_path / "hn001.yaml"
+    monkeypatch.setenv("PATH", "/very/recognisable/secret/bin")
+    cached_or_check(profile_path, healthy, which=_which())
+    text = health_cache_path(profile_path).read_text(encoding="utf-8")
+    assert "recognisable" not in text
+
+
 def test_an_aged_out_cache_is_re_run(healthy, tmp_path, monkeypatch):
     profile_path = tmp_path / "hn001.yaml"
     stale = utcnow() - timedelta(hours=2)

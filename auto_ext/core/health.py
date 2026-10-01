@@ -47,12 +47,13 @@ additionally accounts for decks, layer map and tool binaries.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import shutil
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -780,11 +781,28 @@ def check_profile(
         checked_at=now,
         results=results,
         profile_sha256=profile.fingerprint(),
+        env_sha256=shell_fingerprint(profile),
     )
     logger.debug(
         "health %s: %s (can_run=%s)", profile.profile_id, report.counts(), report.can_run
     )
     return report
+
+
+def shell_fingerprint(
+    profile: PdkProfile, environ: Mapping[str, str] | None = None
+) -> str:
+    """sha256 over the shell values a health verdict depends on.
+
+    The env vars :func:`profile_env_refs` names, and ``PATH`` because the tool
+    checks are ``which`` lookups. Hashed, so the cache file never records the
+    values themselves.
+    """
+
+    env = os.environ if environ is None else environ
+    names = sorted(profile_env_refs(profile) | {"PATH"})
+    payload = json.dumps([[name, env.get(name)] for name in names])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # ---- cache -------------------------------------------------------------------
@@ -850,7 +868,10 @@ def cached_or_check(
     """Return ``(report, from_cache)``.
 
     The cache is used only when it describes *this* profile
-    (``profile_sha256`` matches :meth:`PdkProfile.fingerprint`) and, when
+    (``profile_sha256`` matches :meth:`PdkProfile.fingerprint`) checked in
+    *this* shell (``env_sha256`` matches :func:`shell_fingerprint` -- it used
+    to key on the profile alone, so after ``unsetenv WORK_ROOT`` the Setup
+    drawer went on showing a cached "WORK_ROOT from shell"), and, when
     ``max_age_s`` is given, is younger than that. Otherwise the checks run
     again and -- unless ``write=False`` -- the cache is refreshed.
 
@@ -861,7 +882,11 @@ def cached_or_check(
 
     if not force:
         cached = read_report(profile_path)
-        if cached is not None and cached.profile_sha256 == profile.fingerprint():
+        if (
+            cached is not None
+            and cached.profile_sha256 == profile.fingerprint()
+            and cached.env_sha256 == shell_fingerprint(profile)
+        ):
             fresh = True
             if max_age_s is not None:
                 age = utcnow() - cached.checked_at

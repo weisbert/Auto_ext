@@ -448,6 +448,10 @@ class PdkHealthReport(Frozen):
     #: sha256 of the profile that was checked; a cache whose fingerprint no
     #: longer matches the profile on disk is stale and must be re-run.
     profile_sha256: str | None = None
+    #: sha256 of the shell the check ran in -- the values of the env vars the
+    #: profile references, plus ``PATH`` for the tool lookups. A cache from a
+    #: different shell is stale too: unsetting ``WORK_ROOT`` changes no file.
+    env_sha256: str | None = None
 
     @model_validator(mode="after")
     def _unique_ids(self) -> PdkHealthReport:
