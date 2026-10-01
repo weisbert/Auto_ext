@@ -2158,3 +2158,55 @@ def test_not_asking_leaves_the_recipe_policy_in_charge(
         profile=_profile(workarea), dry_run=True,
     )
     assert read_record(_only_run_dir(root)).continue_on_lvs_fail is True
+
+
+def test_eda_tools_get_the_callers_environment_not_run_sh_s(
+    project_tools_config: Path,
+    workarea: Path,
+    mocks_on_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run.sh's _vendor PYTHONPATH / PYTHONSAFEPATH / Qt LD_LIBRARY_PATH are for
+    Auto_ext's own interpreter. A tool -- and any Python it starts -- must get
+    what the caller had (auto_ext.core.child_env), while the profile's
+    env_overrides still reach it."""
+
+    import subprocess
+
+    from auto_ext.tools import base as tools_base
+
+    monkeypatch.setenv("PYTHONPATH", "/inst/Auto_ext_pro:/inst/Auto_ext_pro/_vendor")
+    monkeypatch.setenv("PYTHONSAFEPATH", "1")
+    monkeypatch.setenv("AUTO_EXT_CALLER_PYTHONPATH", "")
+    monkeypatch.setenv("AUTO_EXT_CALLER_PYTHONPATH_SET", "0")
+    monkeypatch.setenv("AUTO_EXT_CALLER_PYTHONSAFEPATH", "")
+    monkeypatch.setenv("AUTO_EXT_CALLER_PYTHONSAFEPATH_SET", "0")
+
+    seen: list[dict[str, str]] = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(dict(kwargs.get("env") or {}))
+        return real_popen(argv, **kwargs)
+
+    monkeypatch.setattr(tools_base.subprocess, "Popen", recording_popen)
+
+    project, tasks = _load(project_tools_config)
+    summary = run_tasks(
+        project,
+        tasks,
+        stages=["strmout"],
+        auto_ext_root=tmp_path / "project_root",
+        workarea=workarea,
+        recipe=_recipe(),
+        profile=_profile(workarea),
+    )
+
+    assert summary.failed == 0
+    assert seen, "the strmout mock was never started"
+    for env in seen:
+        assert "PYTHONPATH" not in env
+        assert "PYTHONSAFEPATH" not in env
+        assert not [k for k in env if k.startswith("AUTO_EXT_CALLER_")]
+        assert env["WORK_ROOT"] == workarea.as_posix(), "profile env_overrides still apply"

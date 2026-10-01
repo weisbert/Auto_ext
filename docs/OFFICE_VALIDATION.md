@@ -63,7 +63,7 @@ cd <install>
 ```
 ImportError: .../PyQt5/QtCore.abi3.so: symbol _ZdaPvm, version Qt_5 not defined
 ```
-→ 是 CentOS 7 的 libstdc++ 太旧。`run.sh` 应该已经自动 prepend PyQt5 自带的 Qt5 lib。如果还是报错，确认 `<site-packages>/PyQt5/Qt5/lib/` 这个目录在不在；没有就 `bash scripts/install_offline.sh` 重装一次（默认 wheel 是带 bundled Qt5 的）。
+→ 是 CentOS 7 的 libstdc++ 太旧。`run.sh` 应该已经自动 prepend PyQt5 自带的 Qt5 lib。如果还是报错，确认系统 site-packages 下 `PyQt5/Qt5/lib/` 这个目录在不在。PyQt5 来自服务器的系统 Python，**不在** wheel 包里，`install_offline.sh` 不装它（它只往安装目录的 `_vendor/` 装其余依赖）。
 
 **如果 X11 forward 慢**：忍一下，先把功能验完，性能调优后面说。
 

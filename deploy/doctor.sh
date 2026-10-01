@@ -8,6 +8,9 @@
 #
 #   tier 1  render templates, dry-run, run the shipped test suite
 #                             needs Python >= 3.11 + the offline dependency wheels
+#                             (installed into <install>/_vendor by
+#                             scripts/install_offline.sh; probed the way
+#                             run.sh loads them)
 #   tier 2  really drive the flow            + si / strmout / calibre / qrc on PATH
 #   tier 3  GUI                              + an importable PyQt5 and a $DISPLAY
 #
@@ -54,7 +57,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --test|-t)    RUN_TESTS=1; shift ;;
     --python|-p)  FORCED_PY="${2:-}"; shift 2 ;;
-    -h|--help)    sed -n '3,36p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '3,40p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)            echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -147,13 +150,31 @@ for py in "${CANDIDATES[@]}"; do
   pyver="$(getval PY_VERSION "$out")"
   echo ">> $py  ($pyver)"
 
+  # --- where the offline dependencies come from ---
+  # run.sh loads them from <install>/_vendor when it exists. Absent means the
+  # pre-_vendor layout (deps in ~/.local or the system site) -- still usable,
+  # but each user has to install their own copy; one rerun of the installer
+  # moves them into the install dir. A _vendor built for another minor version
+  # is the thing to catch here: its compiled modules will not load.
+  vpy="$(getval VENDOR_PY "$out")"
+  pymm="$(printf '%s' "$pyver" | cut -d. -f1-2)"
+  if [[ "$(getval VENDOR "$out")" != "YES" ]]; then
+    printf '     %s _vendor  absent -- deps come from the interpreter site dirs (old layout);\n' "$(mark MISSING)"
+    printf '              bash scripts/install_offline.sh moves them into the install dir\n'
+  elif [[ -n "$vpy" && "$vpy" != "$pymm" ]]; then
+    printf '     %s _vendor  built for Python %s, this is %s -- its compiled deps will not load\n' "$(mark MISSING)" "$vpy" "$pymm"
+  else
+    printf '     %s _vendor  %s\n' "$(mark OK)" "${vpy:+built for Python $vpy}"
+  fi
+
   # --- offline dependencies (tier 1 gate) ---
   for k in jinja2 ruamel_yaml pydantic typer rich; do
     st="$(getval "DEP_$k" "$out")"
     human="$(getval "DEP_${k}_human" "$out")"
     detail="$(getval "DEP_${k}_detail" "$out")"
+    where="$(getval "DEP_${k}_where" "$out")"
     if [[ "$st" == "OK" ]]; then
-      printf '     %s dep %-14s %s\n' "$(mark OK)" "$human" "$detail"
+      printf '     %s dep %-14s %s%s\n' "$(mark OK)" "$human" "$detail" "${where:+  ($where)}"
     else
       printf '     %s dep %-14s MISSING\n' "$(mark MISSING)" "$human"
     fi
@@ -308,7 +329,11 @@ if (( RUN_TESTS )); then
   # may legitimately not be installed here. Distinguish "cannot answer" from
   # "answered no" -- reporting a missing test runner as a test failure would
   # send someone hunting a bug that does not exist.
-  if ! "$BEST" -c "import pytest" >/dev/null 2>&1; then
+  # Same sys.path as run.sh: pytest lives in <install>/_vendor, which the bare
+  # interpreter does not see.
+  _pp="${PYTHONPATH:-}"
+  if [[ -d "$ROOT/_vendor" ]]; then _pp="$ROOT/_vendor${_pp:+:$_pp}"; fi
+  if ! PYTHONPATH="$_pp" "$BEST" -c "import pytest" >/dev/null 2>&1; then
     echo
     echo "CANNOT SELF-TEST: pytest is not installed for $BEST." >&2
     echo "  The shipped suite is the strongest evidence available on a box with no" >&2

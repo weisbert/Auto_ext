@@ -48,6 +48,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from auto_ext.core.child_env import child_env
 from auto_ext.core.progress import CancelToken
 
 #: SIGTERM → SIGKILL grace window when :class:`CancelToken` fires mid-run.
@@ -239,6 +240,10 @@ def run_subprocess(
     without output during parasitic solve), making cancel unresponsive.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Every external tool goes through here. The runner already built ``env``
+    # with child_env(); applying it again is a no-op then, and covers any other
+    # caller that handed in a raw copy of os.environ.
+    env = child_env(env)
     # Resolve argv[0] via PATH ourselves so .bat shims work on Windows
     # (CreateProcess alone only resolves .exe) and so "not found" fails
     # with a readable log entry instead of WinError 2.

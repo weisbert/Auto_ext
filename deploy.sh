@@ -39,6 +39,12 @@
 #   * wheels/   the offline dependency bundle -- expensive to move across the
 #               air gap and NOT part of the code package (it is gitignored, so
 #               `git archive` structurally cannot ship it)
+#     _vendor/  those wheels INSTALLED (scripts/install_offline.sh, pip
+#               --target). Built on this box, gitignored like wheels/, and what
+#               run.sh imports from -- a code deploy must never cost you a
+#               reinstall. (_vendor.new / _vendor.old, the installer's
+#               transient build and swap dirs, and their <name>.<pid> asides
+#               on NFS, are left alone too.)
 #   * runs/     logs/   run results and logs
 #   * config/   recipes/   your site configuration. These two ARE shipped by the
 #               package, as a starting point for a fresh box, but an existing
@@ -177,16 +183,20 @@ esac
 mkdir -p "$INCOMING" "$STAGING" "$BACKUPS"
 
 # --- what the swap must not move --------------------------------------------
-# Always .deploy plus the four data directories; plus anything the operator
+# Always .deploy plus the built-in data directories; plus anything the operator
 # listed. One name per line in .deploy/preserve.list, '#' starts a comment.
 #
-# wheels/ is built in rather than left to the list because it is the one
+# wheels/ is built in rather than left to the list because it is a
 # directory that CANNOT come from a code package: it is gitignored, so
 # `git archive` cannot see it. Losing it means re-crossing the air gap with
 # ~40 MB of wheels to get back to a working install.
 #
+# _vendor/ is built in for the same reason: it is wheels/ after
+# install_offline.sh, also gitignored, and moving it into a backup would leave
+# run.sh with no dependencies until someone reinstalls.
+#
 # runs/ and logs/ are built in because they are the whole output of the tool.
-PRESERVE=(".deploy" "wheels" "runs" "logs")
+PRESERVE=(".deploy" "wheels" "_vendor" "runs" "logs")
 
 # Shipped by the package, but yours wins. These carry site configuration --
 # workspace.yaml, cells.yaml, profiles/, your recipes -- which is exactly the
@@ -250,9 +260,22 @@ looks_like_run_data() {
   return 1
 }
 
+# install_offline.sh's transient dirs: a build in progress (_vendor.new) or
+# the outgoing tree mid-swap (_vendor.old) -- which the installer's next run
+# restores as _vendor if the swap was interrupted -- and the <dir>.<pid> asides
+# it renames them to when NFS will not let them be deleted yet. Not listed in
+# PRESERVE, so they do not clutter the "kept as-is" line on every deploy.
+is_vendor_scratch() {
+  case "$1" in
+    _vendor.new|_vendor.new.*|_vendor.old|_vendor.old.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Anything the swap must leave exactly where it is.
 is_untouchable() {
   if is_preserved "$1"; then return 0; fi
+  if is_vendor_scratch "$1"; then return 0; fi
   if is_payload   "$1"; then return 0; fi
   if is_seed_only "$1" && [[ -e "$TARGET/$1" ]]; then return 0; fi
   if looks_like_run_data "$1"; then return 0; fi

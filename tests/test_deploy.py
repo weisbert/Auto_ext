@@ -407,6 +407,58 @@ def test_probe_runs_and_emits_a_tier() -> None:
     assert "IMP_core_runner=OK" in text, "the probe cannot import the package it ships with"
 
 
+def test_probe_loads_dependencies_from_vendor_like_run_sh(tmp_path: Path) -> None:
+    """The probe starts as a bare interpreter, but run.sh imports from _vendor.
+
+    Without mirroring that, a box whose deps live only in _vendor reads as
+    "offline dependencies not installed" -- and an old ~/.local copy would be
+    reported in place of what run.sh actually loads. A planted jinja2 with an
+    impossible version proves which one the probe saw.
+    """
+
+    inst = tmp_path / "inst"
+    (inst / "deploy").mkdir(parents=True)
+    shutil.copy2(PROBE, inst / "deploy" / "_env_check.py")
+    (inst / "_vendor" / "jinja2").mkdir(parents=True)
+    (inst / "_vendor" / "jinja2" / "__init__.py").write_text(
+        '__version__ = "0.0.0-vendored"\n', encoding="utf-8"
+    )
+    (inst / "_vendor" / "AUTO_EXT_VENDOR.txt").write_text(
+        "# test\npython_version: 3.11\n", encoding="utf-8"
+    )
+    out = subprocess.run(
+        [sys.executable, str(inst / "deploy" / "_env_check.py")],
+        cwd=str(tmp_path),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=120,
+    )
+    lines = dict(
+        line.split("=", 1) for line in out.stdout.decode("ascii").splitlines() if "=" in line
+    )
+    assert lines["VENDOR"] == "YES"
+    assert lines["VENDOR_PY"] == "3.11"
+    assert lines["DEP_jinja2_detail"] == "0.0.0-vendored"
+    assert lines["DEP_jinja2_where"] == "_vendor"
+
+
+def test_probe_without_vendor_says_so() -> None:
+    """The checkout has no _vendor: the old layout must still probe as before."""
+
+    if (REPO / "_vendor").is_dir():
+        pytest.skip("this install has a _vendor/ -- covered by the test above")
+    out = subprocess.run(
+        [sys.executable, str(PROBE)],
+        cwd=str(REPO),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=120,
+    )
+    text = out.stdout.decode("ascii")
+    assert "VENDOR=NO" in text
+    assert "DEP_jinja2=OK" in text
+
+
 # ---------------------------------------------------------------------------
 # 5. the shell scripts themselves
 # ---------------------------------------------------------------------------
@@ -554,6 +606,10 @@ def _make_install(tmp_path: Path) -> Path:
     # the operator's own material
     (box / "wheels").mkdir()
     (box / "wheels" / "pydantic-2.13.3.whl").write_bytes(b"PK\x03\x04 pretend")
+    # ...and those wheels installed, by scripts/install_offline.sh
+    (box / "_vendor" / "pydantic").mkdir(parents=True)
+    (box / "_vendor" / "pydantic" / "__init__.py").write_text("# vendored\n", encoding="utf-8")
+    (box / "_vendor" / "AUTO_EXT_VENDOR.txt").write_text("python_version: 3.11\n", encoding="utf-8")
     (box / "logs").mkdir()
     (box / "logs" / "si.log").write_text("old log\n", encoding="utf-8")
     (box / "runs" / "20260822T101500_demo").mkdir(parents=True)
@@ -648,6 +704,10 @@ def test_a_deploy_swaps_the_code_and_keeps_every_kind_of_user_data(tmp_path: Pat
 
     # every kind of user data survived
     assert (box / "wheels" / "pydantic-2.13.3.whl").exists(), "wheels are expensive to re-cross the gap"
+    assert (box / "_vendor" / "pydantic" / "__init__.py").exists(), (
+        "a code deploy must not cost a reinstall of the dependencies"
+    )
+    assert (box / "_vendor" / "AUTO_EXT_VENDOR.txt").exists()
     assert (box / "logs" / "si.log").read_text(encoding="utf-8") == "old log\n"
     assert (box / "runs" / "20260822T101500_demo" / "run.json").exists()
 
@@ -658,6 +718,50 @@ def test_a_deploy_swaps_the_code_and_keeps_every_kind_of_user_data(tmp_path: Pat
     seeded = box / ".deploy" / "seed" / "config" / "workspace.yaml"
     assert seeded.read_text(encoding="utf-8") == "site: PACKAGE DEFAULT\n"
     assert not (box / "recipes" / "rc-typical-55c.yaml").exists()
+
+
+def test_the_installers_scratch_dirs_are_neither_moved_nor_reported(tmp_path: Path) -> None:
+    """``_vendor.old`` mid-swap is the last good dependency tree: install_offline.sh
+    restores it on its next run, so a deploy in between must leave it in place --
+    and must not shout "YOUR OWN FILES WERE MOVED" about either scratch dir."""
+
+    box = _make_install(tmp_path)
+    # _vendor.old.<pid>: the aside install_offline.sh renames the old tree to
+    # when NFS will not let it be deleted (a running GUI has its .so mapped).
+    scratch = ("_vendor.old", "_vendor.new", "_vendor.old.4242", "_vendor.new.4242")
+    for name in scratch:
+        (box / name / "jinja2").mkdir(parents=True)
+        (box / name / "jinja2" / "__init__.py").write_text("# x\n", encoding="utf-8")
+    shutil.copy2(_make_package(tmp_path), box)
+
+    proc = _deploy(box)
+    out = proc.stdout.decode("utf-8", "replace")
+    assert proc.returncode == 0, out
+    for name in scratch:
+        assert (box / name / "jinja2" / "__init__.py").exists(), name
+    assert "YOUR OWN FILES WERE MOVED" not in out
+    assert "_vendor" in out.split("kept as-is:", 1)[1].splitlines()[0]
+
+
+def test_vendor_dirs_are_gitignored() -> None:
+    """``_vendor/`` is built on the server; it must never be committable, which
+    also means ``git archive`` can never put it in a package."""
+
+    _require_checkout()
+    paths = [
+        "_vendor/jinja2/__init__.py",
+        "_vendor.new/x.py",
+        "_vendor.old/x.py",
+        "_vendor.old.4242/x.py",  # install_offline.sh's NFS aside
+    ]
+    # Anchored to the root: a module or package of that name inside the code
+    # must stay committable.
+    not_ignored = ["auto_ext/_vendor.py", "auto_ext/_vendor/__init__.py", "tests/_vendor.old/x.py"]
+    proc = _git(["check-ignore", "--no-index", "--", *paths, *not_ignored])
+    ignored = set(proc.stdout.decode().split())
+    assert ignored == set(paths), (
+        f"not ignored: {sorted(set(paths) - ignored)}; wrongly ignored: {sorted(ignored - set(paths))}"
+    )
 
 
 def test_a_fresh_box_is_seeded_with_the_packages_config(tmp_path: Path) -> None:

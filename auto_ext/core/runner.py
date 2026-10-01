@@ -109,6 +109,7 @@ from typing import Any
 from auto_ext import __version__ as AUTO_EXT_VERSION
 from auto_ext.catalog import Catalog, builtin_catalog
 from auto_ext.core import render
+from auto_ext.core.child_env import child_env
 from auto_ext.core.config import ProjectConfig, TaskConfig
 from auto_ext.core.env import (
     EnvResolution,
@@ -463,7 +464,11 @@ def run_tasks(
         tasks, project, resolved_env, parallel=parallel, pipeline=pipeline
     )
 
-    subprocess_env: dict[str, str] = {**os.environ, **env_overrides}
+    # child_env() first: run.sh's PYTHONPATH (_vendor), PYTHONSAFEPATH and Qt
+    # LD_LIBRARY_PATH are for this interpreter, not for si/calibre/qrc and
+    # whatever Python they start. Overrides go on top, so a profile that sets
+    # one of those deliberately still wins.
+    subprocess_env: dict[str, str] = {**child_env(os.environ), **env_overrides}
 
     tool_instances: dict[str, Tool] = {name: cls() for name, cls in _TOOL_REGISTRY.items()}
     tool_paths = _resolve_tool_paths(tool_instances, subprocess_env)

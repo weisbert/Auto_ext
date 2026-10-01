@@ -63,6 +63,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from auto_ext.core.child_env import child_env, inherited_child_env
 from auto_ext.core.errors import AutoExtError
 from auto_ext.model.run import RunRecord, StageRecord, StageStatus
 
@@ -250,7 +251,9 @@ def handoff_env(
     interactive session pointed at the same data.
     """
 
-    env = dict(os.environ if environ is None else environ)
+    # child_env(): Calibre Interactive must not inherit run.sh's _vendor
+    # PYTHONPATH or the PyQt5 Qt5 LD_LIBRARY_PATH meant for Auto_ext itself.
+    env = child_env(os.environ if environ is None else environ)
     for binding in record.env:
         if binding.source == "missing":
             continue
@@ -442,7 +445,7 @@ def plan_calibre_handoff(
         return HandoffPlan(
             argv=(),
             cwd=None,
-            env=dict(os.environ if environ is None else environ),
+            env=child_env(os.environ if environ is None else environ),
             runset=None,
             stage_key=stage.key if stage is not None else None,
             executable=executable or CALIBRE_EXECUTABLE,
@@ -562,7 +565,7 @@ def launch_detached(
         proc = subprocess.Popen(
             list(argv),
             cwd=str(cwd),
-            env=dict(env) if env is not None else None,
+            env=child_env(env) if env is not None else inherited_child_env(),
             **detached_popen_kwargs(),
         )
     except OSError as exc:

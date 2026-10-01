@@ -46,6 +46,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from auto_ext.core.child_env import inherited_child_env
 from auto_ext.core.handoff import detached_popen_kwargs
 
 __all__ = [
@@ -195,7 +196,11 @@ def open_in_os(path: Path, *, settle_s: float = LAUNCH_SETTLE_S) -> None:
         tried.append(launcher[0])
         try:
             process = subprocess.Popen(
-                [*launcher, str(path)], **detached_popen_kwargs()
+                [*launcher, str(path)],
+                # Not os.environ as-is: run.sh's _vendor PYTHONPATH and Qt
+                # LD_LIBRARY_PATH would reach whatever viewer xdg-open picks.
+                env=inherited_child_env(),
+                **detached_popen_kwargs(),
             )
         except FileNotFoundError:
             # The launcher binary itself is missing -- distinct from the

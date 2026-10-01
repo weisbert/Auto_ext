@@ -41,11 +41,12 @@ Two zones, and only one direction of travel:
 以及 `git archive` **实际吐出来的字节**里有没有 `\r`），任一不过就拒绝打包。
 `tests/test_deploy.py` 在本机再验一遍。
 
-**3. 红区那边的这四样东西，换装永远不碰**：
+**3. 红区那边的这些东西，换装永远不碰**：
 
 | | 为什么 |
 |---|---|
 | `wheels/` | 离线依赖包，过一次气隙很贵，而且它是 gitignore 的 —— `git archive` 结构上就装不进代码包 |
+| `_vendor/` | `wheels/` **装好之后**的样子（`install_offline.sh` 用 `pip --target` 装在安装目录里，不进 `~/.local`）。同样 gitignore，`run.sh` 从这里 import。安装器的临时目录 `_vendor.new/` `_vendor.old/`（含 NFS 上改名出来的 `_vendor.old.<pid>/`）也不碰 |
 | `runs/` `logs/` | 你的运行结果 |
 | `config/` `recipes/` | 站点配置。这两个**包里有**（给新机器起步用），但已有的永远不覆盖，包里那份挪去 `.deploy/seed/` 供你 diff |
 | 任何含 `run.json` 的目录 | 你把 runs 根指到别处的情况 |
@@ -67,6 +68,9 @@ powershell -ExecutionPolicy Bypass -File deploy\pack.ps1 -WithWheels
 tar -xzf Auto_ext_pro_wheels_<n>.tar.gz -C <install>
 bash scripts/install_offline.sh
 ```
+
+依赖装进 `<install>/_vendor/`（每次重跑都整体重建、验过才换上），不进 `~/.local`。
+`_vendor/` 只在红区那台机器上生成，两个包里都没有它。
 
 ## 回滚
 

@@ -288,6 +288,8 @@ OK  self-test passed -- the package landed intact and this interpreter runs it.
 |---|---|---|
 | `VERDICT: no interpreter on this box can run Auto_ext.` | 没有解释器能用 | ① `ma python/3.11.4` 再跑；② `bash deploy/doctor.sh --python /abs/path`；③ 提示里如果说 `offline dependencies not installed` → `bash scripts/install_offline.sh` |
 | `dep ... MISSING` | wheels 没装 | `bash scripts/install_offline.sh` |
+| `-- _vendor  absent` | 依赖还在旧位置（`~/.local`）或根本没装 | `bash scripts/install_offline.sh`，装进安装目录 |
+| `-- _vendor  built for Python 3.11, this is 3.x` | 这个解释器不是装 `_vendor` 用的那个 | 用 3.11（`--python` / `setenv PYTHON ...`）；换了 Python 版本就重跑 `install_offline.sh` |
 | `CANNOT SELF-TEST: pytest is not installed` | wheels 包里没带 dev 依赖 | 装本身是好的（上面的结论仍然成立）。想要单测就在黄区 `python scripts\download_wheels.py --include-dev` 重打 wheels 包 |
 | `FAIL  self-test failed.` | 单测有红 | **别继续**，这个安装的任何结果都不可信。先重跑 `bash deploy.sh` 重装；仍然红就把整段输出贴回来 |
 | 满屏 `?` 或乱码 | 这台机器 `LANG` 是 `C` | 不影响判据（判据行全是 ASCII）。想看清就 `setenv LANG en_US.UTF-8` |
@@ -330,7 +332,19 @@ bash scripts/install_offline.sh
 三步之后才以 `staged package missing auto_ext/core/runner.py` 失败，那个报错看起来
 像「代码包坏了」。
 
-装好之后 `wheels/` 就留在安装目录里，以后每次 `deploy.sh` 都**不碰它**。
+`install_offline.sh` 把依赖装进 **`<install>/_vendor/`**（`pip install --target`），
+**不进 `~/.local`**：删掉安装目录依赖就跟着没了，别的 `python3.11` 程序也看不见它们。
+`run.sh` 把 `_vendor/` 放在 `PYTHONPATH` 上（排在 `~/.local` 前面）——只给 Auto_ext 自己的
+解释器用：它启动的 si / calibre / qrc / jivaro / Calibre Interactive / xdg-open 拿到的是
+你原来的 `PYTHONPATH` / `PYTHONSAFEPATH` / `LD_LIBRARY_PATH`（`auto_ext/core/child_env.py`），
+EDA 工具里起的 Python 看不到 `_vendor/`。每次重跑都是在
+`_vendor.new/` 里从头重建、smoke test 过了才换上，失败时原来的 `_vendor/` 一个字节不动。
+
+以前的版本装在 `~/.local` 里的那份**不会被自动删**（那是你的目录）；安装器会列出
+被 `_vendor/` 盖住的包，并打印对应的 `python3.11 -m pip uninstall -y ...`，要不要删你决定。
+
+装好之后 `wheels/` 和 `_vendor/` 都留在安装目录里，以后每次 `deploy.sh` 都**不碰它们**
+（安装器的临时目录 `_vendor.new/`、`_vendor.old/`，以及 NFS 上删不掉时改名出来的 `_vendor.old.<pid>/` 也不碰；下次重跑会清掉它们）。
 
 ---
 
@@ -360,7 +374,8 @@ mv .deploy/backups/<时间戳>/* .
 
 **没写、也永远不会写**：
 
-* `<install>/wheels/`、`runs/`、`logs/` —— 换装永不触碰；
+* `<install>/wheels/`、`_vendor/`、`runs/`、`logs/` —— 换装永不触碰（`_vendor/` 只由
+  `scripts/install_offline.sh` 写）；
 * `<install>/config/`、`recipes/` —— 已存在就永不覆盖，包里那份挪去 `.deploy/seed/`；
 * 任何含 `run.json` 的目录（你把 runs 根指到别处的情况）；
 * `/tmp`、`/opt`、`/var` —— 一个都不碰，连临时文件都在 `.deploy/tmp/` 里。

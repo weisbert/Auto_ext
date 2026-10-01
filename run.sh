@@ -11,6 +11,9 @@
 #    lists pip packages or cats the .pth file). Instead this script puts
 #    the project root on PYTHONPATH so `python -m auto_ext` finds the
 #    package without leaving any trace outside this directory.
+#  - The third-party dependencies are not in ~/.local either: they live in
+#    ./_vendor (built by scripts/install_offline.sh), which goes on
+#    PYTHONPATH right after the project root whenever it exists.
 #
 # Env overrides:
 #  PYTHON=/abs/path/to/python3.11   force a specific interpreter.
@@ -142,6 +145,46 @@ for _auto_ext_arg in "$@"; do
 done
 set -- ${_auto_ext_rewritten[@]+"${_auto_ext_rewritten[@]}"}
 
+# ---- PYTHONPATH: the package, then the offline dependencies -----------------
+#
+# scripts/install_offline.sh installs the wheel bundle into ./_vendor
+# (pip --target), not into ~/.local. PYTHONPATH entries come before the user
+# site on sys.path, so _vendor also wins over any stale copy an older
+# installer left in ~/.local. _vendor is a PYTHONPATH entry, not a site dir:
+# .pth files inside it are NOT processed (install_offline.sh checks for them).
+#
+# No _vendor -- the Windows dev .venv, or a box not yet reinstalled -- leaves
+# PYTHONPATH exactly as it always was, and the deps come from wherever the
+# interpreter finds them. Composed here, before the argv-debug exit, so
+# AUTO_EXT_ARGV_DEBUG shows it; exported below, before ANY interpreter starts
+# (the Qt probe, the `test` branch and the real run all see the same path).
+#
+# Everything this script changes in the environment -- PYTHONPATH here,
+# PYTHONSAFEPATH and the Qt LD_LIBRARY_PATH below -- is for Auto_ext's OWN
+# interpreter. The EDA tools, Calibre Interactive and xdg-open inherit the
+# environment, and any Python they start must not get _vendor ahead of its own
+# site-packages (nor a Qt app our Qt). So the caller's original values are
+# recorded first, as AUTO_EXT_CALLER_<VAR> + AUTO_EXT_CALLER_<VAR>_SET (1 = was
+# set, 0 = was unset), and auto_ext/core/child_env.py puts them back for every
+# child. Keep this list in step with child_env.RESTORED_VARS (tests check).
+for _auto_ext_var in PYTHONPATH PYTHONSAFEPATH LD_LIBRARY_PATH; do
+    if [ -n "${!_auto_ext_var+x}" ]; then
+        export "AUTO_EXT_CALLER_${_auto_ext_var}=${!_auto_ext_var}"
+        export "AUTO_EXT_CALLER_${_auto_ext_var}_SET=1"
+    else
+        export "AUTO_EXT_CALLER_${_auto_ext_var}="
+        export "AUTO_EXT_CALLER_${_auto_ext_var}_SET=0"
+    fi
+done
+
+vendor="${here}/_vendor"
+vendor_marker="${vendor}/AUTO_EXT_VENDOR.txt"
+if [ -d "${vendor}" ]; then
+    auto_ext_pythonpath="${here}:${vendor}${PYTHONPATH:+:${PYTHONPATH}}"
+else
+    auto_ext_pythonpath="${here}${PYTHONPATH:+:${PYTHONPATH}}"
+fi
+
 # Escape hatch for "what did run.sh actually pass?" -- the question this
 # rewriting exists to answer, asked on a box with no debugger. Prints and
 # exits before any interpreter is picked, so it works even on a broken install.
@@ -149,6 +192,7 @@ if [ -n "${AUTO_EXT_ARGV_DEBUG:-}" ]; then
     printf 'here=%s\n' "${here}"
     printf 'workarea=%s\n' "${workarea}"
     printf 'invocation_cwd=%s\n' "${invocation_cwd}"
+    printf 'pythonpath=%s\n' "${auto_ext_pythonpath}"
     if [ "$#" -gt 0 ]; then
         printf 'argv=%s\n' "$@"
     fi
@@ -178,6 +222,25 @@ pick_python() {
 }
 py="$(pick_python)"
 
+export PYTHONPATH="${auto_ext_pythonpath}"
+
+# _vendor holds cp311 extension modules (pydantic_core, markupsafe): under any
+# other minor version they fail to import, with an error that names the module
+# rather than the cause. Say the cause up front -- but do not die: a pure-Python
+# subcommand or a deliberate experiment may still be worth running.
+if [ -f "${vendor_marker}" ]; then
+    vendor_py="$(sed -n 's/^python_version:[[:space:]]*//p' "${vendor_marker}" 2>/dev/null | head -n 1 | tr -d '[:space:]' || true)"
+    running_py="$("${py}" -S -c 'import sys; print("%d.%d" % (sys.version_info[0], sys.version_info[1]))' 2>/dev/null || true)"
+    if [ -n "${vendor_py}" ] && [ -n "${running_py}" ] && [ "${vendor_py}" != "${running_py}" ]; then
+        echo "[run.sh] WARN: _vendor/ was built for Python ${vendor_py}, but ${py} is Python ${running_py}." >&2
+        echo "[run.sh] WARN: its compiled dependencies (pydantic_core, markupsafe) will not import." >&2
+        echo "[run.sh] WARN: use PYTHON=/abs/path/to/python${vendor_py}, or rebuild: bash scripts/install_offline.sh" >&2
+    fi
+elif [ -d "${vendor}" ]; then
+    echo "[run.sh] WARN: _vendor/ has no AUTO_EXT_VENDOR.txt -- not built by install_offline.sh, or" >&2
+    echo "[run.sh] WARN: an interrupted copy. Rebuild it: bash scripts/install_offline.sh" >&2
+fi
+
 # GUI entry (and `test`, since pytest-qt also imports PyQt5 at startup)
 # needs PyQt5's bundled Qt5 on LD_LIBRARY_PATH. On CentOS 7 class
 # servers, /usr/lib64/libstdc++.so.6 tops out at GLIBCXX_3.4.19 (GCC
@@ -189,7 +252,9 @@ py="$(pick_python)"
 # fixes the import.
 # Scope to subcommands that actually load Qt so non-GUI / non-test
 # runs do not contaminate LD_LIBRARY_PATH inherited by EDA
-# subprocesses. Safe-by-default.
+# subprocesses. Safe-by-default. (And for `gui`, which does start EDA
+# tools, auto_ext/core/child_env.py hands every child the caller's original
+# LD_LIBRARY_PATH -- recorded above -- not this one.)
 needs_qt() {
     case "${1:-}" in
         gui|gui-*|test) return 0 ;;
@@ -205,13 +270,12 @@ if needs_qt "$@"; then
     fi
 fi
 
-export PYTHONPATH="${here}${PYTHONPATH:+:${PYTHONPATH}}"
-
 # Python 3.11+: prevent Python from prepending cwd / script-dir to sys.path.
 # Without this, `cd workarea && python -m auto_ext` would shadow our package
 # with any same-named auto_ext/ that happens to live at workarea root (a real
 # incident: a user had a separate, unrelated `auto_ext/` project there).
 # PYTHONPATH still works -- only the implicit cwd/script-dir entry is dropped.
+# Children get the caller's own PYTHONSAFEPATH back (child_env.py).
 export PYTHONSAFEPATH=1
 
 cd "${workarea}"

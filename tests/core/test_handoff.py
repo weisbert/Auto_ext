@@ -676,8 +676,16 @@ def test_launch_detached_passes_argv_as_a_list_not_a_command_string(
 
 
 def test_launch_detached_inherits_the_environment_when_none_is_given(
-    fake_popen: type[_FakePopen], workarea: Path
+    fake_popen: type[_FakePopen], workarea: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Plain inherit is the no-run.sh case. Under `./run.sh test` (doctor.sh
+    # --test) the AUTO_EXT_CALLER_* markers are real and the child gets a
+    # cleaned copy instead -- tests/core/test_child_env.py covers that side.
+    import os
+
+    for key in list(os.environ):
+        if key.startswith("AUTO_EXT_CALLER_"):
+            monkeypatch.delenv(key)
     launch_detached(["calibre"], workarea)
     assert fake_popen.calls[0][1]["env"] is None
 

@@ -175,6 +175,9 @@ $hash = Write-Sha256Sidecar $tarPath
 # Not part of the code package and structurally unable to be: wheels/ is
 # gitignored, so git archive cannot see it. Packed here only so the operator can
 # move it across the gap with the same integrity guarantee as the code.
+# _vendor/ (the wheels INSTALLED, by scripts/install_offline.sh on the far
+# side) is in neither package: it is gitignored too, and the tar below names
+# wheels/ alone. It is built on the box it runs on, never shipped.
 $wheelTarName = $null
 $wheelHash    = $null
 if ($WithWheels) {

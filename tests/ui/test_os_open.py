@@ -235,7 +235,11 @@ def test_detach_flags_come_from_the_shared_helper(
     monkeypatch.setattr(os_open.subprocess, "Popen", popen)
 
     open_in_os(target)
-    assert popen.calls[0][1] == detached_popen_kwargs()
+    kwargs = dict(popen.calls[0][1])
+    # ``env`` is the child environment (auto_ext.core.child_env), not a detach
+    # flag; it is checked in tests/core/test_child_env.py.
+    kwargs.pop("env", None)
+    assert kwargs == detached_popen_kwargs()
 
 
 # ---- launcher fallback -----------------------------------------------------

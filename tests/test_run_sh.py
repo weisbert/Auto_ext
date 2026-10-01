@@ -287,3 +287,169 @@ def test_a_dangling_path_flag_is_left_for_the_cli_to_report(tmp_path: Path) -> N
 @bash_required
 def test_no_arguments_is_not_an_error(tmp_path: Path) -> None:
     assert _argv(tmp_path) == []
+
+
+# ---- _vendor: the offline dependencies on PYTHONPATH ----------------------
+#
+# scripts/install_offline.sh installs the wheel bundle into <install>/_vendor
+# (pip --target) instead of ~/.local, and run.sh is what puts it on sys.path.
+# These tests run a COPY of run.sh from a scratch install dir, so a _vendor can
+# be made to exist or not without touching the checkout. Nothing here needs a
+# real interpreter: the argv-debug hook prints the composed PYTHONPATH, and a
+# stand-in "python" reports the one it was actually started with.
+
+#: Answers run.sh's version probe from $FAKE_PY_VERSION, fails the PyQt5 probe
+#: (no Qt here), and otherwise prints the PYTHONPATH and argv it received.
+FAKE_PYTHON = """#!/bin/sh
+case "$*" in
+  *version_info*) echo "${FAKE_PY_VERSION:-3.11}"; exit 0 ;;
+  *PyQt5*) exit 1 ;;
+esac
+echo "FAKE_PYTHONPATH=$PYTHONPATH"
+echo "FAKE_ARGS=$*"
+echo "FAKE_CALLER_PYTHONPATH=${AUTO_EXT_CALLER_PYTHONPATH_SET:-absent}:${AUTO_EXT_CALLER_PYTHONPATH:-}"
+echo "FAKE_CALLER_PYTHONSAFEPATH=${AUTO_EXT_CALLER_PYTHONSAFEPATH_SET:-absent}:${AUTO_EXT_CALLER_PYTHONSAFEPATH:-}"
+echo "FAKE_CALLER_LD_LIBRARY_PATH=${AUTO_EXT_CALLER_LD_LIBRARY_PATH_SET:-absent}:${AUTO_EXT_CALLER_LD_LIBRARY_PATH:-}"
+"""
+
+
+def _install(tmp_path: Path, *, vendor: bool, marker: str | None = "3.11") -> Path:
+    """``<tmp>/inst/run.sh``, optionally with ``_vendor/`` and its marker."""
+
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    shutil.copy2(RUN_SH, inst / "run.sh")
+    if vendor:
+        (inst / "_vendor").mkdir()
+        if marker is not None:
+            (inst / "_vendor" / "AUTO_EXT_VENDOR.txt").write_text(
+                "# test\npython_target: cp311\n"
+                f"python_version: {marker}\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+    return inst
+
+
+def _launch(
+    inst: Path, *args: str, debug: bool = False, **env: str
+) -> subprocess.CompletedProcess:
+    fake = inst / "fakepy"
+    if not fake.exists():
+        fake.write_text(FAKE_PYTHON, encoding="utf-8", newline="\n")
+        fake.chmod(0o755)
+    full = {"PATH": "/usr/bin:/bin", "PYTHON": fake.as_posix(), **env}
+    if debug:
+        full["AUTO_EXT_ARGV_DEBUG"] = "1"
+    return subprocess.run(
+        ["bash", str(inst / "run.sh"), *args],
+        cwd=inst,
+        env=full,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _value(stdout: str, key: str) -> str:
+    for line in stdout.splitlines():
+        if line.startswith(key + "="):
+            return line[len(key) + 1 :]
+    raise AssertionError(f"no {key}= line in:\n{stdout}")
+
+
+@bash_required
+def test_vendor_goes_on_pythonpath_right_after_the_package(tmp_path: Path) -> None:
+    out = _launch(_install(tmp_path, vendor=True), "check-env", debug=True).stdout
+    here = _value(out, "here")
+    assert _value(out, "pythonpath") == f"{here}:{here}/_vendor"
+
+
+@bash_required
+def test_a_callers_pythonpath_still_comes_last(tmp_path: Path) -> None:
+    out = _launch(
+        _install(tmp_path, vendor=True), "check-env", debug=True, PYTHONPATH="/opt/x"
+    ).stdout
+    here = _value(out, "here")
+    assert _value(out, "pythonpath") == f"{here}:{here}/_vendor:/opt/x"
+
+
+@bash_required
+def test_no_vendor_leaves_pythonpath_exactly_as_before(tmp_path: Path) -> None:
+    """The Windows dev .venv, and any box not yet reinstalled, has no _vendor."""
+
+    inst = _install(tmp_path, vendor=False)
+    out = _launch(inst, "check-env", debug=True).stdout
+    here = _value(out, "here")
+    assert _value(out, "pythonpath") == here
+    out = _launch(inst, "check-env", debug=True, PYTHONPATH="/opt/x").stdout
+    assert _value(out, "pythonpath") == f"{here}:/opt/x"
+
+
+@bash_required
+@pytest.mark.parametrize(
+    "args", [["check-env"], ["test"], ["test", "-k", "x"], ["gui"]], ids=" ".join
+)
+def test_every_launch_path_hands_the_interpreter_the_vendor(
+    tmp_path: Path, args: list[str]
+) -> None:
+    """Not just the debug print: the PYTHONPATH the interpreter really gets.
+
+    ``test`` has its own ``exec`` branch and ``gui``/``test`` run the Qt probe
+    first, so each is checked separately -- a path that skips the export would
+    run pytest (which lives in _vendor) with no pytest.
+    """
+
+    inst = _install(tmp_path, vendor=True)
+    here = _value(_launch(inst, debug=True).stdout, "here")
+    proc = _launch(inst, *args)
+    assert _value(proc.stdout, "FAKE_PYTHONPATH") == f"{here}:{here}/_vendor"
+
+
+@bash_required
+def test_a_vendor_built_for_another_python_warns_and_still_runs(tmp_path: Path) -> None:
+    proc = _launch(_install(tmp_path, vendor=True), "check-env", FAKE_PY_VERSION="3.12")
+    assert "_vendor/ was built for Python 3.11" in proc.stderr
+    assert "is Python 3.12" in proc.stderr
+    assert _value(proc.stdout, "FAKE_ARGS") == "-m auto_ext check-env", "warn, never die"
+
+
+@bash_required
+def test_a_matching_vendor_is_silent(tmp_path: Path) -> None:
+    proc = _launch(_install(tmp_path, vendor=True), "check-env", FAKE_PY_VERSION="3.11")
+    assert "_vendor" not in proc.stderr
+
+
+@bash_required
+def test_a_vendor_without_its_marker_is_called_out(tmp_path: Path) -> None:
+    """A hand-made or half-copied _vendor is not what install_offline.sh built."""
+
+    proc = _launch(_install(tmp_path, vendor=True, marker=None), "check-env")
+    assert "AUTO_EXT_VENDOR.txt" in proc.stderr
+    assert _value(proc.stdout, "FAKE_ARGS") == "-m auto_ext check-env"
+
+
+@bash_required
+def test_run_sh_records_what_the_caller_had_before_changing_it(tmp_path: Path) -> None:
+    """auto_ext.core.child_env restores these for every child (si, calibre,
+    xdg-open, ...), so they must be the caller's values, not run.sh's."""
+
+    proc = _launch(
+        _install(tmp_path, vendor=True),
+        "gui",
+        PYTHONPATH="/caller/pp",
+        LD_LIBRARY_PATH="/caller/lib",
+    )
+    here = _value(_launch(tmp_path / "inst", debug=True).stdout, "here")
+    assert _value(proc.stdout, "FAKE_PYTHONPATH") == f"{here}:{here}/_vendor:/caller/pp"
+    assert _value(proc.stdout, "FAKE_CALLER_PYTHONPATH") == "1:/caller/pp"
+    assert _value(proc.stdout, "FAKE_CALLER_LD_LIBRARY_PATH") == "1:/caller/lib"
+    # run.sh exports PYTHONSAFEPATH=1 for itself; the caller had none.
+    assert _value(proc.stdout, "FAKE_CALLER_PYTHONSAFEPATH") == "0:"
+
+
+@bash_required
+def test_an_unset_variable_is_recorded_as_unset_not_empty(tmp_path: Path) -> None:
+    proc = _launch(_install(tmp_path, vendor=True), "check-env")
+    assert _value(proc.stdout, "FAKE_CALLER_PYTHONPATH") == "0:"
+    assert _value(proc.stdout, "FAKE_CALLER_LD_LIBRARY_PATH") == "0:"

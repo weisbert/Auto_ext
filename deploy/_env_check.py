@@ -41,8 +41,9 @@ import sys
 MIN_PY = (3, 11)
 
 # Third-party runtime dependencies, installed from the offline wheel bundle by
-# scripts/install_offline.sh.  Unlike the sibling project (pure stdlib), Auto_ext
-# genuinely cannot reach tier 1 without these, so they gate it.
+# scripts/install_offline.sh into <install>/_vendor (see vendor_dir below).
+# Unlike the sibling project (pure stdlib), Auto_ext genuinely cannot reach
+# tier 1 without these, so they gate it.
 # Import name first, human name second -- ruamel.yaml differs from its wheel.
 DEPS = (
     ("jinja2", "Jinja2"),
@@ -82,6 +83,56 @@ def try_import(name):
     if not isinstance(ver, str):
         ver = str(ver)
     return True, ver
+
+
+def install_root():
+    """The install dir: this file lives at <install>/deploy/_env_check.py."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def vendor_dir(root):
+    """<install>/_vendor if it exists, else "".
+
+    scripts/install_offline.sh installs the wheel bundle there (pip --target),
+    and run.sh puts it on PYTHONPATH right after the install root. This probe
+    is started as a bare interpreter, so it has to add the same entry itself --
+    otherwise a correct install reads as "dependencies not installed", and an
+    old ~/.local copy would be reported in place of what run.sh really loads.
+    """
+    path = os.path.join(root, "_vendor")
+    return path if os.path.isdir(path) else ""
+
+
+def vendor_python(vendor):
+    """The `python_version:` install_offline.sh recorded for _vendor, or ""."""
+    marker = os.path.join(vendor, "AUTO_EXT_VENDOR.txt")
+    try:
+        handle = open(marker)
+    except (IOError, OSError):
+        return ""
+    try:
+        for line in handle:
+            if line.startswith("python_version:"):
+                return line.split(":", 1)[1].strip()
+    finally:
+        handle.close()
+    return ""
+
+
+def where_from(mod, vendor):
+    """'_vendor', 'user site' or 'site': which tree a module was loaded from."""
+    path = os.path.realpath(getattr(mod, "__file__", "") or "")
+    if vendor and path.startswith(os.path.realpath(vendor) + os.sep):
+        return "_vendor"
+    try:
+        import site
+
+        user = site.getusersitepackages()
+    except Exception:
+        user = ""
+    if user and path.startswith(os.path.realpath(user) + os.sep):
+        return "user site"
+    return "site"
 
 
 def which(name):
@@ -202,6 +253,15 @@ def probe_qt():
 def main():
     argv = sys.argv[1:]
 
+    # Same sys.path as run.sh: install root first, then _vendor. Inserted in
+    # reverse so the root ends up at index 0.
+    root = install_root()
+    vendor = vendor_dir(root)
+    if vendor and vendor not in sys.path:
+        sys.path.insert(0, vendor)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
     # Second pass: doctor.sh re-runs us with LD_LIBRARY_PATH pointing at the
     # wheel's bundled Qt5.  LD_LIBRARY_PATH is read by the dynamic loader at
     # process start, so this genuinely cannot be done in one process.
@@ -228,20 +288,23 @@ def main():
         return 1
     emit("PY_OK", "YES")
 
+    # --- where the dependencies are meant to come from ----------------------
+    emit("VENDOR", "YES" if vendor else "NO")
+    emit("VENDOR_PY", vendor_python(vendor) if vendor else "")
+
     # --- third-party dependencies (tier 1 gate) ----------------------------
     deps_found = {}
     for name, human in DEPS:
         ok, detail = try_import(name)
         deps_found[name] = ok
-        emit("DEP_" + name.replace(".", "_"), "OK" if ok else "MISSING")
-        emit("DEP_" + name.replace(".", "_") + "_detail", detail)
-        emit("DEP_" + name.replace(".", "_") + "_human", human)
+        key = "DEP_" + name.replace(".", "_")
+        emit(key, "OK" if ok else "MISSING")
+        emit(key + "_detail", detail)
+        emit(key + "_human", human)
+        emit(key + "_where", where_from(sys.modules.get(name), vendor) if ok else "")
 
     # --- the shipped package (the real test) -------------------------------
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     emit("INSTALL_ROOT", root)
-    if root not in sys.path:
-        sys.path.insert(0, root)
 
     runner_ok, runner_detail = try_import("auto_ext.core.runner")
     emit("IMP_core_runner", "OK" if runner_ok else "FAIL")

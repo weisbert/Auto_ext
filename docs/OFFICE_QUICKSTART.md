@@ -21,7 +21,7 @@
 
 - 已经在服务器上 `git clone` 过 Auto_ext，部署路径 `/data/RFIC3/<Project>/<Employee ID>/workarea/Auto_ext_pro/`
 - Python 3.11 已就位（`/software/public/python/3.11.4/bin/python3.11`）  <!-- redzone-scan-ok: shared tool mount path, not project/employee identity -->
-- 第三方依赖已通过 `scripts/install_offline.sh` 装到 `~/.local/lib/python3.11/site-packages/`
+- 第三方依赖已通过 `scripts/install_offline.sh` 装到安装目录里的 `_vendor/`（不是 `~/.local`；`run.sh` 自动把它加进 `PYTHONPATH`）
 - 你的 Cadence / PDK setup 脚本 `source` 之后，shell 里这几个 env var 有值：
   - `$WORK_ROOT`（你的 workarea 的父目录，extraction 输出落盘处）
   - `$WORK_ROOT2`（= workarea，EDA 的 cwd）
@@ -39,17 +39,23 @@
 
 ## 2. 验证 Python 依赖
 
-```bash
-python3.11 -c "import jinja2, ruamel.yaml, pydantic, typer, rich; print('deps ok')"
+```tcsh
+bash deploy/doctor.sh
 ```
 
-报 `ModuleNotFoundError` 就重跑一次 `bash scripts/install_offline.sh`。
+每个 `dep` 行应该是 `OK`，并标着 `(_vendor)`。依赖在 `_vendor/` 里，裸跑
+`python3.11 -c "import jinja2"` 是**找不到**的 —— 这是对的，只有 `./run.sh` 会把
+`_vendor/` 加进 `PYTHONPATH`。报 `MISSING` 或 `_vendor  absent` 就重跑一次
+`bash scripts/install_offline.sh`。
 
 ## 3. 跑已有单元测试做 sanity check
 
-```bash
-python3.11 -m pytest tests/ -v
+```tcsh
+./run.sh test
 ```
+
+（不要裸跑 `python3.11 -m pytest`：pytest 在 `_vendor/` 里，而且 `run.sh` 还负责 Qt 的
+`LD_LIBRARY_PATH`。）
 
 预期：当前 main（Phase 5.7 起）在 Windows 上为 **547 绿 + 10 skip**，Linux 上 symlink 测试能跑起来，会再多 9 个绿。
 
