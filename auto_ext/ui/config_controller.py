@@ -181,6 +181,10 @@ class ConfigController(QObject):
     #: Emitted on any user-visible failure (load error, mtime conflict,
     #: serialization failure, write failure). Payload is a human message.
     config_error = pyqtSignal(str)
+    #: ``(config_dir, message)`` -- :meth:`load` refused the directory. Also
+    #: reported on :attr:`config_error`; this one exists so a host can tell
+    #: "the project did not load" from a failed save or a skipped recipe.
+    load_failed = pyqtSignal(str, str)
     #: Emitted when :attr:`is_dirty` flips.
     dirty_changed = pyqtSignal(bool)
     #: Emitted with the :class:`PdkHealthReport` (or ``None``) whenever the
@@ -499,10 +503,12 @@ class ConfigController(QObject):
         cells_path = config_dir / CELLS_FILENAME
 
         if not workspace_path.is_file() and (config_dir / "project.yaml").is_file():
-            self.config_error.emit(
+            message = (
                 f"{config_dir} holds a v1 project.yaml but no {WORKSPACE_FILENAME}. "
                 f"Run `auto-ext migrate` on it, or create a new project from raws."
             )
+            self.config_error.emit(message)
+            self.load_failed.emit(str(config_dir), message)
             return
 
         try:
@@ -514,6 +520,7 @@ class ConfigController(QObject):
             profile = read_profile_yaml(profile_path)
         except (AutoExtError, OSError) as exc:
             self.config_error.emit(str(exc))
+            self.load_failed.emit(str(config_dir), str(exc))
             return
 
         recipes, recipe_paths, recipe_raw, broken = self._read_recipes(config_dir)

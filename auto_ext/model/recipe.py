@@ -94,6 +94,7 @@ from auto_ext.core.patch_models import (
 from auto_ext.model.common import (
     AsWritten,
     Base,
+    describe_validation_error,
     Frozen,
     Slug,
     Stage,
@@ -1217,7 +1218,7 @@ def load_recipe_with_raw(path: Path) -> tuple[Recipe, Any]:
     try:
         recipe = Recipe.model_validate(payload)
     except ValidationError as exc:
-        raise ConfigError(f"{path}: {exc}") from exc
+        raise ConfigError(f"{path}: {describe_validation_error(exc)}") from exc
     return recipe, data
 
 

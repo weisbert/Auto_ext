@@ -38,7 +38,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from auto_ext.core.errors import ConfigError
-from auto_ext.model.common import Base, Slug
+from auto_ext.model.common import Base, Slug, describe_validation_error
 
 __all__ = [
     "FORMAT_KEYS",
@@ -230,7 +230,7 @@ def load_workspace_with_raw(path: Path) -> tuple[WorkspaceConfig, Any]:
     try:
         workspace = WorkspaceConfig.model_validate(payload)
     except ValidationError as exc:
-        raise ConfigError(f"{path}: {exc}") from exc
+        raise ConfigError(f"{path}: {describe_validation_error(exc)}") from exc
     return workspace, data
 
 

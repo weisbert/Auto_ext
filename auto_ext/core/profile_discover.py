@@ -41,6 +41,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
+from pydantic import ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.error import YAMLError
@@ -53,6 +54,7 @@ from auto_ext.core.env import (
     resolve_path_expr,
 )
 from auto_ext.core.errors import ConfigError
+from auto_ext.model.common import describe_validation_error
 from auto_ext.model.pdk import (
     DEFAULT_CDL_INCLUDE_FILE,
     DEFAULT_LAYER_MAP,
@@ -803,7 +805,11 @@ def read_profile_yaml(path: Path) -> PdkProfile:
         )
     try:
         return PdkProfile.model_validate(dict(data))
-    except Exception as exc:  # pydantic ValidationError and anything it wraps
+    except ValidationError as exc:
+        raise ConfigError(
+            f"{path}: not a valid PDK profile: {describe_validation_error(exc)}"
+        ) from exc
+    except Exception as exc:  # anything else the model wraps
         raise ConfigError(f"{path}: not a valid PDK profile: {exc}") from exc
 
 

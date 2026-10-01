@@ -205,6 +205,7 @@ class MainWindow(QMainWindow):
         controller.config_loaded.connect(self._on_config_loaded)
         controller.config_saved.connect(self._on_config_saved)
         controller.config_error.connect(self._on_config_error)
+        controller.load_failed.connect(self._on_load_failed)
         controller.dirty_changed.connect(self._on_dirty_changed)
         controller.health_changed.connect(self._on_health_changed)
 
@@ -319,6 +320,9 @@ class MainWindow(QMainWindow):
         book it just loaded and the window would open already dirty.
         """
 
+        # A load that succeeds after a refused one takes the refusal down.
+        self._cells.set_load_error(None)
+
         controller = self._controller
         self._shell.set_config_path(None if config_dir is None else str(config_dir))
 
@@ -397,6 +401,20 @@ class MainWindow(QMainWindow):
     def _on_config_error(self, message: str) -> None:
         self.errors.append(message)
         self._set_status(f"error - {message.splitlines()[0]}")
+
+    def _on_load_failed(self, config_dir: str, message: str) -> None:
+        """A project that did not load says why, in full, on the Cells table.
+
+        Only while nothing else is loaded: that is when the table is empty and
+        its panel said "No cells yet." with an invitation to add one, the
+        reason sitting in the first line of the status bar. No dialog -- a
+        background load gets none (see
+        ``test_a_config_error_lands_in_the_status_bar_not_a_dialog``), and
+        the explicit Open / Reload paths already raise their own.
+        """
+
+        if self._controller.workspace is None:
+            self._cells.set_load_error(f"{config_dir}\n\n{message}")
 
     def _on_dirty_changed(self, dirty: bool) -> None:
         self._cells.set_unsaved(dirty)

@@ -49,7 +49,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 from auto_ext.core.errors import ConfigError
-from auto_ext.model.common import Base
+from auto_ext.model.common import Base, describe_validation_error
 
 __all__ = [
     "CELLS_FILENAME",
@@ -354,7 +354,7 @@ def load_cells_with_raw(path: Path) -> tuple[CellBook, Any]:
     try:
         book = CellBook.model_validate(payload)
     except ValidationError as exc:
-        raise ConfigError(f"{path}: {exc}") from exc
+        raise ConfigError(f"{path}: {describe_validation_error(exc)}") from exc
     return book, data
 
 

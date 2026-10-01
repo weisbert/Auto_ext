@@ -686,6 +686,15 @@ class CheckHeader(QHeaderView):
         super().mousePressEvent(event)
 
 
+_EMPTY_TITLE = "No cells yet."
+_EMPTY_BODY = (
+    "A cell is one thing you extract: a library, a cell name, its layout "
+    "and schematic views, and the ground net. Add one and pick a recipe — "
+    "that pair is the whole run."
+)
+_LOAD_FAILED_TITLE = "The project could not be loaded."
+
+
 class _EmptyState(QWidget):
     """The guidance panel of artboard ``1i``.
 
@@ -720,16 +729,13 @@ class _EmptyState(QWidget):
         outer.addStretch(1)
         self._panel = panel
 
-        title = QLabel("No cells yet.", panel)
+        title = QLabel(_EMPTY_TITLE, panel)
         title.setObjectName(OBJ_EMPTY_TITLE)
-        body = QLabel(
-            "A cell is one thing you extract: a library, a cell name, its layout "
-            "and schematic views, and the ground net. Add one and pick a recipe — "
-            "that pair is the whole run.",
-            panel,
-        )
+        body = QLabel(_EMPTY_BODY, panel)
         body.setObjectName(OBJ_EMPTY_BODY)
         body.setWordWrap(True)
+        self._title = title
+        self._body = body
 
         buttons = QHBoxLayout()
         buttons.setSpacing(theme.SPACE_MD)
@@ -748,6 +754,7 @@ class _EmptyState(QWidget):
         )
         note.setObjectName(OBJ_EMPTY_NOTE)
         note.setWordWrap(True)
+        self._note = note
 
         self._hint = QLabel("", panel)
         self._hint.setObjectName(OBJ_EMPTY_BODY)
@@ -776,6 +783,30 @@ class _EmptyState(QWidget):
     def set_hint(self, text: str) -> None:
         self._hint.setText(text)
         self._hint.setVisible(bool(text))
+
+    def set_load_error(self, text: str | None) -> None:
+        """Say the project failed to load, and why -- or go back to the guide.
+
+        A rejected ``workspace.yaml`` left the table empty under "No cells
+        yet." and an invitation to add one, while the reason sat in the first
+        line of the status bar. The empty table is a consequence of the error,
+        so the error is what this panel says, in full and selectable.
+        """
+
+        failed = bool(text)
+        self._title.setText(_LOAD_FAILED_TITLE if failed else _EMPTY_TITLE)
+        self._body.setText(text if failed else _EMPTY_BODY)
+        self._body.setTextInteractionFlags(
+            Qt.TextSelectableByMouse if failed else Qt.NoTextInteraction
+        )
+        for widget in (self._add, self._import, self._note):
+            widget.setVisible(not failed)
+
+    def title_text(self) -> str:
+        return self._title.text()
+
+    def body_text(self) -> str:
+        return self._body.text()
 
     def add_button(self) -> QPushButton:
         return self._add
@@ -1263,6 +1294,11 @@ class CellsScreen(QWidget):
         """One extra line under the empty state (a Setup verdict, say)."""
 
         self._empty.set_hint(text)
+
+    def set_load_error(self, text: str | None) -> None:
+        """Show why the project failed to load where the table would be."""
+
+        self._empty.set_load_error(text)
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
         if watched is self._table.viewport() and event.type() == QEvent.Resize:

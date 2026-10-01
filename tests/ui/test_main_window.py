@@ -354,6 +354,43 @@ def test_a_config_error_lands_in_the_status_bar_not_a_dialog(
     assert window.shell.status_left().startswith("error - ")
 
 
+def test_a_project_that_does_not_load_says_why_on_the_cells_table(
+    window: MainWindow, v2_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The video round: a ``{bogus}`` key, and the table said "No cells yet."
+
+    The reason was the first line of the status bar -- "1 validation error for
+    WorkspaceConfig" -- and nothing anywhere said which key or what to write.
+    """
+
+    def explode(*args, **kwargs):  # pragma: no cover - the point is it is not called
+        raise AssertionError("a background load error must not open a dialog")
+
+    monkeypatch.setattr(QMessageBox, "warning", explode)
+    config = v2_config_dir / "config"
+    workspace = config / "workspace.yaml"
+    good = workspace.read_text(encoding="utf-8")
+    import re
+
+    bad = re.sub(r"(?m)^dspf_out_pattern:.*$", "dspf_out_pattern: /out/{cell}_{bogus}.dspf", good)
+    assert bad != good, "the premise: the fixture names a dspf_out_pattern"
+    workspace.write_text(bad, encoding="utf-8")
+
+    window.controller.load(config)
+
+    empty = window.cells_screen.empty_state
+    assert empty.title_text() == "The project could not be loaded."
+    assert "unknown format key {bogus}" in empty.body_text()
+    assert "available keys are" in empty.body_text()
+    assert "validation error for" not in window.shell.status_left()
+    assert "{bogus}" in window.shell.status_left()
+
+    # Twice, differently: the fixed file loads and the panel goes back.
+    workspace.write_text(good, encoding="utf-8")
+    window.controller.load(config)
+    assert empty.title_text() == "No cells yet."
+
+
 def test_an_explicit_reload_failure_does_open_a_dialog(
     loaded_window: MainWindow, monkeypatch: pytest.MonkeyPatch, v2_config_dir: Path
 ) -> None:

@@ -28,9 +28,10 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, StringConstraints, WrapValidator
+from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError, WrapValidator
 
 __all__ = [
+    "describe_validation_error",
     "STAGE_ORDER",
     "AsWritten",
     "Base",
@@ -233,3 +234,31 @@ def utcnow() -> datetime:
     """
 
     return datetime.now(timezone.utc)
+
+
+def describe_validation_error(exc: ValidationError) -> str:
+    """One ``field: reason`` line per problem, the reason first and readable.
+
+    ``str(ValidationError)`` opens with "1 validation error for
+    WorkspaceConfig" and buries the reason under a type tag and a docs URL.
+    Everything that shows only a first line -- the GUI status bar, a log
+    summary -- then showed nothing useful: a workspace naming ``{bogus}``
+    read "... 1 validation error for WorkspaceConfig" while the sentence that
+    says what to write instead sat two lines further down.
+    """
+
+    lines: list[str] = []
+    for error in exc.errors():
+        where = ".".join(str(part) for part in error.get("loc", ())) or "(top level)"
+        message = str(error.get("msg", "")).removeprefix("Value error, ")
+        # A field validator usually names its own field already.
+        line = message if message.startswith(f"{where}:") else f"{where}: {message}"
+        # And the value that was refused, when it is a short scalar: naming
+        # the value as well as the permitted set is what makes it fixable
+        # ("metal_fill: Input should be 'floating', ... (got 'actual')").
+        given = error.get("input")
+        if isinstance(given, (str, int, float, bool)) and len(repr(given)) <= 80:
+            if repr(given) not in line:
+                line += f" (got {given!r})"
+        lines.append(line)
+    return "\n".join(lines) or str(exc)
