@@ -22,12 +22,15 @@ class DropZone(QFrame):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setFrameShape(QFrame.StyledPanel)
+        # Scoped by name: the caption is a QLabel, which is a QFrame, so a
+        # bare ``QFrame`` selector boxed the caption a second time.
+        self.setObjectName("dropZone")
         self._normal_style = (
-            "QFrame { border: 2px dashed #888; min-height: 40px; "
+            "QFrame#dropZone { border: 2px dashed #888; min-height: 40px; "
             "background: #f8f8f8; }"
         )
         self._active_style = (
-            "QFrame { border: 2px dashed #2080d0; min-height: 40px; "
+            "QFrame#dropZone { border: 2px dashed #2080d0; min-height: 40px; "
             "background: #e8f0fa; }"
         )
         self.setStyleSheet(self._normal_style)

@@ -160,7 +160,9 @@ FILE_FILTER = "EDA inputs (*.env *.qci *.cmd *.xml);;All files (*)"
 #: dash is in the design's glyph set.
 UNKNOWN_TARGET_TEXT = "not recognised – choose"
 
+OBJ_BUTTON_BAR = "importButtonBar"
 OBJ_DIALOG_HEADER = "importDialogHeader"
+OBJ_DROP_ZONE = "importDropZone"
 OBJ_FILE_ROW = "importFileRow"
 OBJ_MESSAGE = "importMessage"
 OBJ_SECTION_HEADER = "importSectionHeader"
@@ -378,14 +380,17 @@ class MultiDropZone(DropZone):
 
     def __init__(self, label: str, parent: QWidget | None = None) -> None:
         super().__init__(label, parent)
+        # ``QFrame#name``, not ``QFrame``: QLabel is a QFrame, so a type
+        # selector drew the dashed box a second time around the caption.
+        self.setObjectName(OBJ_DROP_ZONE)
         self._normal_style = (
-            f"QFrame {{ border: 1px dashed {theme.LINE_STRUCTURAL};"
+            f"QFrame#{OBJ_DROP_ZONE} {{ border: 1px dashed {theme.LINE_STRUCTURAL};"
             f" border-radius: {theme.RADIUS}px;"
             f" background: {theme.SURFACE_CARD};"
             f" min-height: {theme.TOOLBAR_HEIGHT}px; }}"
         )
         self._active_style = (
-            f"QFrame {{ border: 1px dashed {theme.ACCENT};"
+            f"QFrame#{OBJ_DROP_ZONE} {{ border: 1px dashed {theme.ACCENT};"
             f" border-radius: {theme.RADIUS}px;"
             f" background: {theme.ACCENT_TINT};"
             f" min-height: {theme.TOOLBAR_HEIGHT}px; }}"
@@ -802,8 +807,8 @@ class RecipeImportDialog(QDialog):
 
         intro = QLabel(
             "Files you already have -- a Quantus command file, a Calibre deck "
-            "setup, an si.env -- become one recipe. Each file is recognised by "
-            "what is in it, never by its name.",
+            "setup, an si.env, a Jivaro .xml -- become one recipe. Each file is "
+            "recognised by what is in it, never by its name.",
             page,
         )
         intro.setWordWrap(True)
@@ -959,9 +964,14 @@ class RecipeImportDialog(QDialog):
     def _build_buttons(self) -> QWidget:
         bar = QFrame(self)
         bar.setFrameShape(QFrame.NoFrame)
+        # Scoped to the bar itself. A bare declaration cascades to every
+        # widget inside, and the buttons then drew the toolbar grey under the
+        # primary style's white text -- Analyse and Import were unreadable.
+        bar.setObjectName(OBJ_BUTTON_BAR)
         bar.setStyleSheet(
-            f"background: {theme.SURFACE_TOOLBAR};"
-            f" border-top: 1px solid {theme.LINE_STRUCTURAL};"
+            f"QFrame#{OBJ_BUTTON_BAR} {{"
+            f" background: {theme.SURFACE_TOOLBAR};"
+            f" border-top: 1px solid {theme.LINE_STRUCTURAL}; }}"
         )
         row = QHBoxLayout(bar)
         row.setContentsMargins(
